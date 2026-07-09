@@ -200,9 +200,44 @@ class CodeRunner:
         return "\n".join(output) or "[ok] No output."
 
 
+class RestrictedCodeRunner(CodeRunner):
+    """CodeRunner with additional runtime import restrictions in the subprocess."""
+
+    def _wrap_in_restricted_env(self, code: str) -> str:
+        restricted_lines = [f"builtins.{name} = None" for name in _RESTRICTED_BUILTINS if name != "__import__"]
+        allowed_modules_literal = ", ".join(repr(m) for m in sorted(self.allowed_modules))
+        wrapper = """
+import builtins, sys
+_ALLOWED_MODULES = {{{allowed_modules}}}
+_ORIGINAL_IMPORT = builtins.__import__
+def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".")[0]
+    if root not in _ALLOWED_MODULES:
+        raise ImportError("Import not allowed: " + name)
+    return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+builtins.__import__ = _restricted_import
+for _mod in sorted(_ALLOWED_MODULES):
+    try:
+        __import__(_mod)
+    except Exception:
+        pass
+sys.path = []
+for _name in list(sys.modules):
+    if _name not in _ALLOWED_MODULES and _name not in ("builtins", "sys", "__main__"):
+        del sys.modules[_name]
+{restricted_builtins}
+{user_code}
+""".format(
+            allowed_modules=allowed_modules_literal,
+            restricted_builtins="\n".join(restricted_lines),
+            user_code=code,
+        )
+        return wrapper
+
+
 # Backwards-compatible function used during registration.
 def run_code(code: str, language: str = "python") -> str:
-    return CodeRunner().run(code, language=language)
+    return RestrictedCodeRunner().run(code, language=language)
 
 
 def build_mcp_tools(mcp: "MCPMultiplexer") -> list[dict[str, Any]]:

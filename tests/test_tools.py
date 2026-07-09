@@ -92,3 +92,23 @@ def test_javascript_returns_error_without_node(runner, monkeypatch):
     result = runner.run("console.log(1)", language="javascript")
     assert result.startswith("[error]")
     assert "Node.js" in result
+
+
+def test_restricted_code_runner_blocks_disallowed_imports():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    result = runner.run("import os\nprint(os.getcwd())")
+    assert "[error]" in result
+
+
+def test_restricted_code_runner_allows_whitelisted_imports():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    result = runner.run("import math\nprint(math.sqrt(16))")
+    assert "4.0" in result
+
+
+def test_run_code_uses_restricted_runner():
+    from agent.tools import run_code
+    result = run_code("import os\nprint('hi')")
+    assert "[error]" in result
