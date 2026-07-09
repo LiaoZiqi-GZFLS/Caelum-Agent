@@ -133,3 +133,19 @@ def test_restricted_runner_allows_datetime():
     runner = RestrictedCodeRunner()
     result = runner.run("import datetime\nprint(datetime.MINYEAR)")
     assert "1" in result
+
+
+def test_restricted_runner_no_globals_leak():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    code = "g = __import__.__globals__\nprint('builtins' in g or 'sys' in g or 'importlib' in g)"
+    result = runner.run(code)
+    assert "True" not in result
+
+
+def test_restricted_runner_no_help_escape():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    code = "g = help.__class__.__call__.__globals__\nprint('os' in g)"
+    result = runner.run(code)
+    assert "True" not in result

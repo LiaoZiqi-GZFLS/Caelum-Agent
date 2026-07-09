@@ -69,13 +69,17 @@ DISALLOWED_NAMES = {
 # Runtime builtins that may still be present in a subprocess but that we do not
 # want user code to rely on. This list is advisory; AST validation catches direct
 # calls, but sandboxing happens in the subprocess with PYTHONSAFEPATH.
-_RESTRICTED_BUILTINS = [
+_RESTRICTED_BUILTINS = {
     "__import__",
     "open",
     "exec",
     "eval",
     "compile",
-]
+    "help",
+    "license",
+    "copyright",
+    "credits",
+}
 
 
 class UnsafeCodeError(Exception):
@@ -220,47 +224,64 @@ class RestrictedCodeRunner(CodeRunner):
 
     def _wrap_in_restricted_env(self, code: str) -> str:
         """Wrap user code so it runs in a fresh namespace with restricted imports and builtins."""
+        import textwrap
+
         allowed_modules = sorted(self.allowed_modules)
         blocked_builtins = sorted(_RESTRICTED_BUILTINS)
-        wrapper = f"""
-import builtins, importlib, sys
-_ALLOWED_MODULES = {set(allowed_modules)!r}
+        wrapper = textwrap.dedent(f'''
+        import builtins, importlib, sys
+        _ALLOWED_MODULES = frozenset({allowed_modules!r})
+        _BLOCKED_BUILTINS = frozenset({blocked_builtins!r})
+        _ORIGINAL_IMPORT = builtins.__import__
 
-# Pre-load whitelisted modules (and their stdlib dependencies) before locking
-# down imports, so the user code can use them without needing sys.path.
-for _mod in sorted(_ALLOWED_MODULES):
-    try:
-        importlib.import_module(_mod)
-    except Exception:
-        pass
+        # Pre-load whitelisted modules (and their stdlib dependencies) before
+        # locking down imports, so user code can use them without needing sys.path.
+        for _mod in sorted(_ALLOWED_MODULES):
+            try:
+                importlib.import_module(_mod)
+            except Exception:
+                pass
 
-class _RestrictedFinder:
-    def find_spec(self, name, path, target=None):
-        root = name.split(".")[0]
-        if root not in _ALLOWED_MODULES:
-            raise ModuleNotFoundError("Import not allowed: " + name)
-        return None
+        class _RestrictedFinder:
+            def find_spec(self, name, path, target=None):
+                root = name.split(".")[0]
+                if root not in _ALLOWED_MODULES:
+                    raise ModuleNotFoundError("Import not allowed: " + name)
+                return None
 
-sys.meta_path.insert(0, _RestrictedFinder())
-sys.path = []
+        sys.meta_path.insert(0, _RestrictedFinder())
+        sys.path = []
 
-_BLOCKED_BUILTINS = {set(blocked_builtins)!r}
-_safe_builtins = {{k: v for k, v in builtins.__dict__.items() if k not in _BLOCKED_BUILTINS}}
+        _safe_builtins = {{k: v for k, v in builtins.__dict__.items() if k not in _BLOCKED_BUILTINS}}
 
-# Import statements need __import__ in builtins, but the original built-in is
-# unrestricted. Replace it with a whitelist-aware wrapper while keeping the
-# meta_path finder as the primary gate.
-def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
-    root = name.split(".")[0]
-    if root not in _ALLOWED_MODULES:
-        raise ImportError("Import not allowed: " + name)
-    return builtins.__import__(name, globals, locals, fromlist, level)
+        # Use a default argument to capture the original import function so the
+        # wrapper function does not close over module globals.
+        def _restricted_import(
+            name, globals=None, locals=None, fromlist=(), level=0,
+            _orig_import=_ORIGINAL_IMPORT, _allowed=_ALLOWED_MODULES,
+        ):
+            root = name.split(".")[0]
+            if root not in _allowed:
+                raise ImportError("Import not allowed: " + name)
+            return _orig_import(name, globals, locals, fromlist, level)
 
-_safe_builtins["__import__"] = _restricted_import
+        _safe_builtins["__import__"] = _restricted_import
 
-# Execute user code in a fresh namespace so helper variables above do not leak.
-exec(compile({code!r}, "<sandbox>", "exec"), {{"__builtins__": _safe_builtins}})
-"""
+        # Capture exec before we strip module builtins; otherwise the exec call
+        # below would not be able to resolve the builtin name.
+        _exec = exec
+
+        # Remove dangerous names from the wrapper module globals so that
+        # __import__.__globals__ cannot be used to escape the sandbox.
+        for _name in (
+            "__builtins__", "builtins", "importlib", "sys", "_RestrictedFinder",
+            "_ORIGINAL_IMPORT", "_BLOCKED_BUILTINS",
+        ):
+            globals().pop(_name, None)
+
+        # Execute user code in a fresh namespace so helper variables above do not leak.
+        _exec(compile({code!r}, "<sandbox>", "exec"), {{"__builtins__": _safe_builtins}})
+        ''')
         return wrapper
 
 
