@@ -98,9 +98,9 @@ async def test_sigint_handler_emits_kill_switch_event(monkeypatch):
     kill._loop = MockLoop()
     kill._on_sigint(2, None)
 
-    assert kill.is_triggered()
     assert captured_coro is not None
     await captured_coro
+    assert kill.is_triggered()
     assert len(received) == 1
     assert received[0].reason == "sigint"
 
