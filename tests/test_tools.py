@@ -112,3 +112,24 @@ def test_run_code_uses_restricted_runner():
     from agent.tools import run_code
     result = run_code("import os\nprint('hi')")
     assert "[error]" in result
+
+
+def test_restricted_runner_no_original_import_leak():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    result = runner.run("print(_ORIGINAL_IMPORT('os').getcwd())")
+    assert "[error]" in result or "[stderr]" in result
+
+
+def test_restricted_runner_allows_json():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    result = runner.run("import json\nprint(json.dumps({'a': 1}))")
+    assert '{"a": 1}' in result
+
+
+def test_restricted_runner_allows_datetime():
+    from agent.tools import RestrictedCodeRunner
+    runner = RestrictedCodeRunner()
+    result = runner.run("import datetime\nprint(datetime.MINYEAR)")
+    assert "1" in result

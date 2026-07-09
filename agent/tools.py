@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -96,11 +97,16 @@ class CodeRunner:
         self.allowed_modules = allowed_modules or ALLOWED_MODULES
         self.disallowed_names = disallowed_names or DISALLOWED_NAMES
 
-    def run(self, code: str, language: str = "python") -> str:
+    def run(
+        self,
+        code: str,
+        language: str = "python",
+        env: dict[str, str] | None = None,
+    ) -> str:
         """Run code in a sandbox and return stdout/stderr."""
         language = language.lower()
         if language == "javascript":
-            return self._run_javascript(code)
+            return self._run_javascript(code, env=env)
         if language != "python":
             return f"[error] Language {language} is not supported."
 
@@ -120,6 +126,7 @@ class CodeRunner:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return "[error] Code execution timed out."
@@ -173,7 +180,7 @@ class CodeRunner:
         restricted_lines = [f"{name} = None" for name in _RESTRICTED_BUILTINS]
         return "\n".join(restricted_lines + ["", code])
 
-    def _run_javascript(self, code: str) -> str:
+    def _run_javascript(self, code: str, env: dict[str, str] | None = None) -> str:
         """Run JavaScript via node if available, otherwise return an error."""
         if len(code) > self.max_code_length:
             return "[error] Code snippet too long."
@@ -186,6 +193,7 @@ class CodeRunner:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return "[error] Code execution timed out."
@@ -203,35 +211,56 @@ class CodeRunner:
 class RestrictedCodeRunner(CodeRunner):
     """CodeRunner with additional runtime import restrictions in the subprocess."""
 
+    def run(self, code: str, language: str = "python") -> str:
+        return super().run(
+            code,
+            language=language,
+            env={**os.environ, "PYTHONSAFEPATH": "1"},
+        )
+
     def _wrap_in_restricted_env(self, code: str) -> str:
-        restricted_lines = [f"builtins.{name} = None" for name in _RESTRICTED_BUILTINS if name != "__import__"]
-        allowed_modules_literal = ", ".join(repr(m) for m in sorted(self.allowed_modules))
-        wrapper = """
-import builtins, sys
-_ALLOWED_MODULES = {{{allowed_modules}}}
-_ORIGINAL_IMPORT = builtins.__import__
+        """Wrap user code so it runs in a fresh namespace with restricted imports and builtins."""
+        allowed_modules = sorted(self.allowed_modules)
+        blocked_builtins = sorted(_RESTRICTED_BUILTINS)
+        wrapper = f"""
+import builtins, importlib, sys
+_ALLOWED_MODULES = {set(allowed_modules)!r}
+
+# Pre-load whitelisted modules (and their stdlib dependencies) before locking
+# down imports, so the user code can use them without needing sys.path.
+for _mod in sorted(_ALLOWED_MODULES):
+    try:
+        importlib.import_module(_mod)
+    except Exception:
+        pass
+
+class _RestrictedFinder:
+    def find_spec(self, name, path, target=None):
+        root = name.split(".")[0]
+        if root not in _ALLOWED_MODULES:
+            raise ModuleNotFoundError("Import not allowed: " + name)
+        return None
+
+sys.meta_path.insert(0, _RestrictedFinder())
+sys.path = []
+
+_BLOCKED_BUILTINS = {set(blocked_builtins)!r}
+_safe_builtins = {{k: v for k, v in builtins.__dict__.items() if k not in _BLOCKED_BUILTINS}}
+
+# Import statements need __import__ in builtins, but the original built-in is
+# unrestricted. Replace it with a whitelist-aware wrapper while keeping the
+# meta_path finder as the primary gate.
 def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
     root = name.split(".")[0]
     if root not in _ALLOWED_MODULES:
         raise ImportError("Import not allowed: " + name)
-    return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
-builtins.__import__ = _restricted_import
-for _mod in sorted(_ALLOWED_MODULES):
-    try:
-        __import__(_mod)
-    except Exception:
-        pass
-sys.path = []
-for _name in list(sys.modules):
-    if _name not in _ALLOWED_MODULES and _name not in ("builtins", "sys", "__main__"):
-        del sys.modules[_name]
-{restricted_builtins}
-{user_code}
-""".format(
-            allowed_modules=allowed_modules_literal,
-            restricted_builtins="\n".join(restricted_lines),
-            user_code=code,
-        )
+    return builtins.__import__(name, globals, locals, fromlist, level)
+
+_safe_builtins["__import__"] = _restricted_import
+
+# Execute user code in a fresh namespace so helper variables above do not leak.
+exec(compile({code!r}, "<sandbox>", "exec"), {{"__builtins__": _safe_builtins}})
+"""
         return wrapper
 
 
