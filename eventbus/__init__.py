@@ -19,7 +19,7 @@ class Event:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-EventHandler = Callable[[Event], Awaitable[None] | None]
+EventHandler = Callable[[Any], Awaitable[None] | None]
 MiddlewareNext = Callable[[Any], Awaitable[None]]
 Middleware = Callable[[Any, MiddlewareNext], Awaitable[None]]
 

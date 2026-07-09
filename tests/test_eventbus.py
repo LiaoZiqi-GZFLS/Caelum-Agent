@@ -107,8 +107,8 @@ async def test_event_priority_order():
         def __lt__(self, other):
             return self.priority < other.priority
 
-    await bus.emit(PriorityEvent("high", priority=1))
     await bus.emit(PriorityEvent("low", priority=10))
+    await bus.emit(PriorityEvent("high", priority=1))
     await bus.shutdown()
 
     assert results == ["high", "low"]
