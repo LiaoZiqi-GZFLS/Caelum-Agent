@@ -153,13 +153,21 @@ class MCPClient:
 
 
 class MCPMultiplexer:
-    def __init__(self, config: MCPConfig) -> None:
+    def __init__(
+        self,
+        config: MCPConfig,
+        health_interval: float = 30.0,
+        health_enabled: bool = True,
+    ) -> None:
         self.config = config
+        self.health_interval = health_interval
+        self.health_enabled = health_enabled
         self.clients: dict[str, MCPClient] = {
             "playwright": MCPClient("playwright", config.playwright),
             "windows": MCPClient("windows", config.windows),
             "filesystem": MCPClient("filesystem", config.filesystem),
         }
+        self._health_task: asyncio.Task | None = None
 
     async def connect_all(self) -> None:
         results = await asyncio.gather(
@@ -174,12 +182,64 @@ class MCPMultiplexer:
                     result,
                     extra={"server": client.name},
                 )
+        if self.health_enabled:
+            self._health_task = asyncio.create_task(self._health_monitor())
 
     async def disconnect_all(self) -> None:
+        if self._health_task is not None:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            self._health_task = None
         await asyncio.gather(
             *(c.disconnect() for c in self.clients.values()),
             return_exceptions=True,
         )
+
+    async def _health_monitor(self, interval: float | None = None) -> None:
+        interval = interval if interval is not None else self.health_interval
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                for client in self.clients.values():
+                    if not client._connected:
+                        continue
+                    try:
+                        ok = await client.ping()
+                    except Exception as exc:
+                        logger.warning(
+                            "MCP health ping for %s raised: %s",
+                            client.name,
+                            exc,
+                            extra={"server": client.name},
+                        )
+                        ok = False
+                    if not ok:
+                        logger.warning(
+                            "MCP client %s unhealthy; reconnecting",
+                            client.name,
+                            extra={"server": client.name},
+                        )
+                        try:
+                            reconnected = await client.reconnect()
+                        except Exception as exc:
+                            logger.error(
+                                "MCP client %s reconnect failed: %s",
+                                client.name,
+                                exc,
+                                extra={"server": client.name},
+                            )
+                        else:
+                            if not reconnected:
+                                logger.error(
+                                    "MCP client %s reconnect failed",
+                                    client.name,
+                                    extra={"server": client.name},
+                                )
+        except asyncio.CancelledError:
+            raise
 
     async def call(self, server: str, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
         client = self.clients.get(server)

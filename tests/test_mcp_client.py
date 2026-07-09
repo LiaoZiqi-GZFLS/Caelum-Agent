@@ -1,8 +1,11 @@
 """Tests for MCP client data structures and tool mapping."""
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from agent.config import MCPServerConfig
+from agent.config import MCPConfig, MCPServerConfig
 from agent.tools import build_mcp_tools
 from mcp_client import MCPClient, MCPMultiplexer, ToolResult
 
@@ -25,7 +28,6 @@ def test_build_mcp_tools():
         "windows": MCPServerConfig(command="windows-mcp", args=["serve"]),
         "filesystem": MCPServerConfig(command="npx", args=["-y", "filesystem-mcp", "."]),
     }
-    from agent.config import MCPConfig
 
     mcp = MCPMultiplexer(MCPConfig(**config))
     mcp.clients["playwright"]._tools = [
@@ -33,3 +35,41 @@ def test_build_mcp_tools():
     ]
     tools = build_mcp_tools(mcp)
     assert any(t["function"]["name"] == "playwright__browser_navigate" for t in tools)
+
+
+@pytest.mark.asyncio
+async def test_health_monitor_reconnects_on_failure():
+    client = MCPClient("test", {"command": "echo", "args": [], "env": {}})
+    client._connected = True
+    client.session = MagicMock()
+    client.ping = AsyncMock(side_effect=[True, False, True])
+    client.reconnect = AsyncMock(return_value=True)
+
+    multiplexer = MCPMultiplexer.__new__(MCPMultiplexer)
+    multiplexer.clients = {"test": client}
+    multiplexer.health_interval = 0.05
+    multiplexer._health_task = None
+
+    monitor = asyncio.create_task(multiplexer._health_monitor())
+    await asyncio.sleep(0.15)
+    monitor.cancel()
+    try:
+        await monitor
+    except asyncio.CancelledError:
+        pass
+
+    client.reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_all_cancels_health_monitor():
+    config = MCPConfig(
+        playwright=MCPServerConfig(command="echo", args=[]),
+        windows=MCPServerConfig(command="echo", args=[]),
+        filesystem=MCPServerConfig(command="echo", args=[]),
+    )
+    multiplexer = MCPMultiplexer(config, health_interval=0.05)
+    multiplexer._health_task = asyncio.create_task(multiplexer._health_monitor())
+    await asyncio.sleep(0.01)
+    await multiplexer.disconnect_all()
+    assert multiplexer._health_task is None or multiplexer._health_task.done()
