@@ -1,7 +1,9 @@
 """Tests for kill switch integration."""
 
 from pathlib import Path
+from typing import Any
 
+import asyncio
 import pytest
 
 from agent.config import Config, LLMConfig, MCPConfig, MCPServerConfig
@@ -40,6 +42,49 @@ def test_kill_switch_event_handler_sets_cancel(orchestrator):
 
     asyncio.run(orchestrator._on_kill_switch(KillSwitchTriggered(reason="test")))
     assert orchestrator._cancel_event.is_set()
+
+
+def test_is_triggered_and_reset():
+    eventbus = EventBus()
+    kill = KillSwitch(eventbus)
+    assert not kill.is_triggered()
+    kill._triggered.set()
+    assert kill.is_triggered()
+    kill.reset()
+    assert not kill.is_triggered()
+
+
+@pytest.mark.asyncio
+async def test_sigint_handler_emits_kill_switch_event(monkeypatch):
+    eventbus = EventBus()
+    kill = KillSwitch(eventbus)
+    received: list[KillSwitchTriggered] = []
+
+    async def handler(event: KillSwitchTriggered) -> None:
+        received.append(event)
+
+    eventbus.subscribe("KillSwitchTriggered", handler)
+
+    captured_coro: Any = None
+
+    def fake_run_coroutine_threadsafe(coro: Any, loop: Any) -> None:
+        nonlocal captured_coro
+        captured_coro = coro
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
+
+    class MockLoop:
+        def is_running(self) -> bool:
+            return True
+
+    kill._loop = MockLoop()
+    kill._on_sigint(2, None)
+
+    assert kill.is_triggered()
+    assert captured_coro is not None
+    await captured_coro
+    assert len(received) == 1
+    assert received[0].reason == "sigint"
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,10 @@ async def _run_repl(agent: AgentOrchestrator, logger: Any) -> int:
         while True:
             try:
                 user_input = await loop.run_in_executor(None, input, "> ")
+            except KeyboardInterrupt:
+                logger.info("Kill switch triggered via Ctrl+C")
+                await agent.eventbus.emit(KillSwitchTriggered(reason="ctrl+c"))
+                continue
             except EOFError:
                 break
             user_input = user_input.strip()

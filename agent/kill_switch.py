@@ -1,9 +1,11 @@
-"""Kill switch via global keyboard listener."""
+"""Kill switch via global keyboard listener and SIGINT handler."""
 
 from __future__ import annotations
 
 import asyncio
+import signal
 from threading import Thread
+from typing import Any
 
 from pynput import keyboard
 
@@ -17,6 +19,8 @@ class KillSwitch:
         self._listener: keyboard.Listener | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pressed: set[keyboard.Key | keyboard.KeyCode] = set()
+        self._triggered = asyncio.Event()
+        self._original_sigint: signal.Handlers | None = None
 
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -25,11 +29,24 @@ class KillSwitch:
             on_release=self._on_release,
         )
         self._listener.start()
+        self._original_sigint = signal.signal(signal.SIGINT, self._on_sigint)
 
     def stop(self) -> None:
+        if self._original_sigint is not None:
+            signal.signal(signal.SIGINT, self._original_sigint)
+            self._original_sigint = None
         if self._listener:
             self._listener.stop()
             self._listener = None
+
+    def is_triggered(self) -> bool:
+        return self._triggered.is_set()
+
+    def reset(self) -> None:
+        self._triggered.clear()
+
+    def _on_sigint(self, signum: int, frame: Any) -> None:
+        self._trigger("sigint")
 
     def _on_press(self, key: keyboard.Key | keyboard.KeyCode) -> None:
         self._pressed.add(key)
@@ -47,6 +64,7 @@ class KillSwitch:
         return bool(ctrl_keys & self._pressed)
 
     def _trigger(self, reason: str) -> None:
+        self._triggered.set()
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
                 self.eventbus.emit(KillSwitchTriggered(reason=reason)),
