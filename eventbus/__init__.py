@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine
+from typing import Any, Awaitable, Callable, Coroutine
 
 
 @dataclass(frozen=True)
@@ -19,8 +19,9 @@ class Event:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-EventHandler = Callable[[Event], Coroutine[Any, Any, None]]
-Middleware = Callable[[Any, EventHandler], Coroutine[Any, Any, None]]
+EventHandler = Callable[[Event], Awaitable[None] | None]
+MiddlewareNext = Callable[[Any], Awaitable[None]]
+Middleware = Callable[[Any, MiddlewareNext], Awaitable[None]]
 
 
 @dataclass(order=True)
@@ -93,6 +94,8 @@ class EventBus:
                     await self._worker
                 except asyncio.CancelledError:
                     pass
+        self._worker = None
+        self._shutdown_event.clear()
 
     async def _process_loop(self) -> None:
         while not (self._shutdown_event.is_set() and self._queue.empty()):
@@ -130,7 +133,7 @@ class EventBus:
             if asyncio.iscoroutinefunction(handler):
                 await handler(event)
             else:
-                handler(event)
+                await asyncio.to_thread(handler, event)
         except Exception as exc:
             event_label = getattr(event, "type", type(event).__name__)
             print(f"[eventbus] handler error for {event_label}: {exc}")

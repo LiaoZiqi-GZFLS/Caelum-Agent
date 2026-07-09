@@ -93,6 +93,10 @@ async def test_event_priority_order():
         await asyncio.sleep(0.05)
         results.append(event.value)
 
+    async def pass_through(event, handler):
+        await handler(event)
+
+    bus.add_middleware(pass_through)
     bus.subscribe("PriorityEvent", slow_handler)
 
     class PriorityEvent:
