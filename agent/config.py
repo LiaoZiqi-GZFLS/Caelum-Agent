@@ -36,9 +36,9 @@ class MCPServerConfig(BaseModel):
 
 
 class MCPConfig(BaseModel):
-    playwright: MCPServerConfig
-    windows: MCPServerConfig
-    filesystem: MCPServerConfig
+    playwright: MCPServerConfig | None = None
+    windows: MCPServerConfig | None = None
+    filesystem: MCPServerConfig | None = None
 
 
 class UIDetectorConfig(BaseModel):
@@ -67,6 +67,11 @@ class OCRConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     sqlite_path: str = "./data/memory.db"
+    use_kimi_memory: bool = True
+
+
+class ReflectionConfig(BaseModel):
+    use_rethink: bool = True
 
 
 class SecurityConfig(BaseModel):
@@ -107,11 +112,12 @@ class KillSwitchConfig(BaseModel):
 
 class Config(BaseModel):
     llm: LLMConfig
-    mcp_servers: MCPConfig
+    mcp_servers: MCPConfig = Field(default_factory=MCPConfig)
     ui_detector: UIDetectorConfig = Field(default_factory=UIDetectorConfig)
     screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

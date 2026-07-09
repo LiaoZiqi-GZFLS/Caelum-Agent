@@ -88,6 +88,14 @@ ocr:
 memory:
   # Local SQLite fallback for preferences, reflections, skills, audit log, state.
   sqlite_path: ./data/memory.db
+  # Use Kimi's built-in memory Formula tool (moonshot/memory) when registered.
+  # Falls back to SQLite if the tool is unavailable or disabled.
+  use_kimi_memory: true
+
+reflection:
+  # Use Kimi's built-in rethink Formula tool (moonshot/rethink) for reflection.
+  # Falls back to local SQLite records if the tool is unavailable or disabled.
+  use_rethink: true
 
 security:
   # Default action level for operations not otherwise classified.

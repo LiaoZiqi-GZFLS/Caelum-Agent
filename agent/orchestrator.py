@@ -14,6 +14,7 @@ import openai
 
 from agent.config import Config
 from agent.kill_switch import KillSwitch
+from agent.kimi_memory import KimiMemoryClient
 from agent.llm_client import LLMClient
 from agent.memory import MemoryStore
 from agent.perception import PerceptionModule
@@ -67,13 +68,17 @@ class AgentOrchestrator:
         self.kill_switch = kill_switch
         self.ui_detector: Any | None = None
         self.state = AgentStateMachine(eventbus)
+        self._kimi_client: Any | None = None
+        if config.memory.use_kimi_memory or config.reflection.use_rethink:
+            self._kimi_client = KimiMemoryClient(llm)
         self.memory = memory or MemoryStore(
             db_path=config.sqlite_path_absolute(),
             skills_dir=config.skills_dir_absolute(),
             vector_dir=config.cache_dir_absolute() / "chroma",
             audit_log_path=config.audit_log_absolute(),
+            kimi=self._kimi_client,
         )
-        self.reflection = reflection or ReflectionEngine(config, self.memory)
+        self.reflection = reflection or ReflectionEngine(config, self.memory, kimi=self._kimi_client)
         self.perception = perception or PerceptionModule(config, mcp=mcp)
         self.security = security or SecurityGuard(
             config.security,
@@ -322,7 +327,7 @@ class AgentOrchestrator:
             if self._is_same_ui_loop(perception.ui_hash):
                 loops = len(self._recent_hashes)
                 reason = f"UI state unchanged for {loops} loops"
-                self.reflection.record(
+                await self.reflection.record(
                     task_summary=user_input,
                     failure_reason=reason,
                     fix_action="Change the approach or ask for human guidance.",
@@ -365,7 +370,7 @@ class AgentOrchestrator:
                 else:
                     await self.state.transition("REFLECT", task_id=self.task_id)
                     reflection = await self._reflect()
-                    self.reflection.record(
+                    await self.reflection.record(
                         task_summary=user_input,
                         failure_reason="Verification failed",
                         fix_action=reflection,
@@ -373,7 +378,7 @@ class AgentOrchestrator:
                     self.history.append({"role": "assistant", "content": reflection})
                     await self.state.transition("PLANNING", task_id=self.task_id)
             except TransientAPIError as exc:
-                self.reflection.record(
+                await self.reflection.record(
                     task_summary=user_input,
                     failure_reason=str(exc),
                     fix_action="Wait for API recovery and retry.",
@@ -385,7 +390,7 @@ class AgentOrchestrator:
                 return str(exc)
             except Exception as exc:
                 self.consecutive_action_failures += 1
-                self.reflection.record(
+                await self.reflection.record(
                     task_summary=user_input,
                     failure_reason=str(exc),
                     fix_action="Review the error and retry.",
@@ -395,7 +400,7 @@ class AgentOrchestrator:
 
         if self.state.current_state not in {"COMPLETED", "ERROR"}:
             await self.state.transition("STUCK", task_id=self.task_id)
-            self.reflection.record(
+            await self.reflection.record(
                 task_summary=user_input,
                 failure_reason="Exceeded maximum loop count",
                 fix_action="Break task into smaller steps.",

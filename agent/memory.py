@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any
 
 from chromadb import PersistentClient
 
+
+logger = logging.getLogger("caelum.memory")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_preferences (
@@ -52,11 +55,13 @@ class MemoryStore:
         skills_dir: Path | str,
         vector_dir: Path | str,
         audit_log_path: Path | str | None = None,
+        kimi: Any | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.skills_dir = Path(skills_dir)
         self.vector_dir = Path(vector_dir)
         self.audit_log_path = Path(audit_log_path) if audit_log_path else None
+        self.kimi = kimi
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.vector_dir.mkdir(parents=True, exist_ok=True)
         self._init_sqlite()
@@ -84,6 +89,25 @@ class MemoryStore:
                 "SELECT value FROM user_preferences WHERE key = ?", (key,)
             ).fetchone()
         return row[0] if row else default
+
+    async def aset_preference(self, key: str, value: str) -> None:
+        if self.kimi is not None:
+            try:
+                await self.kimi.set_memory(key, value)
+                return
+            except Exception as exc:  # pragma: no cover - fallback path
+                logger.warning("Kimi memory set failed, falling back to SQLite: %s", exc)
+        self.set_preference(key, value)
+
+    async def aget_preference(self, key: str, default: str | None = None) -> str | None:
+        if self.kimi is not None:
+            try:
+                value = await self.kimi.get_memory_exact(key)
+                if value is not None:
+                    return value
+            except Exception as exc:  # pragma: no cover - fallback path
+                logger.warning("Kimi memory get failed, falling back to SQLite: %s", exc)
+        return self.get_preference(key, default)
 
     def add_reflection(
         self, task_summary: str, failure_reason: str | None, fix_action: str | None

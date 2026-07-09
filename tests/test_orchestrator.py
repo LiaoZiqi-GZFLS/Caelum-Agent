@@ -147,7 +147,7 @@ class FakeReflection(ReflectionEngine):
     def build_context(self, user_input: str) -> str:
         return ""
 
-    def record(self, task_summary: str, failure_reason: str, fix_action: str) -> None:
+    async def record(self, task_summary: str, failure_reason: str, fix_action: str) -> None:
         self.recorded.append({
             "task_summary": task_summary,
             "failure_reason": failure_reason,
@@ -707,3 +707,23 @@ async def test_run_task_skill_learner_failure_is_ignored(config, eventbus, kills
 
     assert result == "Files: a.txt, b.txt."
     assert agent.state.current_state == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_creates_kimi_memory_client(config, eventbus, killswitch):
+    from agent.kimi_memory import KimiMemoryClient
+    llm = FakeLLM([])
+    llm.tools = ["memory", "rethink"]
+    agent = AgentOrchestrator(config, eventbus, llm, FakeMCP(), killswitch)
+    assert isinstance(agent.memory.kimi, KimiMemoryClient)
+    assert agent.reflection.kimi is agent.memory.kimi
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_kimi_memory_client_when_disabled(config, eventbus, killswitch):
+    config.memory.use_kimi_memory = False
+    config.reflection.use_rethink = False
+    agent = AgentOrchestrator(config, eventbus, FakeLLM([]), FakeMCP(), killswitch)
+    assert agent._kimi_client is None
+    assert agent.memory.kimi is None
+    assert agent.reflection.kimi is None
