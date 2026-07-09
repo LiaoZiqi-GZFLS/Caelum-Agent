@@ -224,3 +224,6 @@ __marimo__/
 # Project-specific local state
 /data/
 /models/
+
+# Agent-generated plans and scratch docs
+/docs/superpowers/
