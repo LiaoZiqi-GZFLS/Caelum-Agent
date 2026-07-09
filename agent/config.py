@@ -74,6 +74,16 @@ class SecurityConfig(BaseModel):
     auto_execute_levels: list[str] = Field(default_factory=lambda: ["read", "write_safe"])
     confirm_levels: list[str] = Field(default_factory=lambda: ["write_risky"])
     destructive_requires_approval: bool = True
+    # When True, destructive actions require the user to type the action summary
+    # to confirm, not just a y/n prompt.
+    destructive_requires_typed_confirmation: bool = True
+
+
+class SkillConfig(BaseModel):
+    # Cosine similarity threshold for merging a new trace into an existing skill.
+    similarity_threshold: float = 0.85
+    # Directory for auto-learned skills, relative to skills_dir.
+    learned_subdir: str = "learned"
 
 
 class LoggingConfig(BaseModel):
@@ -105,6 +115,7 @@ class Config(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
+    skills: SkillConfig = Field(default_factory=SkillConfig)
     kill_switch: KillSwitchConfig = Field(default_factory=KillSwitchConfig)
 
     @classmethod
@@ -126,6 +137,12 @@ class Config(BaseModel):
 
     def skills_dir_absolute(self) -> Path:
         return Path(self.paths.skills_dir).expanduser().resolve()
+
+    def learned_skills_dir_absolute(self) -> Path:
+        return self.skills_dir_absolute() / self.skills.learned_subdir
+
+    def audit_log_absolute(self) -> Path:
+        return Path(self.paths.audit_log).expanduser().resolve()
 
 
 def load_config(path: Path | str | None = None) -> Config:

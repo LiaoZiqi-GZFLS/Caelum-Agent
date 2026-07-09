@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from agent.memory import MemoryStore
+from agent.security import SecurityGuard
 from agent.skills import SkillLearner
 
 
@@ -113,6 +114,62 @@ async def test_learn_uses_llm_when_available(
     assert result["name"] == "learned/launch-calculator"
     content = Path(result["path"]).read_text(encoding="utf-8")
     assert "Open the calculator app." in content
+
+
+def test_memory_store_writes_audit_file(tmp_path: Path) -> None:
+    audit_file = tmp_path / "audit.log"
+    memory = MemoryStore(
+        db_path=tmp_path / "memory.db",
+        skills_dir=tmp_path / "skills",
+        vector_dir=tmp_path / "chroma",
+        audit_log_path=audit_file,
+    )
+    memory.audit("read", "test", "noop", "ok")
+
+    assert audit_file.exists()
+    content = audit_file.read_text(encoding="utf-8")
+    assert "read" in content
+    assert "test" in content
+    assert "noop" in content
+
+
+def test_security_typed_confirmation_blocks_on_mismatch(monkeypatch) -> None:
+    from agent.config import SecurityConfig
+
+    calls = []
+
+    def callback(summary: str, action: dict) -> bool:
+        calls.append((summary, action))
+        return True
+
+    config = SecurityConfig(
+        destructive_requires_approval=True,
+        destructive_requires_typed_confirmation=True,
+    )
+    guard = SecurityGuard(config, confirm_callback=callback)
+    action = {"server": "windows", "tool": "delete", "args": {"path": "x"}}
+    monkeypatch.setattr("builtins.input", lambda _: "wrong summary")
+    approval = guard.check("destructive", action)
+
+    assert approval.allowed is False
+    assert approval.reason == "human-denied"
+
+
+def test_security_typed_confirmation_allows_on_match(monkeypatch) -> None:
+    from agent.config import SecurityConfig
+
+    config = SecurityConfig(
+        destructive_requires_approval=True,
+        destructive_requires_typed_confirmation=True,
+    )
+    guard = SecurityGuard(config, confirm_callback=lambda s, a: True)
+    action = {"server": "windows", "tool": "delete", "args": {"path": "x"}}
+    expected_summary = guard._summarize(action)
+    monkeypatch.setattr("builtins.input", lambda _: expected_summary)
+    approval = guard.check("destructive", action)
+
+    assert approval.allowed is True
+    assert approval.reason == "human-confirmed"
 
 
 @pytest.mark.asyncio

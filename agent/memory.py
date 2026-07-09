@@ -51,10 +51,12 @@ class MemoryStore:
         db_path: Path | str,
         skills_dir: Path | str,
         vector_dir: Path | str,
+        audit_log_path: Path | str | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.skills_dir = Path(skills_dir)
         self.vector_dir = Path(vector_dir)
+        self.audit_log_path = Path(audit_log_path) if audit_log_path else None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.vector_dir.mkdir(parents=True, exist_ok=True)
         self._init_sqlite()
@@ -105,11 +107,27 @@ class MemoryStore:
     def audit(
         self, level: str, actor: str, action: str, result: str | None = None
     ) -> None:
+        ts = self._now()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "INSERT INTO audit_log (timestamp, level, actor, action, result) VALUES (?, ?, ?, ?, ?)",
-                (self._now(), level, actor, action, result),
+                (ts, level, actor, action, result),
             )
+        if self.audit_log_path is not None:
+            self._append_audit_file(ts, level, actor, action, result)
+
+    def _append_audit_file(
+        self,
+        ts: str,
+        level: str,
+        actor: str,
+        action: str,
+        result: str | None,
+    ) -> None:
+        self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        line = f"{ts}\t{level}\t{actor}\t{action}\t{result or ''}\n"
+        with self.audit_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
 
     def set_state(self, key: str, value: str) -> None:
         with sqlite3.connect(self.db_path) as conn:

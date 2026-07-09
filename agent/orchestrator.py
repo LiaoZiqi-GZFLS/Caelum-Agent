@@ -71,6 +71,7 @@ class AgentOrchestrator:
             db_path=config.sqlite_path_absolute(),
             skills_dir=config.skills_dir_absolute(),
             vector_dir=config.cache_dir_absolute() / "chroma",
+            audit_log_path=config.audit_log_absolute(),
         )
         self.reflection = reflection or ReflectionEngine(config, self.memory)
         self.perception = perception or PerceptionModule(config, mcp=mcp)
@@ -78,7 +79,12 @@ class AgentOrchestrator:
             config.security,
             confirm_callback=self._request_human_confirmation,
         )
-        self.skill_learner = skill_learner
+        self.skill_learner = skill_learner or SkillLearner(
+            skills_dir=config.skills_dir_absolute(),
+            memory=self.memory,
+            llm_client=self.llm,
+            similarity_threshold=config.skills.similarity_threshold,
+        )
         self.history: list[dict[str, Any]] = []
         self.task_id: str | None = None
         self.current_instruction: str = ""

@@ -44,9 +44,26 @@ class SecurityGuard:
                 reason=f"{action_level}: {summary} (no confirmation handler configured)",
                 level=action_level,
             )
+        if action_level == "destructive" and self.config.destructive_requires_typed_confirmation:
+            if not self._typed_confirmation(summary):
+                return Approval(allowed=False, reason="human-denied", level=action_level)
+            return Approval(allowed=True, reason="human-confirmed", level=action_level)
         if self.confirm_callback(summary, action):
             return Approval(allowed=True, reason="human-confirmed", level=action_level)
         return Approval(allowed=False, reason="human-denied", level=action_level)
+
+    def _typed_confirmation(self, summary: str) -> bool:
+        """Require the user to re-type the action summary to confirm a destructive action."""
+        if self.confirm_callback is None:
+            return False
+        # First show the prompt via the callback; if it returns False, abort early.
+        if not self.confirm_callback(summary, {"typed_confirmation": True}):
+            return False
+        try:
+            answer = input("Retype the action summary to confirm: ").strip()
+        except EOFError:
+            return False
+        return answer == summary
 
     @staticmethod
     def _summarize(action: dict[str, Any]) -> str:

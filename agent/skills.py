@@ -47,6 +47,9 @@ class SkillLearner:
         self.llm_client = llm_client
         self.similarity_threshold = similarity_threshold
 
+    def set_learned_dir(self, path: Path | str) -> None:
+        self.learned_dir = Path(path)
+
     async def learn(self, task: str, trajectory: list[str]) -> dict[str, Any]:
         """Learn a skill from a completed task.
 
@@ -82,6 +85,7 @@ class SkillLearner:
     ) -> dict[str, Any]:
         """Generate a new SKILL.md from the task and trajectory."""
         skill = await self._generate_content(task, trajectory)
+        self.learned_dir.mkdir(parents=True, exist_ok=True)
         path = self._write_skill(skill)
         self.memory.sync_skills()
         return {
