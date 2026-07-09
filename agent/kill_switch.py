@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import time
 from threading import Thread
 from typing import Any
 
@@ -21,6 +22,7 @@ class KillSwitch:
         self._pressed: set[keyboard.Key | keyboard.KeyCode] = set()
         self._triggered = asyncio.Event()
         self._original_sigint: signal.Handlers | None = None
+        self._last_trigger_time: float | None = None
 
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -44,6 +46,7 @@ class KillSwitch:
 
     def reset(self) -> None:
         self._triggered.clear()
+        self._last_trigger_time = None
 
     def _on_sigint(self, signum: int, frame: Any) -> None:
         self._trigger("sigint")
@@ -64,6 +67,10 @@ class KillSwitch:
         return bool(ctrl_keys & self._pressed)
 
     def _trigger(self, reason: str) -> None:
+        now = time.monotonic()
+        if self._last_trigger_time is not None and now - self._last_trigger_time < 0.1:
+            return
+        self._last_trigger_time = now
         self._triggered.set()
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(

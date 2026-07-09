@@ -4,7 +4,11 @@ from pathlib import Path
 from typing import Any
 
 import asyncio
+import signal
+
 import pytest
+from pynput import keyboard
+from pynput.keyboard import Key, KeyCode
 
 from agent.config import Config, LLMConfig, MCPConfig, MCPServerConfig
 from agent.kill_switch import KillSwitch
@@ -13,6 +17,20 @@ from agent.orchestrator import AgentOrchestrator
 from eventbus import EventBus
 from eventbus.events import KillSwitchTriggered
 from mcp_client import MCPMultiplexer
+
+
+class _FakeListener:
+    """Stub pynput listener that captures callbacks without starting OS input."""
+
+    def __init__(self, on_press, on_release):
+        self.on_press = on_press
+        self.on_release = on_release
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
 
 @pytest.fixture
@@ -85,6 +103,115 @@ async def test_sigint_handler_emits_kill_switch_event(monkeypatch):
     await captured_coro
     assert len(received) == 1
     assert received[0].reason == "sigint"
+
+
+def test_sigint_real_loop_emits_kill_switch_event(monkeypatch):
+    """Start a real asyncio loop, call _on_sigint, and verify the event."""
+    eventbus = EventBus()
+    kill = KillSwitch(eventbus)
+    received: list[KillSwitchTriggered] = []
+
+    async def handler(event: KillSwitchTriggered) -> None:
+        received.append(event)
+
+    eventbus.subscribe("KillSwitchTriggered", handler)
+    monkeypatch.setattr(keyboard, "Listener", _FakeListener)
+
+    async def run():
+        kill.start()
+        kill._on_sigint(signal.SIGINT, None)
+        # Allow run_coroutine_threadsafe to schedule and emit.
+        await asyncio.sleep(0.05)
+        kill.stop()
+
+    asyncio.run(run())
+    assert len(received) == 1
+    assert received[0].reason == "sigint"
+
+
+def test_pynput_ctrl_c_emits_kill_switch_event(monkeypatch):
+    """Patch keyboard.Listener, invoke ctrl_l + 'c', and verify the event."""
+    eventbus = EventBus()
+    kill = KillSwitch(eventbus)
+    received: list[KillSwitchTriggered] = []
+
+    async def handler(event: KillSwitchTriggered) -> None:
+        received.append(event)
+
+    eventbus.subscribe("KillSwitchTriggered", handler)
+
+    captured_on_press = None
+    captured_on_release = None
+
+    class CaptureListener(_FakeListener):
+        def __init__(self, on_press, on_release):
+            nonlocal captured_on_press, captured_on_release
+            super().__init__(on_press, on_release)
+            captured_on_press = on_press
+            captured_on_release = on_release
+
+    monkeypatch.setattr(keyboard, "Listener", CaptureListener)
+
+    async def run():
+        kill.start()
+        captured_on_press(Key.ctrl_l)
+        captured_on_press(KeyCode(char="c"))
+        await asyncio.sleep(0.05)
+        kill.stop()
+
+    asyncio.run(run())
+    assert len(received) == 1
+    assert received[0].reason == "ctrl+c"
+
+
+def test_start_installs_sigint_handler_and_stop_restores(monkeypatch):
+    """Verify start() installs the SIGINT handler and stop() restores it."""
+    eventbus = EventBus()
+    kill = KillSwitch(eventbus)
+    original_handler = signal.getsignal(signal.SIGINT)
+    installed_handler = None
+
+    def fake_signal(sig, handler):
+        nonlocal installed_handler
+        if sig == signal.SIGINT:
+            installed_handler = handler
+        return original_handler
+
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr(keyboard, "Listener", _FakeListener)
+
+    async def run():
+        kill.start()
+        # Bound methods compare by underlying function and instance, not identity.
+        assert installed_handler == kill._on_sigint
+        assert kill._original_sigint is original_handler
+        kill.stop()
+        assert kill._original_sigint is None
+
+    asyncio.run(run())
+
+
+def test_trigger_debounce_ignores_duplicate_within_100ms(monkeypatch):
+    """Two rapid triggers should emit only one event."""
+    eventbus = EventBus()
+    kill = KillSwitch(eventbus)
+    received: list[KillSwitchTriggered] = []
+
+    async def handler(event: KillSwitchTriggered) -> None:
+        received.append(event)
+
+    eventbus.subscribe("KillSwitchTriggered", handler)
+    monkeypatch.setattr(keyboard, "Listener", _FakeListener)
+
+    async def run():
+        kill.start()
+        kill._trigger("sigint")
+        kill._trigger("sigint")
+        await asyncio.sleep(0.05)
+        kill.stop()
+
+    asyncio.run(run())
+    assert len(received) == 1
 
 
 @pytest.mark.asyncio
