@@ -7,6 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
+
+# Make sibling packages importable when running this script directly.
+_project_root = Path(__file__).resolve().parents[1]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 from agent.config import load_config
 from agent.kill_switch import KillSwitch
