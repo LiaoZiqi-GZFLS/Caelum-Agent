@@ -1,0 +1,17 @@
+accelerate==1.14.0
+chromadb==1.5.9
+huggingface-hub==0.36.2
+httpx==0.28.1
+mcp==1.28.1
+mss==10.2.0
+openai==2.44.0
+pillow==12.3.0
+pynput==1.8.2
+pywinauto==0.6.9
+pyyaml==6.0.3
+qwen-vl-utils==0.0.14
+rapidocr-onnxruntime==1.4.4
+torch==2.13.0
+torchvision==0.28.0
+transformers==4.51.3
+windows-mcp==0.8.2

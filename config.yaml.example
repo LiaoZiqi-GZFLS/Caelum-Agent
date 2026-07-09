@@ -1,0 +1,121 @@
+# Caelum-Agent configuration
+# Copy this file to config.yaml, fill in your real values, and never commit it.
+
+llm:
+  # Kimi (Moonshot AI) API configuration
+  provider: kimi
+  base_url: https://api.moonshot.cn/v1
+  api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  model: kimi-k2.6
+  # Optional reasoning level for kimi-k2.6: minimal, low, medium, high.
+  # Do NOT use "none"; the endpoint rejects it for this model.
+  # reasoning_effort: minimal
+  # Set to true to include Kimi's built-in Formula tools.
+  enable_builtin_tools: true
+  # Which Formula tools to register. Comment out tools you do not want.
+  # NOTE: moonshot/code_runner:latest returned 404 (unavailable as of 2026-07-09).
+  #       Use quickjs or a local sandbox for code execution instead.
+  builtin_tools:
+    - moonshot/web-search:latest
+    - moonshot/fetch:latest
+    - moonshot/quickjs:latest
+    - moonshot/convert:latest
+    - moonshot/date:latest
+    - moonshot/base64:latest
+    - moonshot/excel:latest
+    - moonshot/memory:latest
+    - moonshot/rethink:latest
+    - moonshot/random-choice:latest
+    - moonshot/mew:latest
+
+mcp_servers:
+  # Browser automation. Requires Node.js and npx.
+  playwright:
+    command: npx
+    args:
+      - "-y"
+      - "@playwright/mcp@latest"
+    env: {}
+
+  # Windows desktop automation. Requires the official windows-mcp package.
+  # Install: uvx windows-mcp serve  OR  pip install windows-mcp
+  windows:
+    command: windows-mcp
+    args:
+      - "serve"
+    env:
+      PYTHONUNBUFFERED: "1"
+
+  # Filesystem access. Provide one or more allowed directories.
+  filesystem:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem@latest"
+      - "E:/code/project/Caelum-Agent"
+      - "C:/Users/%USERNAME%/Documents"
+    env: {}
+
+# GUI-Actor-3B local vision model
+ui_detector:
+  enabled: true
+  model_path: ./models/gui-actor-3b
+  device: cuda:0
+  dtype: bfloat16
+  # flash_attention_2 is faster but harder to install on Windows.
+  # Use "sdpa" for broader compatibility.
+  attn_implementation: sdpa
+  topk: 3
+  verifier:
+    enabled: true
+    # Verifier uses the same model; it re-runs inference to pick the best candidate.
+
+screenshot:
+  # Capture backend: mss (recommended) or PIL
+  backend: mss
+  # Default resize/compression strategy to keep image tokens low.
+  max_width: 800
+  max_height: 600
+  quality: 60
+  format: JPEG
+  # Whether to crop around the active window by default.
+  crop_to_active_window: false
+
+ocr:
+  enabled: true
+  backend: rapidocr_onnxruntime
+
+memory:
+  # Local SQLite fallback for preferences, reflections, skills, audit log, state.
+  sqlite_path: ./data/memory.db
+
+security:
+  # Default action level for operations not otherwise classified.
+  default_level: read
+  # Levels: read, write_safe, write_risky, destructive
+  auto_execute_levels:
+    - read
+    - write_safe
+  confirm_levels:
+    - write_risky
+  destructive_requires_approval: true
+
+logging:
+  level: INFO
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {name} | {message}"
+  data_dir: ./data
+
+paths:
+  skills_dir: ./skills
+  cache_dir: ./data/cache
+  audit_log: ./data/audit.log
+
+# Kill switch / circuit breaker
+kill_switch:
+  enabled: true
+  # Consecutive API failures before switching to local-only mode.
+  api_failure_threshold: 5
+  # Consecutive action failures before asking the user for guidance.
+  action_failure_threshold: 3
+  # Number of loops on the same UI before re-planning.
+  same_ui_loop_threshold: 3

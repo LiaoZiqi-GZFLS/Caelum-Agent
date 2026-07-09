@@ -1,0 +1,231 @@
+"""Perception fusion: screenshot, OCR, UI tree, GUI-Actor SoM.
+
+Blocking work (screenshots, compression, OCR) is offloaded to an IO thread
+pool so the asyncio event loop stays responsive. Visual inference runs in the
+UIDetector's own visual-inference thread pool.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from PIL import Image
+
+from agent.config import Config
+from agent.snapshot_parser import parse_playwright_snapshot, parse_windows_snapshot, summarize_tree
+
+if TYPE_CHECKING:
+    from mcp_client import MCPMultiplexer
+    from ui_detector import UIDetector
+
+
+@dataclass
+class Perception:
+    screenshot_path: Path
+    description: str
+    ocr_text: str
+    ui_tree: dict[str, Any]
+    som_annotations: list[dict[str, Any]]
+    ui_hash: str = ""
+
+
+class PerceptionModule:
+    def __init__(
+        self,
+        config: Config,
+        mcp: MCPMultiplexer | None = None,
+        ui_detector: UIDetector | None = None,
+        max_io_workers: int = 8,
+    ) -> None:
+        self.config = config
+        self.mcp = mcp
+        self.ui_detector = ui_detector
+        self._ocr: Any | None = None
+        self._io_executor = ThreadPoolExecutor(
+            max_workers=max_io_workers, thread_name_prefix="perception-io"
+        )
+
+    def shutdown(self) -> None:
+        """Release the IO thread pool."""
+        self._io_executor.shutdown(wait=True)
+
+    async def perceive(self, instruction: str = "") -> Perception:
+        cache_dir = self.config.cache_dir_absolute()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        screenshot_path = cache_dir / f"screenshot_{timestamp}.jpg"
+
+        loop = asyncio.get_event_loop()
+        image = await loop.run_in_executor(self._io_executor, self._capture_screenshot)
+        image_bytes = await loop.run_in_executor(
+            self._io_executor, self._compress, image
+        )
+        await loop.run_in_executor(
+            self._io_executor, screenshot_path.write_bytes, image_bytes
+        )
+
+        image_hash = await loop.run_in_executor(
+            self._io_executor, self._compute_image_hash, image
+        )
+        ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
+        ui_tree = await self._fetch_ui_tree()
+        som_annotations = await self._run_ui_detector(image, instruction)
+
+        ui_hash = self._compute_ui_hash(image_hash, ocr_text, ui_tree)
+        description = self._build_description(ocr_text, ui_tree, som_annotations)
+        return Perception(
+            screenshot_path=screenshot_path,
+            description=description,
+            ocr_text=ocr_text,
+            ui_tree=ui_tree,
+            som_annotations=som_annotations,
+            ui_hash=ui_hash,
+        )
+
+    def _capture_screenshot(self) -> Image.Image:
+        if self.config.screenshot.backend == "mss":
+            import mss
+
+            with mss.MSS() as sct:
+                monitor = sct.monitors[0]
+                raw = sct.grab(monitor)
+                image = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        else:
+            from PIL import ImageGrab
+
+            image = ImageGrab.grab()
+
+        if self.config.screenshot.crop_to_active_window:
+            image = self._crop_to_active_window(image)
+        return image
+
+    def _crop_to_active_window(self, image: Image.Image) -> Image.Image:
+        try:
+            import win32gui
+        except Exception:
+            return image
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                return image
+            rect = win32gui.GetWindowRect(hwnd)
+            x1, y1, x2, y2 = rect
+            sw, sh = image.size
+            x1 = max(0, min(x1, sw))
+            y1 = max(0, min(y1, sh))
+            x2 = max(0, min(x2, sw))
+            y2 = max(0, min(y2, sh))
+            if x2 <= x1 or y2 <= y1:
+                return image
+            return image.crop((x1, y1, x2, y2))
+        except Exception:
+            return image
+
+    def _compress(self, image: Image.Image) -> bytes:
+        max_size = (self.config.screenshot.max_width, self.config.screenshot.max_height)
+        image.thumbnail(max_size)
+        fmt = self.config.screenshot.format
+        buf = io.BytesIO()
+        if fmt == "PNG":
+            image.save(buf, format="PNG")
+        else:
+            image.save(buf, format="JPEG", quality=self.config.screenshot.quality)
+        return buf.getvalue()
+
+    @staticmethod
+    def _compute_image_hash(image: Image.Image) -> str:
+        """Average-hash of a 16x16 grayscale screenshot."""
+        gray = image.convert("L").resize((16, 16), Image.Resampling.LANCZOS)
+        pixels = gray.tobytes()
+        avg = sum(pixels) / len(pixels)
+        bits = "".join("1" if p >= avg else "0" for p in pixels)
+        return hex(int(bits, 2))[2:].zfill(64)
+
+    @staticmethod
+    def _compute_ui_hash(image_hash: str, ocr_text: str, ui_tree: dict[str, Any]) -> str:
+        ocr_hash = hashlib.sha256(ocr_text.strip().lower().encode()).hexdigest()[:16]
+        tree_hash = hashlib.sha256(
+            str(ui_tree).encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+        combined = f"{image_hash}|{ocr_hash}|{tree_hash}"
+        return hashlib.sha256(combined.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def has_changed(before: Perception, after: Perception) -> bool:
+        """Return True if the UI state changed meaningfully between perceptions.
+
+        A change in screenshot, OCR text, or UI tree indicates the last action
+        likely had an effect on the desktop/browser state.
+        """
+        if not before.ui_hash or not after.ui_hash:
+            # If hashes are unavailable, fall back to a conservative "changed".
+            return True
+        return before.ui_hash != after.ui_hash
+
+    def _run_ocr(self, image: Image.Image) -> str:
+        if not self.config.ocr.enabled:
+            return ""
+        if self._ocr is None:
+            from rapidocr_onnxruntime import RapidOCR
+
+            self._ocr = RapidOCR()
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            image.save(tmp.name, format="JPEG", quality=self.config.screenshot.quality)
+            tmp_path = tmp.name
+        result = self._ocr(tmp_path)
+        texts = []
+        if result and isinstance(result, (list, tuple)):
+            for item in result:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    texts.append(str(item[1]))
+        return "\n".join(texts)
+
+    async def _fetch_ui_tree(self) -> dict[str, Any]:
+        if self.mcp is None:
+            return {}
+        try:
+            result = await self.mcp.call("windows", "Snapshot", {})
+            if result.success and result.content:
+                tree = parse_windows_snapshot(result.content)
+                return {"snapshot": summarize_tree(tree)}
+        except Exception:
+            pass
+        try:
+            result = await self.mcp.call("playwright", "browser_snapshot", {})
+            if result.success and result.content:
+                tree = parse_playwright_snapshot(result.content)
+                return {"snapshot": summarize_tree(tree)}
+        except Exception as exc:
+            return {"error": str(exc)}
+        return {}
+
+    async def _run_ui_detector(
+        self, image: Image.Image, instruction: str
+    ) -> list[dict[str, Any]]:
+        if self.ui_detector is None or not self.config.ui_detector.enabled:
+            return []
+        try:
+            return await self.ui_detector.annotate(image, instruction)
+        except Exception as exc:
+            return [{"error": str(exc)}]
+
+    @staticmethod
+    def _build_description(
+        ocr_text: str, ui_tree: dict[str, Any], som_annotations: list[dict[str, Any]]
+    ) -> str:
+        parts = ["Current screen:"]
+        if ocr_text:
+            parts.append(f"OCR text:\n{ocr_text}")
+        if ui_tree:
+            parts.append(f"UI tree:\n{str(ui_tree)[:2000]}")
+        if som_annotations:
+            parts.append(f"Detected elements: {len(som_annotations)}")
+        return "\n\n".join(parts)
