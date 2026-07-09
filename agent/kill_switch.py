@@ -77,8 +77,11 @@ class KillSwitch:
                 self._handle_trigger(reason),
                 self._loop,
             )
+        elif self._loop is not None:
+            # Loop exists but is not running; marshal the set to it safely.
+            self._loop.call_soon_threadsafe(self._triggered.set)
         else:
-            # No running loop to debounce on; fall back to marking triggered.
+            # No loop at all; best-effort flag for early-trigger scenarios.
             self._triggered.set()
 
     async def _handle_trigger(self, reason: str) -> None:
