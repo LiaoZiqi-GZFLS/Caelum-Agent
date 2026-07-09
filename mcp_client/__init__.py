@@ -48,6 +48,8 @@ class MCPClient:
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self._reconnect_lock = asyncio.Lock()
+        self._reconnect_lock_holder: asyncio.Task | None = None
 
     def _resolve_command(self) -> str:
         if shutil.which(self.config.command):
@@ -60,6 +62,14 @@ class MCPClient:
         if candidate.exists():
             return str(candidate)
         return self.config.command
+
+    async def _acquire_reconnect_lock(self) -> None:
+        await self._reconnect_lock.acquire()
+        self._reconnect_lock_holder = asyncio.current_task()
+
+    def _release_reconnect_lock(self) -> None:
+        self._reconnect_lock_holder = None
+        self._reconnect_lock.release()
 
     async def connect(self) -> bool:
         command = self._resolve_command()
@@ -86,6 +96,8 @@ class MCPClient:
                     extra={"server": self.name, "tools": len(self._tools)},
                 )
                 return True
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 delay = min(self.base_delay * (2 ** (attempt - 1)), self.max_delay)
                 logger.warning(
@@ -110,12 +122,24 @@ class MCPClient:
         self._stack = AsyncExitStack()
         try:
             await stack.aclose()
+        except asyncio.CancelledError:
+            raise
         except Exception:
             pass
 
     async def reconnect(self) -> bool:
-        await self.disconnect()
-        return await self.connect()
+        acquired_here = False
+        if self._reconnect_lock_holder != asyncio.current_task():
+            await self._acquire_reconnect_lock()
+            acquired_here = True
+        try:
+            if self._connected and self.session is not None:
+                return True
+            await self.disconnect()
+            return await self.connect()
+        finally:
+            if acquired_here:
+                self._release_reconnect_lock()
 
     async def ping(self) -> bool:
         if not self.session:
@@ -123,6 +147,8 @@ class MCPClient:
         try:
             await asyncio.wait_for(self.session.send_ping(), timeout=5.0)
             return True
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.debug("MCP ping failed: %s", exc, extra={"server": self.name})
             return False
@@ -130,15 +156,32 @@ class MCPClient:
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
         if not self.session or not await self.ping():
             logger.info("MCP session unhealthy; reconnecting", extra={"server": self.name})
-            ok = await self.reconnect()
+            self._connected = False
+            self.session = None
+            await self._acquire_reconnect_lock()
+            try:
+                if self._connected and self.session is not None:
+                    ok = True
+                else:
+                    ok = await self.reconnect()
+            finally:
+                self._release_reconnect_lock()
             if not ok:
                 return ToolResult(
                     success=False,
                     content=f"[error] MCP server {self.name} is not connected",
                     raw=None,
                 )
+        if self.session is None:
+            return ToolResult(
+                success=False,
+                content=f"[error] MCP server {self.name} is not connected",
+                raw=None,
+            )
         try:
             resp = await self.session.call_tool(tool_name, arguments=arguments)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.warning(
                 "MCP tool call failed: %s", exc, extra={"server": self.name, "tool": tool_name}

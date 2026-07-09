@@ -73,3 +73,61 @@ async def test_disconnect_all_cancels_health_monitor():
     await asyncio.sleep(0.01)
     await multiplexer.disconnect_all()
     assert multiplexer._health_task is None or multiplexer._health_task.done()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_all_cancels_health_monitor_during_reconnect():
+    config = MCPConfig(
+        playwright=MCPServerConfig(command="echo", args=[]),
+        windows=MCPServerConfig(command="echo", args=[]),
+        filesystem=MCPServerConfig(command="echo", args=[]),
+    )
+    multiplexer = MCPMultiplexer(config, health_interval=0.05)
+    client = multiplexer.clients["playwright"]
+    client._connected = True
+    client.session = MagicMock()
+    client.ping = AsyncMock(return_value=False)
+
+    reconnect_started = asyncio.Event()
+    reconnect_continue = asyncio.Event()
+
+    async def blocking_reconnect():
+        reconnect_started.set()
+        await reconnect_continue.wait()
+        return True
+
+    client.reconnect = AsyncMock(side_effect=blocking_reconnect)
+
+    multiplexer._health_task = asyncio.create_task(multiplexer._health_monitor())
+    await reconnect_started.wait()
+
+    await asyncio.wait_for(multiplexer.disconnect_all(), timeout=1.0)
+    assert multiplexer._health_task is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_trigger_single_reconnect():
+    cfg = MCPServerConfig(command="echo", args=["hello"])
+    client = MCPClient("test", cfg)
+    client._connected = True
+    client.session = MagicMock()
+    client.ping = AsyncMock(return_value=False)
+
+    reconnect_event = asyncio.Event()
+
+    async def slow_reconnect():
+        reconnect_event.set()
+        await asyncio.sleep(0.1)
+        client._connected = True
+        client.session = MagicMock()
+        return True
+
+    client.reconnect = AsyncMock(side_effect=slow_reconnect)
+
+    call1 = asyncio.create_task(client.call("foo", {}))
+    call2 = asyncio.create_task(client.call("bar", {}))
+
+    await reconnect_event.wait()
+    await asyncio.gather(call1, call2)
+
+    client.reconnect.assert_awaited_once()
