@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ class UIDetector:
         self._executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="gui-actor"
         )
+        self._load_lock = threading.Lock()
         self.verifier = UIVerifier(
             enabled=config.verifier.get("enabled", True),
             crop_size=config.verifier.get("crop_size", 224),
@@ -78,9 +80,22 @@ class UIDetector:
         """Release the inference thread pool."""
         self._executor.shutdown(wait=True)
 
+    def ensure_loaded(self) -> None:
+        """Load the model on first use (thread-safe, idempotent).
+
+        Lets pure compute / filesystem / API tasks avoid paying the model-load
+        cost entirely; the model is only loaded when vision is actually needed
+        (i.e. the first ``predict``/``annotate`` call).
+        """
+        if self.model is not None:
+            return
+        with self._load_lock:
+            if self.model is None:
+                self.load()
+
     def predict(self, image: Image.Image, instruction: str, topk: int | None = None) -> dict[str, Any]:
-        if self.model is None or self.processor is None or self.tokenizer is None:
-            raise RuntimeError("UIDetector model is not loaded")
+        self.ensure_loaded()
+        assert self.model is not None and self.processor is not None and self.tokenizer is not None
 
         topk = topk or self.config.topk
         conversation = [

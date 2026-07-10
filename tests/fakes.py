@@ -152,7 +152,7 @@ class FakePerception(PerceptionModule):
         self._index = 0
         self.calls: list[str] = []
 
-    async def perceive(self, instruction: str = "") -> Perception:
+    async def perceive(self, instruction: str = "", with_vision: bool = False) -> Perception:
         self.calls.append(instruction)
         if self._index >= len(self.perceptions):
             base = (
@@ -167,6 +167,9 @@ class FakePerception(PerceptionModule):
         if not perception.ui_hash:
             perception.ui_hash = f"fake-{self._index - 1}"
         return perception
+
+    async def perceive_with_vision(self, instruction: str = "") -> Perception:
+        return await self.perceive(instruction=instruction, with_vision=True)
 
 
 class FakeReflection(ReflectionEngine):

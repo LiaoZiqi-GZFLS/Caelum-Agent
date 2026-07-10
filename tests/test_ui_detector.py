@@ -9,6 +9,8 @@ from PIL import Image
 
 from ui_detector.verifier import PASS_THRESHOLD, REJECT_THRESHOLD, UIVerifier, VerifierVerdict
 from ui_detector.visualizer import visualize_som
+from ui_detector.detector import UIDetector
+from agent.config import UIDetectorConfig
 
 
 def _make_image(size: tuple[int, int] = (100, 100)) -> Image.Image:
@@ -147,3 +149,44 @@ def test_verify_sort_order_pass_before_reject():
     result = verifier.verify(None, "click the button", annotations)
     assert result[0]["verdict"] == VerifierVerdict.PASS
     assert result[0]["label"] == 1
+
+
+def _stub_load(det: UIDetector, calls: list[int]) -> None:
+    """Replace det.load with a fake that marks the model as loaded and counts calls."""
+
+    def fake() -> None:
+        det.model = object()
+        det.tokenizer = object()
+        det.processor = object()
+        calls[0] += 1
+
+    det.load = fake  # type: ignore[assignment]
+
+
+def test_ensure_loaded_calls_load_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    det = UIDetector(UIDetectorConfig())
+    calls = [0]
+    _stub_load(det, calls)
+
+    det.ensure_loaded()
+    det.ensure_loaded()
+
+    assert calls[0] == 1
+
+
+def test_predict_triggers_lazy_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    det = UIDetector(UIDetectorConfig())
+    calls = [0]
+    _stub_load(det, calls)
+    inference_calls: list[dict[str, Any]] = []
+
+    def fake_inference(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        inference_calls.append(kwargs)
+        return {"topk_points": [], "topk_values": []}
+
+    monkeypatch.setattr("ui_detector.detector.inference", fake_inference)
+
+    det.predict(_make_image(), "click ok")
+
+    assert calls[0] == 1
+    assert len(inference_calls) == 1

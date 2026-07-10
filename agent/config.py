@@ -45,6 +45,7 @@ class MCPConfig(BaseModel):
 
 class UIDetectorConfig(BaseModel):
     enabled: bool = True
+    lazy: bool = True
     model_path: str = "./models/gui-actor-3b"
     device: str = "cuda:0"
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"

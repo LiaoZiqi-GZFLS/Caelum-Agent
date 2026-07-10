@@ -62,6 +62,10 @@ mcp_servers:
 # GUI-Actor-3B local vision model
 ui_detector:
   enabled: true
+  # Lazy (default): load the model and run vision only when DesktopInteract
+  # needs SoM coordinates. Pure compute/filesystem/API tasks never load the
+  # model. Set to false to load at startup and run vision every perception.
+  lazy: true
   model_path: ./models/gui-actor-3b
   device: cuda:0
   dtype: bfloat16

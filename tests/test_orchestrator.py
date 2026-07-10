@@ -937,3 +937,128 @@ def test_is_ui_tool_classification():
     assert AgentOrchestrator._is_ui_tool("DesktopInteract", None) is True
     assert AgentOrchestrator._is_ui_tool("filesystem__list_directory", "filesystem") is False
     assert AgentOrchestrator._is_ui_tool("quickjs", None) is False
+
+
+# ---------------------------------------------------------------------------
+# Lazy-vision tests
+# ---------------------------------------------------------------------------
+
+from PIL import Image as _PILImage
+
+from agent.perception import PerceptionModule as _PerceptionModule
+
+
+class _SpyDetector:
+    def __init__(self, annotations: list[dict[str, Any]] | None = None) -> None:
+        self.calls = 0
+        self.annotations = annotations or []
+
+    async def annotate(
+        self, image: Any, instruction: str
+    ) -> tuple[list[dict[str, Any]], int]:
+        self.calls += 1
+        return list(self.annotations), 0
+
+
+def _patch_perception_capture(
+    module: _PerceptionModule, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Instance attributes do not bind like methods, so lambdas take no `self`.
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: _PILImage.new("RGB", (100, 100))
+    )
+    monkeypatch.setattr(module, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(
+        module, "_generate_annotated", lambda path, ann: _PILImage.new("RGB", (10, 10))
+    )
+
+
+@pytest.mark.asyncio
+async def test_pure_filesystem_task_skips_vision(
+    config, eventbus, killswitch, monkeypatch
+):
+    # Lazy mode (default): a filesystem task never runs the detector.
+    spy = _SpyDetector()
+    perception = _PerceptionModule(config, ui_detector=spy)
+    _patch_perception_capture(perception, monkeypatch)
+
+    llm = FakeLLM([
+        _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        _message("I listed them."),
+        _message("YES"),
+        _message("Files: a.txt, b.txt."),
+    ])
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt\nb.txt"))
+
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch, perception=perception,
+    )
+    agent.ui_detector = spy  # lazy mode would have constructed it
+
+    result = await agent.run_task("list files")
+
+    assert result == "Files: a.txt, b.txt."
+    assert agent.state.current_state == "COMPLETED"
+    assert spy.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_triggers_vision_and_clicks(
+    config, eventbus, killswitch, monkeypatch
+):
+    # DesktopInteract refreshes SoM on demand, then clicks the resolved coords.
+    annotations = [
+        {"label": 2, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
+    ]
+    spy = _SpyDetector(annotations)
+    perception = _PerceptionModule(config, ui_detector=spy)
+    _patch_perception_capture(perception, monkeypatch)
+
+    mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Click", ToolResult(success=True, content="clicked"))
+
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch, perception=perception)
+    agent.ui_detector = spy
+    agent.current_instruction = "click the OK button"
+
+    result = await agent._desktop_interact_impl(label=2, action="click")
+
+    assert spy.calls == 1
+    assert result.startswith("OK: click")
+    click_calls = [c for c in mcp.calls if c[0] == "windows" and c[1] == "Click"]
+    assert len(click_calls) == 1
+    # 0.5 * 100x100 screenshot -> (50, 50)
+    assert click_calls[0][2] == {"loc": [50, 50]}
+
+
+@pytest.mark.asyncio
+async def test_eager_mode_runs_vision_each_loop(
+    config, eventbus, killswitch, monkeypatch
+):
+    # lazy=False restores legacy behaviour: vision runs on every perception.
+    config.ui_detector.lazy = False
+    spy = _SpyDetector()
+    perception = _PerceptionModule(config, ui_detector=spy)
+    _patch_perception_capture(perception, monkeypatch)
+
+    llm = FakeLLM([
+        _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        _message("I listed them."),
+        _message("YES"),
+        _message("Files: a.txt."),
+    ])
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch, perception=perception,
+    )
+    agent.ui_detector = spy
+
+    result = await agent.run_task("list files")
+
+    assert result == "Files: a.txt."
+    assert agent.state.current_state == "COMPLETED"
+    # Top-of-loop + post-action perceptions in a single one-round task.
+    assert spy.calls >= 1

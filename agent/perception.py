@@ -65,7 +65,7 @@ class PerceptionModule:
         """Release the IO thread pool."""
         self._io_executor.shutdown(wait=True)
 
-    async def perceive(self, instruction: str = "") -> Perception:
+    async def perceive(self, instruction: str = "", with_vision: bool = False) -> Perception:
         cache_dir = self.config.cache_dir_absolute()
         cache_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(time.time() * 1000)
@@ -86,7 +86,10 @@ class PerceptionModule:
         )
         ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
         ui_tree = await self._fetch_ui_tree()
-        som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
+        if with_vision:
+            som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
+        else:
+            som_annotations, blocked_count = [], 0
         # Drop placeholder/invalid annotations (e.g. detector error sentinels)
         # so visualize_som never crashes on a missing center_x/center_y.
         valid_annotations = [
@@ -131,6 +134,14 @@ class PerceptionModule:
             annotated_screenshot_path=annotated_screenshot_path,
             blocked_count=blocked_count,
         )
+
+    async def perceive_with_vision(self, instruction: str = "") -> Perception:
+        """Capture perception with GUI-Actor SoM detection enabled.
+
+        Used by ``DesktopInteract`` so labels are resolved against the latest
+        screenshot. This is the only on-demand vision entry point.
+        """
+        return await self.perceive(instruction=instruction, with_vision=True)
 
     @staticmethod
     def _generate_annotated(

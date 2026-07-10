@@ -189,3 +189,74 @@ def test_perception_defaults_screen_dims_to_zero() -> None:
     assert p.screen_width == 0
     assert p.screen_height == 0
     assert p.annotated_screenshot_path is None
+
+
+class _SpyDetector:
+    """Records annotate() calls and returns a fixed annotation list."""
+
+    def __init__(self, annotations: list[dict[str, Any]] | None = None) -> None:
+        self.calls = 0
+        self.annotations = annotations or []
+
+    async def annotate(
+        self, image: Image.Image, instruction: str
+    ) -> tuple[list[dict[str, Any]], int]:
+        self.calls += 1
+        return list(self.annotations), 0
+
+
+def _patch_capture(module: PerceptionModule, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub out the blocking IO work so perceive() can run in tests."""
+    # Instance attributes do not bind like methods, so lambdas take no `self`.
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (100, 100))
+    )
+    monkeypatch.setattr(module, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(
+        module, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
+    )
+
+
+@pytest.mark.asyncio
+async def test_perceive_without_vision_skips_detector(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = _SpyDetector()
+    module = PerceptionModule(config, ui_detector=spy)
+    _patch_capture(module, monkeypatch)
+
+    result = await module.perceive(instruction="list files", with_vision=False)
+
+    assert spy.calls == 0
+    assert result.som_annotations == []
+    assert result.annotated_screenshot_path is None
+
+
+@pytest.mark.asyncio
+async def test_perceive_with_vision_runs_detector(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    annotations = [
+        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
+    ]
+    spy = _SpyDetector(annotations)
+    module = PerceptionModule(config, ui_detector=spy)
+    _patch_capture(module, monkeypatch)
+
+    result = await module.perceive(instruction="click OK", with_vision=True)
+
+    assert spy.calls == 1
+    assert result.som_annotations == annotations
+
+
+@pytest.mark.asyncio
+async def test_perceive_with_vision_helper(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = _SpyDetector()
+    module = PerceptionModule(config, ui_detector=spy)
+    _patch_capture(module, monkeypatch)
+
+    await module.perceive_with_vision("click OK")
+
+    assert spy.calls == 1

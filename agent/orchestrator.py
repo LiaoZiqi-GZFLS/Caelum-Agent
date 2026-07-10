@@ -136,7 +136,12 @@ class AgentOrchestrator:
             from ui_detector import UIDetector
 
             self.ui_detector = UIDetector(self.config.ui_detector)
-            self.ui_detector.load()
+            if not self.config.ui_detector.lazy:
+                # Eager mode: load the model at startup and run vision on every
+                # perception (legacy behaviour, useful for pure-vision tasks).
+                self.ui_detector.load()
+            # Lazy mode (default): the model loads on first predict/annotate,
+            # so compute/filesystem/API tasks never pay the load cost.
             self.perception.ui_detector = self.ui_detector
         self._load_state()
         self.kill_switch.start()
@@ -199,6 +204,13 @@ class AgentOrchestrator:
         convert normalized coordinates to screen pixels, then call the
         appropriate Windows-MCP tool.
         """
+        # Refresh SoM from the latest screenshot so labels map to the current
+        # screen. This is the single on-demand vision entry point; in lazy mode
+        # it is also what triggers model loading on first use.
+        if self.ui_detector is not None and self.config.ui_detector.enabled:
+            self._last_perception = await self.perception.perceive_with_vision(
+                self.current_instruction
+            )
         perception = getattr(self, "_last_perception", None)
         if perception is None:
             return "[error] No perception data available. Run perception first."
@@ -450,7 +462,10 @@ class AgentOrchestrator:
                 break
 
             await self.state.transition("EXECUTING", task_id=self.task_id)
-            perception = await self.perception.perceive(instruction=self.current_instruction)
+            perception = await self.perception.perceive(
+                instruction=self.current_instruction,
+                with_vision=not self.config.ui_detector.lazy,
+            )
             self._last_perception = perception
             self.history.append({
                 "role": "user",
@@ -502,7 +517,10 @@ class AgentOrchestrator:
                     return "Task cancelled by kill switch."
 
                 # Capture the post-action perception for state-based verification.
-                post_action_perception = await self.perception.perceive(instruction=self.current_instruction)
+                post_action_perception = await self.perception.perceive(
+                    instruction=self.current_instruction,
+                    with_vision=not self.config.ui_detector.lazy,
+                )
                 self._last_perception = post_action_perception
                 self.history.append({
                     "role": "user",
