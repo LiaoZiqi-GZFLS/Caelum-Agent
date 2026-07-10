@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from ui_detector.verifier import UIVerifier
+from ui_detector.verifier import PASS_THRESHOLD, REJECT_THRESHOLD, UIVerifier, VerifierVerdict
 from ui_detector.visualizer import visualize_som
 
 
@@ -96,3 +96,54 @@ def test_verifier_reranks_by_second_inference():
 def test_verifier_empty_annotations():
     verifier = UIVerifier(enabled=True)
     assert verifier.verify(_make_image(), "click ok", []) == []
+
+
+def test_classify_pass():
+    assert UIVerifier.classify(0.9) == VerifierVerdict.PASS
+    assert UIVerifier.classify(PASS_THRESHOLD) == VerifierVerdict.PASS
+    assert UIVerifier.classify(0.55) == VerifierVerdict.PASS
+
+
+def test_classify_reject():
+    assert UIVerifier.classify(0.0) == VerifierVerdict.REJECT
+    assert UIVerifier.classify(REJECT_THRESHOLD) == VerifierVerdict.REJECT
+    assert UIVerifier.classify(0.1) == VerifierVerdict.REJECT
+
+
+def test_classify_uncertain():
+    assert UIVerifier.classify(0.4) == VerifierVerdict.UNCERTAIN
+    assert UIVerifier.classify(0.26) == VerifierVerdict.UNCERTAIN
+    assert UIVerifier.classify(0.54) == VerifierVerdict.UNCERTAIN
+
+
+def test_verify_disabled_marks_all_pass():
+    verifier = UIVerifier(enabled=False)
+    annotations = [
+        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.3},
+        {"label": 2, "center_x": 0.1, "center_y": 0.9, "score": 0.1},
+    ]
+    result = verifier.verify(None, "click the button", annotations)
+    assert all(a["verdict"] == VerifierVerdict.PASS for a in result)
+
+
+def test_verify_no_detector_marks_all_uncertain():
+    verifier = UIVerifier(detector=None, enabled=True)
+    annotations = [
+        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.8},
+    ]
+    result = verifier.verify(None, "click the button", annotations)
+    assert all(a["verdict"] == VerifierVerdict.UNCERTAIN for a in result)
+
+
+def test_verify_sort_order_pass_before_reject():
+    """Even low-confidence pass candidates sort before high-confidence rejects."""
+    # Pass a truthy detector to route into the scored path where _verify_one is called.
+    verifier = UIVerifier(enabled=True, detector=True)
+    verifier._verify_one = lambda img, instr, ann: 0.55 if ann["label"] == 1 else 0.1
+    annotations = [
+        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.3},  # will be pass
+        {"label": 2, "center_x": 0.1, "center_y": 0.9, "score": 0.9},  # will be reject
+    ]
+    result = verifier.verify(None, "click the button", annotations)
+    assert result[0]["verdict"] == VerifierVerdict.PASS
+    assert result[0]["label"] == 1

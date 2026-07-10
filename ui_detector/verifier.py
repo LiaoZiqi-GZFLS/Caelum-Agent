@@ -8,9 +8,24 @@ verification.
 
 from __future__ import annotations
 
+import enum
 from typing import Any
 
 from PIL import Image
+
+
+class VerifierVerdict(enum.StrEnum):
+    PASS = "pass"
+    REJECT = "reject"
+    UNCERTAIN = "uncertain"
+
+
+# Thresholds for verdict classification.
+# verify_score >= PASS_THRESHOLD → pass
+# verify_score <= REJECT_THRESHOLD → reject
+# otherwise → uncertain
+PASS_THRESHOLD = 0.55
+REJECT_THRESHOLD = 0.25
 
 
 class UIVerifier:
@@ -33,29 +48,51 @@ class UIVerifier:
         self.enabled = enabled
         self.crop_size = crop_size
 
+    @staticmethod
+    def classify(verify_score: float, pass_threshold: float = PASS_THRESHOLD, reject_threshold: float = REJECT_THRESHOLD) -> VerifierVerdict:
+        """Classify a verify_score into pass / reject / uncertain."""
+        if verify_score >= pass_threshold:
+            return VerifierVerdict.PASS
+        if verify_score <= reject_threshold:
+            return VerifierVerdict.REJECT
+        return VerifierVerdict.UNCERTAIN
+
     def verify(
         self,
         image: Image.Image,
         instruction: str,
         annotations: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Return annotations sorted by verification score (highest first).
+        """Return annotations with verify_score and verdict, sorted by score.
 
-        When verification is disabled, the detector's original ordering is kept.
+        Each returned annotation is augmented with:
+          - verify_score: float — combined verification score [0, 1]
+          - verdict: str — "pass", "reject", or "uncertain"
+
+        Annotations with verdict "reject" are still returned (sorted last) so
+        callers can inspect them or count blocked candidates.
         """
         if not self.enabled or not annotations:
-            return sorted(annotations, key=lambda a: a.get("score", 0.0), reverse=True)
+            return [
+                {**a, "verify_score": 1.0, "verdict": VerifierVerdict.PASS}
+                for a in sorted(annotations, key=lambda a: a.get("score", 0.0), reverse=True)
+            ]
 
         if self.detector is None:
-            # No detector available; fall back to detector scores.
-            return sorted(annotations, key=lambda a: a.get("score", 0.0), reverse=True)
+            return [
+                {**a, "verify_score": float(a.get("score", 0.0)), "verdict": VerifierVerdict.UNCERTAIN}
+                for a in sorted(annotations, key=lambda a: a.get("score", 0.0), reverse=True)
+            ]
 
         scored: list[dict[str, Any]] = []
         for ann in annotations:
             score = self._verify_one(image, instruction, ann)
-            scored.append({**ann, "verify_score": score})
+            verdict = self.classify(score)
+            scored.append({**ann, "verify_score": score, "verdict": verdict})
 
-        scored.sort(key=lambda a: a["verify_score"], reverse=True)
+        # Sort: pass first (by verify_score desc), then uncertain, then reject.
+        order = {VerifierVerdict.PASS: 0, VerifierVerdict.UNCERTAIN: 1, VerifierVerdict.REJECT: 2}
+        scored.sort(key=lambda a: (order.get(a["verdict"], 2), -a["verify_score"]))
         return scored
 
     def _verify_one(
