@@ -22,17 +22,31 @@ class SecurityGuard:
         self,
         config: SecurityConfig,
         confirm_callback: ConfirmationCallback | None = None,
+        auto_approve: bool = False,
+        auto_approve_destructive: bool = False,
     ) -> None:
         self.config = config
         self.confirm_callback = confirm_callback
+        self.auto_approve = auto_approve
+        self.auto_approve_destructive = auto_approve_destructive
 
     def check(self, action_level: str, action: dict[str, Any]) -> Approval:
         """Return whether an action may proceed without human confirmation."""
         if action_level in self.config.auto_execute_levels:
             return Approval(allowed=True, reason="auto-execute", level=action_level)
         if action_level in self.config.confirm_levels:
+            if self.auto_approve:
+                return Approval(
+                    allowed=True, reason="auto-approved (--yes)", level=action_level
+                )
             return self._request_confirmation(action_level, action)
         if self.config.destructive_requires_approval and action_level == "destructive":
+            if self.auto_approve_destructive:
+                return Approval(
+                    allowed=True,
+                    reason="auto-approved (--yes-destructive)",
+                    level=action_level,
+                )
             return self._request_confirmation(action_level, action)
         return Approval(allowed=True, reason="default allow", level=action_level)
 

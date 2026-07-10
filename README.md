@@ -98,6 +98,22 @@ Available REPL commands:
 python main.py --task "list files in E:/code/project"
 ```
 
+In one-shot mode, risky actions normally prompt for an interactive `y/n`
+approval. When stdin is not a TTY (scripts, CI, or piped input) the prompt is
+replaced by a warning and the action is denied, so the task never hangs on
+`input()`. To auto-approve in non-interactive scenarios:
+
+```powershell
+# Auto-approve write_risky actions (Click/Type/App/browser edits).
+python main.py --task "open notepad" --yes
+
+# Also auto-approve destructive actions, skipping typed confirmation. Use with caution.
+python main.py --task "delete temp files" --yes-destructive
+```
+
+`--yes` does **not** cover destructive actions; they still require retyping the
+action summary unless `--yes-destructive` is also passed.
+
 ### Disable vision/OCR for faster testing
 
 ```powershell

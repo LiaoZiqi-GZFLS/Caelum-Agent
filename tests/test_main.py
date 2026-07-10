@@ -90,3 +90,99 @@ def test_help_exits_zero():
     with pytest.raises(SystemExit) as exc_info:
         main._build_argparser().parse_args(["--help"])
     assert exc_info.value.code == 0
+
+
+def test_argparse_yes_flags():
+    parser = main._build_argparser()
+    args = parser.parse_args(["--task", "x", "--yes"])
+    assert args.yes is True
+    assert args.yes_destructive is False
+
+    args = parser.parse_args(["--task", "x", "-y"])
+    assert args.yes is True
+
+    args = parser.parse_args(["--task", "x", "--yes-destructive"])
+    assert args.yes_destructive is True
+    assert args.yes is False  # --yes-destructive does not itself set args.yes
+
+
+def test_confirm_interactive_non_tty_denies(monkeypatch):
+    """When stdin is not a TTY, the callback denies without calling input()."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def _boom(_prompt: str = "") -> str:
+        raise AssertionError("input() must not be called when stdin is not a TTY")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    assert main.confirm_interactive("do something risky", {}) is False
+
+
+def test_confirm_interactive_eof_denies(monkeypatch):
+    """EOF on input() is treated as denial, not an exception."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def _eof(_prompt: str = "") -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert main.confirm_interactive("do something risky", {}) is False
+
+
+def test_confirm_interactive_accepts_yes(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    assert main.confirm_interactive("do something risky", {}) is True
+
+
+@pytest.mark.asyncio
+async def test_yes_flag_sets_auto_approve(mock_agent, mock_load_config):
+    security = SimpleNamespace(auto_approve=False, auto_approve_destructive=False)
+    mock_agent.security = security
+
+    with patch("main.load_config", mock_load_config), \
+         patch("main.setup_logging", MagicMock(return_value=MagicMock())), \
+         patch("main.LLMClient", MagicMock()), \
+         patch("main.MCPMultiplexer", MagicMock()), \
+         patch("main.KillSwitch", MagicMock()), \
+         patch("main.AgentOrchestrator", return_value=mock_agent), \
+         patch("main.EventBus", MagicMock()):
+        await main.main(["--task", "list files", "--yes"])
+
+    assert security.auto_approve is True
+    assert security.auto_approve_destructive is False
+
+
+@pytest.mark.asyncio
+async def test_yes_destructive_implies_yes(mock_agent, mock_load_config):
+    security = SimpleNamespace(auto_approve=False, auto_approve_destructive=False)
+    mock_agent.security = security
+
+    with patch("main.load_config", mock_load_config), \
+         patch("main.setup_logging", MagicMock(return_value=MagicMock())), \
+         patch("main.LLMClient", MagicMock()), \
+         patch("main.MCPMultiplexer", MagicMock()), \
+         patch("main.KillSwitch", MagicMock()), \
+         patch("main.AgentOrchestrator", return_value=mock_agent), \
+         patch("main.EventBus", MagicMock()):
+        await main.main(["--task", "list files", "--yes-destructive"])
+
+    assert security.auto_approve is True
+    assert security.auto_approve_destructive is True
+
+
+@pytest.mark.asyncio
+async def test_no_yes_flag_leaves_auto_approve_false(mock_agent, mock_load_config):
+    security = SimpleNamespace(auto_approve=False, auto_approve_destructive=False)
+    mock_agent.security = security
+
+    with patch("main.load_config", mock_load_config), \
+         patch("main.setup_logging", MagicMock(return_value=MagicMock())), \
+         patch("main.LLMClient", MagicMock()), \
+         patch("main.MCPMultiplexer", MagicMock()), \
+         patch("main.KillSwitch", MagicMock()), \
+         patch("main.AgentOrchestrator", return_value=mock_agent), \
+         patch("main.EventBus", MagicMock()):
+        await main.main(["--task", "list files"])
+
+    assert security.auto_approve is False
+    assert security.auto_approve_destructive is False

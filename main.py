@@ -56,7 +56,53 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--task", type=str, default=None, help="Run one task and exit")
     parser.add_argument("--no-vision", action="store_true", help="Disable UI detector and OCR")
     parser.add_argument("--log-level", type=str, default=None, help="Override logging level")
+    parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help=(
+            "Auto-approve write_risky confirmations (Click/Type/App/browser edits). "
+            "Destructive actions still require typed confirmation unless "
+            "--yes-destructive is set."
+        ),
+    )
+    parser.add_argument(
+        "--yes-destructive",
+        action="store_true",
+        help=(
+            "Also auto-approve destructive actions, skipping typed confirmation. "
+            "Implies --yes. Use with caution."
+        ),
+    )
     return parser
+
+
+def confirm_interactive(summary: str, action: dict[str, Any]) -> bool:
+    """Default human-confirmation callback for risky and destructive actions.
+
+    In a real TTY this prompts the user for a y/n answer. When stdin is not a
+    TTY (scripts, CI, or exhausted piped input) it prints a warning and denies
+    the action instead of blocking on input() or raising EOFError.
+    """
+    print(f"\n[confirm] {summary}")
+    if not sys.stdin.isatty():
+        print(
+            "[warning] Non-interactive mode: this action requires approval but stdin "
+            "is not a TTY.\n"
+            "          Re-run with --yes (write_risky) or --yes-destructive to "
+            "auto-approve.\n"
+            "          Denying this action."
+        )
+        return False
+    try:
+        answer = input("Approve? (y/n): ").strip().lower()
+    except EOFError:
+        print(
+            "[warning] EOF on stdin; denying action. "
+            "Re-run with --yes to auto-approve."
+        )
+        return False
+    return answer in {"y", "yes"}
 
 
 async def _run_one_shot(agent: AgentOrchestrator, task: str, logger: Any) -> int:
@@ -137,12 +183,21 @@ async def main(argv: list[str] | None = None) -> int:
     kill_switch = KillSwitch(eventbus)
     agent = AgentOrchestrator(config, eventbus, llm, mcp, kill_switch)
 
-    def _confirm(summary: str, action: dict[str, Any]) -> bool:
-        print(f"\n[confirm] {summary}")
-        answer = input("Approve? (y/n): ").strip().lower()
-        return answer in {"y", "yes"}
+    agent.set_human_confirmation_callback(confirm_interactive)
 
-    agent.set_human_confirmation_callback(_confirm)
+    if args.yes_destructive:
+        agent.security.auto_approve = True
+        agent.security.auto_approve_destructive = True
+        logger.warning(
+            "--yes-destructive: ALL confirmations (including destructive) "
+            "will be auto-approved."
+        )
+    elif args.yes:
+        agent.security.auto_approve = True
+        logger.info(
+            "--yes: write_risky confirmations will be auto-approved; "
+            "destructive actions still require typed input."
+        )
 
     if args.task:
         await agent.initialize()

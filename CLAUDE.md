@@ -197,6 +197,18 @@ The GitHub Release mirror is maintained at `LiaoZiqi-GZFLS/GUI-Actor-3B-Weights`
 python main.py
 ```
 
+One-shot (non-interactive) mode:
+
+```powershell
+python main.py --task "open notepad" --yes
+```
+
+In `--task` mode the confirmation callback denies the action (with a warning)
+when stdin is not a TTY instead of blocking on `input()`. Pass `--yes`/`-y` to
+auto-approve `write_risky` actions, or `--yes-destructive` to also auto-approve
+destructive actions (implies `--yes`; use with caution). `--yes` does not cover
+destructive actions on its own.
+
 ### GUI-Actor-3B weight download
 
 ```powershell
