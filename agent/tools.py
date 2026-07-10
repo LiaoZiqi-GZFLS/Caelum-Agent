@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -17,6 +18,9 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
+
+
+logger = logging.getLogger("caelum.tools")
 
 
 DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
@@ -263,8 +267,8 @@ class RestrictedCodeRunner(CodeRunner):
         for _mod in sorted(_ALLOWED_MODULES):
             try:
                 importlib.import_module(_mod)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to pre-load module %s: %s", _mod, exc)
 
         class _RestrictedFinder:
             def find_spec(self, name, path, target=None):
