@@ -5,6 +5,7 @@ from agent.snapshot_parser import (
     parse_playwright_snapshot,
     parse_windows_snapshot,
     summarize_tree,
+    unwrap_windows_snapshot,
 )
 
 
@@ -92,3 +93,78 @@ def test_summarize_tree_preserves_cjk_names():
     text = summarize_tree(root)
     assert "关闭标签页" in text
     assert "�" not in text
+
+
+# ---------------------------------------------------------------------------
+# Current windows-mcp box-drawing format
+# ---------------------------------------------------------------------------
+
+BOX_SAMPLE = """
+    Cursor Position: (0, 0)
+
+    Focused Window:
+    Name      Depth  Status      Width    Height    Handle
+------  -------  --------  -------  --------  --------
+任务栏           0  Normal       2560        48    131510
+
+    UI Tree:
+    desktop
+    ├── window "任务栏"
+    │   └── 窗格 "任务栏"
+    │       ├── (728,1416) 按钮 "开始"  [action: click]  [toggle:off]
+    │       └── (2554,1416) 按钮 "显示桌面"  [action: click]
+    ├── window ""
+    └── window "设置"
+"""
+
+
+def test_unwrap_windows_snapshot_decodes_json_array():
+    wrapped = '["    desktop\\n    ├── window \\"任务栏\\""]'
+    inner = unwrap_windows_snapshot(wrapped)
+    assert inner.splitlines()[0] == "    desktop"
+    assert 'window "任务栏"' in inner
+
+
+def test_unwrap_windows_snapshot_passthrough():
+    assert unwrap_windows_snapshot("plain text") == "plain text"
+    assert unwrap_windows_snapshot('["not valid json') == '["not valid json'
+
+
+def test_parse_windows_box_format_structure():
+    root = parse_windows_snapshot(BOX_SAMPLE)
+
+    windows = root.children
+    assert [w.name for w in windows] == ["任务栏", "", "设置"]
+    assert all(w.role == "window" for w in windows)
+
+    taskbar = windows[0]
+    pane = taskbar.children[0]
+    assert pane.role == "窗格"
+    assert pane.name == "任务栏"
+    assert not pane.is_interactive  # container: no [action: ...]
+
+    buttons = pane.children
+    assert len(buttons) == 2
+    start = buttons[0]
+    assert start.role == "按钮"
+    assert start.name == "开始"
+    assert start.center == (728, 1416)
+    assert start.action == "click"
+    assert start.is_interactive
+
+    show_desktop = buttons[1]
+    assert show_desktop.center == (2554, 1416)
+    assert show_desktop.action == "click"
+
+
+def test_summarize_tree_box_includes_windows_and_actions():
+    root = parse_windows_snapshot(BOX_SAMPLE)
+    text = summarize_tree(root)
+    # window titles are kept for targeting
+    assert "任务栏" in text
+    assert "设置" in text
+    # interactive leaves and their actions/coords surface
+    assert "开始" in text
+    assert "显示桌面" in text
+    assert "click" in text
+    assert "728,1416" in text

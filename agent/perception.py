@@ -21,7 +21,12 @@ from typing import TYPE_CHECKING, Any
 from PIL import Image
 
 from agent.config import Config
-from agent.snapshot_parser import parse_playwright_snapshot, parse_windows_snapshot, summarize_tree
+from agent.snapshot_parser import (
+    parse_playwright_snapshot,
+    parse_windows_snapshot,
+    summarize_tree,
+    unwrap_windows_snapshot,
+)
 
 if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
@@ -260,7 +265,7 @@ class PerceptionModule:
         try:
             result = await self.mcp.call("windows", "Snapshot", {})
             if result.success and result.content:
-                tree = parse_windows_snapshot(result.content)
+                tree = parse_windows_snapshot(unwrap_windows_snapshot(result.content))
                 return {"snapshot": summarize_tree(tree)}
         except Exception as exc:
             logger.warning("Failed to fetch Windows UI tree: %s", exc)
@@ -295,7 +300,7 @@ class PerceptionModule:
         if ocr_text:
             parts.append(f"OCR text:\n{ocr_text}")
         if ui_tree:
-            parts.append(f"UI tree:\n{str(ui_tree)[:2000]}")
+            parts.append(f"UI tree:\n{str(ui_tree)[:4000]}")
         if som_annotations:
             parts.append(f"Detected elements: {len(som_annotations)}")
         return "\n\n".join(parts)
