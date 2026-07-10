@@ -40,20 +40,74 @@ def test_orchestrator_starts_in_idle(config, eventbus, killswitch):
 
 @pytest.mark.asyncio
 async def test_run_task_direct_completion(config, eventbus, killswitch):
-    llm = FakeLLM([
-        _message("I will list the files."),
-        _message("YES"),
-        _message("Here are the files: a.txt, b.txt."),
-    ])
+    # A no-tool Think reply IS the final answer: it returns right after the
+    # Perceive -> Think step, with no post-action perception / verify / final-
+    # answer cycle.
+    perception = FakePerception([_blank_perception()])
+    llm = FakeLLM([_message("Here are the files: a.txt, b.txt.")])
     agent = AgentOrchestrator(
         config, eventbus, llm, FakeMCP(), killswitch,
-        perception=FakePerception([_blank_perception()]),
+        perception=perception,
     )
 
     result = await agent.run_task("list files")
 
     assert result == "Here are the files: a.txt, b.txt."
     assert agent.state.current_state == "COMPLETED"
+    assert agent._round_tool_used is False
+    assert len(perception.calls) == 1  # top-of-loop perceive only; no post-action
+    assert len(llm.calls) == 1         # the single Think call; no verify/final-answer
+
+
+@pytest.mark.asyncio
+async def test_greeting_returns_directly_without_verify(config, eventbus, killswitch):
+    # Pure chit-chat: Perceive runs once, the model answers with no tool, and
+    # the orchestrator returns immediately — no second perception, no verify,
+    # no skill learning scheduled.
+    perception = FakePerception([_blank_perception()])
+    learner = FakeSkillLearner()
+    llm = FakeLLM([_message("你好！有什么可以帮你的？")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=perception,
+        skill_learner=learner,
+    )
+
+    result = await agent.run_task("你好")
+
+    assert result == "你好！有什么可以帮你的？"
+    assert agent.state.current_state == "COMPLETED"
+    assert agent._round_tool_used is False
+    assert len(perception.calls) == 1
+    assert len(llm.calls) == 1
+    assert learner.calls == []  # no action taken -> nothing to learn
+
+
+@pytest.mark.asyncio
+async def test_tool_round_still_runs_verify(config, eventbus, killswitch):
+    # When the Think step dispatches a tool, the post-action perception +
+    # verify + final-answer cycle still runs (fast path is NOT taken).
+    perception = FakePerception([_blank_perception(), _blank_perception()])
+    llm = FakeLLM([
+        _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        _message("I listed them."),
+        _message("YES"),
+        _message("Files: a.txt."),
+    ])
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=perception,
+    )
+
+    result = await agent.run_task("list files")
+
+    assert result == "Files: a.txt."
+    assert agent.state.current_state == "COMPLETED"
+    assert agent._round_tool_used is True
+    assert len(perception.calls) == 2  # top-of-loop + post-action
+    assert mcp.calls == [("filesystem", "list_directory", {"path": "."})]
 
 
 @pytest.mark.asyncio

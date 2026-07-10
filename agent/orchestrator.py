@@ -112,6 +112,13 @@ class AgentOrchestrator:
         # it (e.g. tests calling _verify/_execute_tool_calls directly) never see
         # a missing attribute.
         self._used_ui_tool = False
+        # Whether any tool call in the current ReAct round was actually
+        # dispatched. Reset at the top of each loop and set by _execute_tool_calls
+        # only when a real (non-deduped) call runs. When False after
+        # _think_and_act, the model answered without acting, so run_task returns
+        # that reply directly and skips the post-action perceive/verify/final-
+        # answer cycle (the fast path for greetings and pure-Q&A).
+        self._round_tool_used = False
         # Whether any tool call in the current ReAct round returned failure.
         # Reset at the top of each loop; _verify refuses to mark a round that
         # had a tool failure as COMPLETED (blocks hallucinated success).
@@ -503,6 +510,7 @@ class AgentOrchestrator:
 
             await self.state.transition("EXECUTING", task_id=self.task_id)
             self._round_tool_failed = False
+            self._round_tool_used = False
             perception = await self.perception.perceive(
                 instruction=self.current_instruction,
                 with_vision=not self.config.ui_detector.lazy,
@@ -556,6 +564,18 @@ class AgentOrchestrator:
                 if self._check_cancelled():
                     await self.state.transition("IDLE", task_id=self.task_id)
                     return "Task cancelled by kill switch."
+
+                # Fast path (first round only): the model produced a final answer
+                # without dispatching any tool (greeting, pure Q&A, a recall it
+                # already knew). There is nothing to verify, so skip the post-
+                # action perception + _verify + _final_answer cycle entirely and
+                # return the reply. Restricted to the FIRST round so that mid-task
+                # stalls or post-reflection re-plans (which also emit no tool) keep
+                # flowing through the normal verify/guard logic. No skill is
+                # learned because no action was taken.
+                if loop == 0 and not self._round_tool_used:
+                    await self.state.transition("COMPLETED", task_id=self.task_id)
+                    return response
 
                 # Capture the post-action perception for state-based verification.
                 post_action_perception = await self.perception.perceive(
@@ -685,6 +705,10 @@ class AgentOrchestrator:
                 for call in tool_calls
             ]
 
+        # Reaching here means at least one tool call is being dispatched for real
+        # (not a deduped repeat). Mark the round so run_task knows an action was
+        # attempted and runs the verify stage afterwards.
+        self._round_tool_used = True
         results = []
         succeeded: list[bool] = []
         llm_tools = self.llm.tool_names()
