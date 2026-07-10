@@ -152,6 +152,7 @@ class PerceptionModule:
         try:
             import win32gui
         except Exception:
+            logger.debug("win32gui not available; skipping active-window crop")
             return image
         try:
             hwnd = win32gui.GetForegroundWindow()
@@ -167,7 +168,8 @@ class PerceptionModule:
             if x2 <= x1 or y2 <= y1:
                 return image
             return image.crop((x1, y1, x2, y2))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to crop to active window: %s", exc)
             return image
 
     def _compress(self, image: Image.Image) -> bytes:
