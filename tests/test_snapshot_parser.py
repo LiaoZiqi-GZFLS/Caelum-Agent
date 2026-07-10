@@ -58,3 +58,37 @@ children:
 def test_parse_playwright_snapshot_fallback():
     root = parse_playwright_snapshot("not yaml at all")
     assert root.role == "document"
+
+
+def test_parse_windows_snapshot_preserves_cjk_names():
+    # Regression guard: window/element names with non-ASCII (Chinese) must
+    # survive parsing unchanged, with no U+FFFD replacement chars introduced.
+    text = """
+[1] Window '测试文档-中文.txt - Notepad'
+  [2] Edit '编辑' (x=10, y=20, w=100, h=20)
+"""
+    root = parse_windows_snapshot(text)
+    window = root.children[0]
+    edit = window.children[0]
+
+    assert window.name == "测试文档-中文.txt - Notepad"
+    assert edit.name == "编辑"
+    assert "�" not in window.name
+    assert "�" not in edit.name
+
+
+def test_summarize_tree_preserves_cjk_names():
+    # summarize_tree only emits interactive elements, so the CJK window is
+    # dropped by design; the interactive CJK button must survive unchanged.
+    root = UIElement(
+        element_id="root",
+        role="window",
+        name="desktop",
+        children=[
+            UIElement(element_id="w1", role="window", name="测试文档-中文.txt"),
+            UIElement(element_id="b1", role="button", name="关闭标签页"),
+        ],
+    )
+    text = summarize_tree(root)
+    assert "关闭标签页" in text
+    assert "�" not in text
