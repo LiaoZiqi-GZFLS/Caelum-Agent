@@ -8,6 +8,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Ensure the Windows console can print Unicode (emoji, CJK) without crashing on
+# the GBK code page. reconfigure() is a no-op when the stream is already UTF-8
+# (modern terminals, pytest capture). `errors="replace"` guarantees we never
+# raise UnicodeEncodeError even on legacy terminals.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from agent.config import Config, load_config
 from agent.kill_switch import KillSwitch
 from agent.llm_client import LLMClient

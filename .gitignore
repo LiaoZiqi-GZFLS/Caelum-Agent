@@ -236,3 +236,6 @@ __marimo__/
 
 # Spike / experiment scratch directory
 /spikes/
+
+# Playwright MCP runtime state (browser profiles, cache)
+/.playwright-mcp/
