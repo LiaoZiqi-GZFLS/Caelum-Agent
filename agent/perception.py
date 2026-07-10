@@ -38,6 +38,7 @@ class Perception:
     screen_width: int = 0
     screen_height: int = 0
     annotated_screenshot_path: Path | None = None
+    blocked_count: int = 0
 
 
 class PerceptionModule:
@@ -81,7 +82,7 @@ class PerceptionModule:
         )
         ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
         ui_tree = await self._fetch_ui_tree()
-        som_annotations = await self._run_ui_detector(image, instruction)
+        som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
 
         ui_hash = self._compute_ui_hash(image_hash, ocr_text, ui_tree)
         description = self._build_description(ocr_text, ui_tree, som_annotations)
@@ -112,6 +113,7 @@ class PerceptionModule:
             screen_width=orig_w,
             screen_height=orig_h,
             annotated_screenshot_path=annotated_screenshot_path,
+            blocked_count=blocked_count,
         )
 
     @staticmethod
@@ -244,13 +246,14 @@ class PerceptionModule:
 
     async def _run_ui_detector(
         self, image: Image.Image, instruction: str
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int]:
         if self.ui_detector is None or not self.config.ui_detector.enabled:
-            return []
+            return [], 0
         try:
-            return await self.ui_detector.annotate(image, instruction)
+            annotations, blocked = await self.ui_detector.annotate(image, instruction)
+            return annotations, blocked
         except Exception as exc:
-            return [{"error": str(exc)}]
+            return [{"error": str(exc)}], 0
 
     @staticmethod
     def _build_description(

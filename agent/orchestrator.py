@@ -214,6 +214,8 @@ class AgentOrchestrator:
         screen_x = int(round(match.get("center_x", 0) * sw))
         screen_y = int(round(match.get("center_y", 0) * sh))
 
+        is_uncertain = match.get("verdict") == "uncertain"
+
         if action in ("click", "double_click", "right_click"):
             mcp_action = "Click"
             mcp_args: dict[str, Any] = {"loc": [screen_x, screen_y]}
@@ -227,20 +229,33 @@ class AgentOrchestrator:
             if not focus_result.success:
                 return f"[error] Failed to focus element at ({screen_x}, {screen_y}): {focus_result.content}"
             type_result = await self.mcp.call("windows", "Type", {"text": text or ""})
-            return f"OK: typed text at ({screen_x}, {screen_y}) — {type_result.content[:200]}" if type_result.success else f"[error] {type_result.content}"
+            if type_result.success:
+                msg = f"OK: typed text at ({screen_x}, {screen_y}) — {type_result.content[:200]}"
+                if is_uncertain:
+                    msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
+                return msg
+            return f"[error] {type_result.content}"
         elif action in ("scroll_down", "scroll_up"):
             direction = "down" if action == "scroll_down" else "up"
             scroll_result = await self.mcp.call("windows", "Scroll", {
                 "loc": [screen_x, screen_y],
                 "direction": direction,
             })
-            return f"OK: {action} at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}" if scroll_result.success else f"[error] {scroll_result.content}"
+            if scroll_result.success:
+                msg = f"OK: {action} at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}"
+                if is_uncertain:
+                    msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
+                return msg
+            return f"[error] {scroll_result.content}"
         else:
             return f"[error] Unknown action: {action}"
 
         result = await self.mcp.call("windows", mcp_action, mcp_args)
         if result.success:
-            return f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
+            msg = f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
+            if is_uncertain:
+                msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
+            return msg
         return f"[error] {result.content}"
 
     def _register_desktop_interact(self) -> None:
@@ -413,10 +428,31 @@ class AgentOrchestrator:
 
             await self.state.transition("EXECUTING", task_id=self.task_id)
             perception = await self.perception.perceive(instruction=self.current_instruction)
+            self._last_perception = perception
             self.history.append({
                 "role": "user",
                 "content": self._format_perception(perception),
             })
+
+            # Check for total rejection by verifier (all candidates blocked).
+            if perception.blocked_count > 0 and not perception.som_annotations:
+                reason = f"Verifier rejected all {perception.blocked_count} candidates"
+                await self.reflection.record(
+                    task_summary=user_input,
+                    failure_reason=reason,
+                    fix_action="Retry detection with a different instruction or ask for human guidance.",
+                )
+                self.history.append({
+                    "role": "user",
+                    "content": (
+                        f"{reason}. The UI may have changed or the target element may not be visible. "
+                        "Try a different approach or describe what you are looking for differently."
+                    ),
+                })
+                await self.state.transition("REFLECT", task_id=self.task_id)
+                reflection_text = await self._reflect()
+                await self.state.transition("PLANNING", task_id=self.task_id)
+                continue
 
             if self._is_same_ui_loop(perception.ui_hash):
                 loops = len(self._recent_hashes)

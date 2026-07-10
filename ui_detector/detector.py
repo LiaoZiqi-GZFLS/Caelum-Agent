@@ -120,11 +120,11 @@ class UIDetector:
 
     async def annotate(
         self, image: Image.Image, instruction: str
-    ) -> list[dict[str, Any]]:
-        """Return top-k SoM annotations with normalized coordinates.
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return (annotations, blocked_count).
 
-        Inference and verification are executed in the detector's thread pool
-        so the event loop stays responsive.
+        Annotations with verdict "reject" are excluded from the returned list.
+        blocked_count is the number of rejected candidates.
         """
         pred = await self.predict_async(image, instruction)
         annotations = []
@@ -143,9 +143,12 @@ class UIDetector:
                 "normalized": True,
             })
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
+        verified = await loop.run_in_executor(
             self._executor, self.verifier.verify, image, instruction, annotations
         )
+        passed = [a for a in verified if a.get("verdict") != "reject"]
+        blocked = len(verified) - len(passed)
+        return passed, blocked
 
     async def visualize(
         self,
@@ -155,5 +158,5 @@ class UIDetector:
         font_size: int = 14,
     ) -> Image.Image:
         """Run detection and return the screenshot with SoM markers drawn."""
-        annotations = await self.annotate(image, instruction)
+        annotations, _blocked = await self.annotate(image, instruction)
         return visualize_som(image, annotations, marker_radius, font_size)

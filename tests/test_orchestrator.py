@@ -710,6 +710,52 @@ async def test_run_task_skill_learner_failure_is_ignored(config, eventbus, kills
 
 
 @pytest.mark.asyncio
+async def test_run_task_full_rejection_triggers_reflect(config, eventbus, killswitch):
+    """When verifier rejects all candidates, orchestrator reflects and retries."""
+    rejected_perception = Perception(
+        screenshot_path=Path("/tmp/blank.jpg"),
+        description="Blank screen with all elements rejected",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[],  # all were rejected
+        blocked_count=3,
+    )
+    normal_perception = Perception(
+        screenshot_path=Path("/tmp/blank.jpg"),
+        description="Blank screen",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[
+            {"label": 1, "center_x": 0.5, "center_y": 0.5},
+        ],
+        blocked_count=0,
+    )
+    llm = FakeLLM([
+        # After full rejection, model reflects:
+        _message("I need to try a different approach."),
+        # Then normal flow:
+        _message("Listing files.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        _message("I listed them."),
+        _message("YES"),
+        _message("Files: a.txt."),
+    ])
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+    reflection = FakeReflection()
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([rejected_perception, normal_perception]),
+        reflection=reflection,
+    )
+
+    result = await agent.run_task("list files")
+
+    assert result == "Files: a.txt."
+    assert agent.state.current_state == "COMPLETED"
+    assert any("rejected all" in r["failure_reason"] for r in reflection.recorded)
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_creates_kimi_memory_client(config, eventbus, killswitch):
     from agent.kimi_memory import KimiMemoryClient
     llm = FakeLLM([])
@@ -909,6 +955,31 @@ async def test_desktop_interact_uses_screen_dimension_fallback(config, eventbus,
     server, tool, args = mcp.calls[-1]
     # 0.25 * 1920 = 480, 0.5 * 1080 = 540
     assert args["loc"] == [480, 540]
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_warns_on_uncertain_verdict(config, eventbus, killswitch):
+    """DesktopInteract appends warning when matched element has verdict=uncertain."""
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[
+            {"label": 1, "center_x": 0.5, "center_y": 0.5, "verdict": "uncertain"},
+        ],
+        screen_width=1920,
+        screen_height=1080,
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="click")
+
+    assert result.startswith("[uncertain]")
+    assert "OK" in result
+    assert "Verifier was unsure" in result
 
 
 # ---------------------------------------------------------------------------
