@@ -929,6 +929,61 @@ async def test_windows_tool_sets_used_ui_flag(config, eventbus, killswitch):
     assert fs_agent._used_ui_tool is False
 
 
+# ---------------------------------------------------------------------------
+# identical-batch dedup tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_identical_batch_skipped_after_success(config, eventbus, killswitch):
+    # Re-emitting the exact same (tool, args) that already succeeded is
+    # short-circuited: MCP is NOT called again and a notice is returned.
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+
+    first = [_tool_call("filesystem__list_directory", {"path": "."}, call_id="1")]
+    r1 = await agent._execute_tool_calls(first)
+    assert r1[0]["content"] == "a.txt"
+    assert len(mcp.calls) == 1
+
+    again = [_tool_call("filesystem__list_directory", {"path": "."}, call_id="2")]
+    r2 = await agent._execute_tool_calls(again)
+    assert len(mcp.calls) == 1  # no second execution
+    assert r2[0]["tool_call_id"] == "2"
+    assert r2[0]["content"].startswith("[notice]")
+
+
+@pytest.mark.asyncio
+async def test_identical_batch_not_skipped_after_failure(config, eventbus, killswitch):
+    # If the first batch failed, an identical retry must still execute (the
+    # failure may have been transient), so dedup stays OFF.
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=False, content="permission denied"))
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+
+    batch = [_tool_call("filesystem__list_directory", {"path": "."})]
+    r1 = await agent._execute_tool_calls(batch)
+    assert r1[0]["content"] == "permission denied"
+    assert agent._last_batch_all_succeeded is False
+
+    r2 = await agent._execute_tool_calls([_tool_call("filesystem__list_directory", {"path": "."})])
+    assert len(mcp.calls) == 2  # executed again, not deduped
+    assert not r2[0]["content"].startswith("[notice]")
+
+
+@pytest.mark.asyncio
+async def test_different_args_not_deduped(config, eventbus, killswitch):
+    # Same tool but different arguments are a different batch and both run.
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+
+    await agent._execute_tool_calls([_tool_call("filesystem__list_directory", {"path": "."})])
+    await agent._execute_tool_calls([_tool_call("filesystem__list_directory", {"path": "./other"})])
+    assert len(mcp.calls) == 2
+
+
 def test_is_ui_tool_classification():
     # Screen-touching servers/tools are classified as UI; everything else is not.
     assert AgentOrchestrator._is_ui_tool("windows__Click", "windows") is True

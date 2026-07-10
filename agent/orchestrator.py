@@ -116,6 +116,11 @@ class AgentOrchestrator:
         # Reset at the top of each loop; _verify refuses to mark a round that
         # had a tool failure as COMPLETED (blocks hallucinated success).
         self._round_tool_failed = False
+        # Signature of the last executed tool-call batch and whether it fully
+        # succeeded, used to short-circuit an LLM that re-emits the exact same
+        # batch on the next round (a recurring token-wasting loop).
+        self._last_batch_signature: tuple[tuple[str, str], ...] | None = None
+        self._last_batch_all_succeeded = False
         self._human_confirm_callback: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
@@ -409,6 +414,8 @@ class AgentOrchestrator:
         self._cancel_event.clear()
         self.consecutive_action_failures = 0
         self.consecutive_api_failures = 0
+        self._last_batch_signature = None
+        self._last_batch_all_succeeded = False
         # Ensure a fresh operational state for each new task.
         if self.state.current_state != "IDLE":
             await self.state.transition("IDLE", task_id=self.task_id)
@@ -627,8 +634,43 @@ class AgentOrchestrator:
             tool_results = await self._execute_tool_calls(tool_calls)
             self.history.extend(tool_results)
 
+    def _batch_signature(self, tool_calls: list[Any]) -> tuple[tuple[str, str], ...]:
+        """Canonical, order-preserving signature of a tool-call batch.
+
+        Used to detect when the LLM re-emits the exact same batch it already
+        ran on the previous round (a common token-wasting loop).
+        """
+        sig: list[tuple[str, str]] = []
+        for call in tool_calls:
+            name = call.function.name
+            try:
+                args: Any = json.loads(call.function.arguments)
+            except (json.JSONDecodeError, TypeError):
+                args = call.function.arguments
+            sig.append((name, json.dumps(args, sort_keys=True, ensure_ascii=False)))
+        return tuple(sig)
+
     async def _execute_tool_calls(self, tool_calls: list[Any]) -> list[dict[str, Any]]:
+        sig = self._batch_signature(tool_calls)
+        if sig and sig == self._last_batch_signature and self._last_batch_all_succeeded:
+            logger.info(
+                "Skipping identical repeated tool-call batch (%d call(s))", len(tool_calls)
+            )
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": (
+                        "[notice] You repeated the exact same tool call(s) that already "
+                        "succeeded; the previous result is unchanged. Proceed with the "
+                        "next step or choose a different action."
+                    ),
+                }
+                for call in tool_calls
+            ]
+
         results = []
+        succeeded: list[bool] = []
         llm_tools = self.llm.tool_names()
         for call in tool_calls:
             if self._check_cancelled():
@@ -637,6 +679,7 @@ class AgentOrchestrator:
                     "tool_call_id": call.id,
                     "content": "[error] Task cancelled by kill switch.",
                 })
+                succeeded.append(False)
                 break
 
             name = call.function.name
@@ -645,6 +688,7 @@ class AgentOrchestrator:
                 # Built-in Formula tool handled by LLM client.
                 outputs = await self.llm.execute_tool_calls([call])
                 results.extend(outputs)
+                succeeded.extend([True] * len(outputs))
                 if self._is_ui_tool(name, None):
                     self._used_ui_tool = True
                 continue
@@ -657,6 +701,7 @@ class AgentOrchestrator:
                     "tool_call_id": call.id,
                     "content": f"[error] Tool {name} not found.",
                 })
+                succeeded.append(False)
                 continue
             if self._is_ui_tool(name, server):
                 self._used_ui_tool = True
@@ -677,6 +722,7 @@ class AgentOrchestrator:
                         f"read the target [id], then retry {tool_name} with label=<id>."
                     ),
                 })
+                succeeded.append(False)
                 continue
 
             await self.eventbus.emit(
@@ -720,6 +766,9 @@ class AgentOrchestrator:
                 "tool_call_id": call.id,
                 "content": content,
             })
+            succeeded.append(success)
+        self._last_batch_signature = sig
+        self._last_batch_all_succeeded = bool(succeeded) and all(succeeded)
         return results
 
     def _resolve_mcp_tool(self, name: str) -> tuple[str | None, str | None]:
