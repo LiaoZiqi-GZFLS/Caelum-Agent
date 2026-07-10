@@ -3,260 +3,30 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import httpx
 
-from agent.config import Config
-from agent.kill_switch import KillSwitch
 from agent.orchestrator import AgentOrchestrator
-from agent.perception import Perception, PerceptionModule
-from agent.reflection import ReflectionEngine
-from eventbus import EventBus
-from eventbus.events import KillSwitchTriggered
+from agent.perception import Perception
 from mcp_client import ToolResult
 
-
-# ---------------------------------------------------------------------------
-# Fakes
-# ---------------------------------------------------------------------------
-
-class FakeLLM:
-    """Scripted LLM that returns queued completions, with an optional fallback."""
-
-    def __init__(
-        self,
-        responses: list[Any] | None = None,
-        default_response: Any | None = None,
-    ) -> None:
-        self.responses = list(responses or [])
-        self.default_response = default_response
-        self._index = 0
-        self.calls: list[list[dict[str, Any]]] = []
-        self.last_tools: list[Any] = []
-        self.tools: list[str] = []
-
-    def register_function_tools(self, tools: list[dict[str, Any]]) -> None:
-        for t in tools:
-            self.tools.append(t["function"]["name"])
-
-    def register_local_function(self, *args: Any, **kwargs: Any) -> None:
-        self.tools.append(args[0])
-
-    def tool_names(self) -> list[str]:
-        return self.tools
-
-    async def initialize(self) -> None:
-        pass
-
-    async def close(self) -> None:
-        pass
-
-    async def chat(self, messages: list[dict[str, Any]], tools: Any = None) -> Any:
-        self.calls.append(messages)
-        self.last_tools.append(tools)
-        if self._index < len(self.responses):
-            response = self.responses[self._index]
-        elif self.default_response is not None:
-            response = self.default_response
-        else:
-            raise RuntimeError(f"FakeLLM ran out of responses after {self._index} calls")
-        self._index += 1
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    async def execute_tool_calls(self, tool_calls: list[Any]) -> list[dict[str, Any]]:
-        return [{
-            "role": "tool",
-            "tool_call_id": call.id,
-            "content": "[formula result]",
-        } for call in tool_calls]
-
-
-class FakeMCP:
-    def __init__(self, tools: list[dict[str, Any]] | None = None) -> None:
-        self._tools = tools or []
-        self.calls: list[tuple[str, str, dict[str, Any]]] = []
-        self._results: dict[tuple[str, str], ToolResult] = {}
-
-    def set_result(self, server: str, tool: str, result: ToolResult) -> None:
-        self._results[(server, tool)] = result
-
-    async def connect_all(self) -> None:
-        pass
-
-    async def disconnect_all(self) -> None:
-        pass
-
-    async def call(self, server: str, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
-        self.calls.append((server, tool_name, arguments))
-        return self._results.get(
-            (server, tool_name),
-            ToolResult(success=True, content=f"{server}/{tool_name} ok"),
-        )
-
-    def all_tools(self) -> list[dict[str, Any]]:
-        return self._tools
-
-
-class FakePerception(PerceptionModule):
-    def __init__(self, perceptions: list[Perception] | None = None) -> None:
-        self.perceptions = list(perceptions or [])
-        self._index = 0
-        self.calls: list[str] = []
-
-    async def perceive(self, instruction: str = "") -> Perception:
-        self.calls.append(instruction)
-        if self._index >= len(self.perceptions):
-            base = self.perceptions[-1] if self.perceptions else _blank_perception()
-        else:
-            base = self.perceptions[self._index]
-        self._index += 1
-        perception = copy.copy(base)
-        if not perception.ui_hash:
-            perception.ui_hash = f"fake-{self._index - 1}"
-        return perception
-
-
-class FakeKillSwitch(KillSwitch):
-    def __init__(self, eventbus: EventBus) -> None:
-        self.eventbus = eventbus
-        self.started = False
-        self.stopped = False
-
-    def start(self) -> None:
-        self.started = True
-
-    def stop(self) -> None:
-        self.stopped = True
-
-    async def trigger(self) -> None:
-        await self.eventbus.emit(KillSwitchTriggered(reason="test"))
-
-
-class FakeReflection(ReflectionEngine):
-    def __init__(self) -> None:
-        self.recorded: list[dict[str, Any]] = []
-
-    def build_context(self, user_input: str) -> str:
-        return ""
-
-    async def record(self, task_summary: str, failure_reason: str, fix_action: str) -> None:
-        self.recorded.append({
-            "task_summary": task_summary,
-            "failure_reason": failure_reason,
-            "fix_action": fix_action,
-        })
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _blank_perception() -> Perception:
-    return Perception(
-        screenshot_path=Path("/tmp/blank.jpg"),
-        description="Blank screen",
-        ocr_text="",
-        ui_tree={},
-        som_annotations=[],
-    )
-
-
-def _same_hash_perception(hash_value: str = "same") -> Perception:
-    return Perception(
-        screenshot_path=Path("/tmp/blank.jpg"),
-        description="Same screen",
-        ocr_text="same",
-        ui_tree={"same": True},
-        som_annotations=[],
-        ui_hash=hash_value,
-    )
-
-
-def _message(content: str = "", tool_calls: list[Any] | None = None) -> Any:
-    return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(
-                    content=content,
-                    tool_calls=tool_calls or [],
-                )
-            )
-        ]
-    )
-
-
-class _FakeToolCall:
-    def __init__(self, name: str, args: dict[str, Any], call_id: str = "call_1") -> None:
-        self.id = call_id
-        self.function = SimpleNamespace(
-            name=name, arguments=__import__("json").dumps(args)
-        )
-
-    def model_dump(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "function": {
-                "name": self.function.name,
-                "arguments": self.function.arguments,
-            },
-        }
-
-
-def _tool_call(name: str, args: dict[str, Any], call_id: str = "call_1") -> Any:
-    return _FakeToolCall(name, args, call_id)
-
-
-def _make_config(tmp_path: Path) -> Config:
-    return Config(
-        llm={
-            "provider": "kimi",
-            "base_url": "https://api.moonshot.cn/v1",
-            "api_key": "test",
-            "model": "kimi-k2.6",
-            "enable_builtin_tools": False,
-            "builtin_tools": [],
-        },
-        mcp_servers={
-            "playwright": {"command": "npx", "args": [], "env": {}},
-            "windows": {"command": "windows-mcp", "args": ["serve"], "env": {}},
-            "filesystem": {"command": "npx", "args": [], "env": {}},
-        },
-        memory={"sqlite_path": str(tmp_path / "memory.db")},
-        paths={
-            "skills_dir": str(tmp_path / "skills"),
-            "cache_dir": str(tmp_path / "cache"),
-            "audit_log": str(tmp_path / "audit.log"),
-        },
-        security={
-            "default_level": "read",
-            "auto_execute_levels": ["read", "write_safe"],
-            "confirm_levels": ["write_risky"],
-            "destructive_requires_approval": True,
-        },
-    )
-
-
-@pytest.fixture
-def eventbus():
-    return EventBus()
-
-
-@pytest.fixture
-def killswitch(eventbus):
-    return FakeKillSwitch(eventbus)
-
-
-@pytest.fixture
-def config(tmp_path: Path):
-    return _make_config(tmp_path)
+from tests.fakes import (
+    FakeLLM,
+    FakeMCP,
+    FakeKillSwitch,
+    FakePerception,
+    FakeReflection,
+    FakeSkillLearner,
+    TriggeringLLM,
+    _blank_perception,
+    _same_hash_perception,
+    _message,
+    _tool_call,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +115,7 @@ async def test_run_task_max_loops_reaches_stuck(config, eventbus, killswitch):
             _message("NO"),
             _message("Retrying."),
         ],
-        default_response=_message("Still trying."),
+        default_chat=_message("Still trying."),
     )
     mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
     mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content=""))
@@ -358,19 +128,6 @@ async def test_run_task_max_loops_reaches_stuck(config, eventbus, killswitch):
 
     assert "loop limit" in result.lower()
     assert agent.state.current_state == "STUCK"
-
-
-class TriggeringLLM(FakeLLM):
-    """Fake LLM that triggers the kill switch at the start of the first chat()."""
-
-    def __init__(self, responses: list[Any], killswitch: FakeKillSwitch) -> None:
-        super().__init__(responses)
-        self._killswitch = killswitch
-
-    async def chat(self, messages: list[dict[str, Any]], tools: Any = None) -> Any:
-        if self._index == 0:
-            await self._killswitch.trigger()
-        return await super().chat(messages, tools)
 
 
 @pytest.mark.asyncio
@@ -395,7 +152,7 @@ async def test_run_task_action_failure_threshold(config, eventbus, killswitch):
             _message("YES"),
             _message("Final answer."),
         ],
-        default_response=_message("Proceeding."),
+        default_chat=_message("Proceeding."),
     )
     mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
     mcp.set_result("filesystem", "list_directory", ToolResult(success=False, content="permission denied"))
@@ -420,7 +177,7 @@ async def test_run_task_unknown_tool_returns_error(config, eventbus, killswitch)
             _message("Tool returned an error."),
             _message("NO"),
         ],
-        default_response=_message("Proceeding."),
+        default_chat=_message("Proceeding."),
     )
     agent = AgentOrchestrator(
         config, eventbus, llm, FakeMCP(), killswitch,
@@ -444,7 +201,7 @@ async def test_run_task_blocked_tool_counts_as_failure(config, eventbus, killswi
             _message("Tool was blocked."),
             _message("NO"),
         ],
-        default_response=_message("Proceeding."),
+        default_chat=_message("Proceeding."),
     )
     mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
     # No confirmation callback registered, so risky tools are blocked.
@@ -516,7 +273,7 @@ async def test_final_answer_gives_up_after_repeated_tool_calls(config, eventbus,
             _message("Try again", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
             _message("Try again", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
         ],
-        default_response=_message("Default."),
+        default_chat=_message("Default."),
     )
     mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
     mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt\nb.txt"))
@@ -558,7 +315,7 @@ async def test_api_failure_threshold_triggers_local_mode(config, eventbus, kills
             httpx.ConnectError("connection failed"),
             httpx.ConnectError("connection failed"),
         ],
-        default_response=_message("Recovery."),
+        default_chat=_message("Recovery."),
     )
     agent = AgentOrchestrator(
         config, eventbus, llm, FakeMCP(), killswitch,
@@ -581,7 +338,7 @@ async def test_same_ui_loop_detection(config, eventbus, killswitch):
             _message("I tried."),
             _message("NO"),
         ],
-        default_response=_message("Retrying."),
+        default_chat=_message("Retrying."),
     )
     mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
     mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content=""))
@@ -606,7 +363,7 @@ async def test_state_based_verifier_rejects_unchanged_ui_after_mutating_action(c
             _message("Retrying."),
             _message("YES"),
         ],
-        default_response=_message("Trying."),
+        default_chat=_message("Trying."),
     )
     mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
     mcp.set_result("windows", "Click", ToolResult(success=True, content="ok"))
@@ -646,15 +403,6 @@ async def test_state_based_verifier_accepts_unchanged_ui_for_query_action(config
 
     assert result == "Files: a.txt."
     assert agent.state.current_state == "COMPLETED"
-
-
-class FakeSkillLearner:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, list[str]]] = []
-
-    async def learn(self, task: str, trajectory: list[str]) -> dict[str, Any]:
-        self.calls.append((task, list(trajectory)))
-        return {"name": "learned", "version": "v0.1.0", "path": "/tmp/learned.md", "merged": False}
 
 
 @pytest.mark.asyncio
@@ -758,7 +506,7 @@ async def test_run_task_full_rejection_triggers_reflect(config, eventbus, killsw
 @pytest.mark.asyncio
 async def test_orchestrator_creates_kimi_memory_client(config, eventbus, killswitch):
     from agent.kimi_memory import KimiMemoryClient
-    llm = FakeLLM([])
+    llm = FakeLLM()
     llm.tools = ["memory", "rethink"]
     agent = AgentOrchestrator(config, eventbus, llm, FakeMCP(), killswitch)
     assert isinstance(agent.memory.kimi, KimiMemoryClient)
@@ -769,7 +517,7 @@ async def test_orchestrator_creates_kimi_memory_client(config, eventbus, killswi
 async def test_orchestrator_skips_kimi_memory_client_when_disabled(config, eventbus, killswitch):
     config.memory.use_kimi_memory = False
     config.reflection.use_rethink = False
-    agent = AgentOrchestrator(config, eventbus, FakeLLM([]), FakeMCP(), killswitch)
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
     assert agent._kimi_client is None
     assert agent.memory.kimi is None
     assert agent.reflection.kimi is None
@@ -783,7 +531,7 @@ async def test_orchestrator_skips_kimi_memory_client_when_disabled(config, event
 @pytest.mark.asyncio
 async def test_desktop_interact_tool_registered(config, eventbus, killswitch):
     """desktop_interact is available when tools are registered."""
-    llm = FakeLLM([])
+    llm = FakeLLM()
     mcp = FakeMCP()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
 
@@ -798,7 +546,7 @@ async def test_desktop_interact_tool_registered(config, eventbus, killswitch):
 async def test_desktop_interact_click_resolves_label_to_coords(config, eventbus, killswitch):
     """desktop_interact resolves a SoM label to screen coords and calls Click."""
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
 
     agent._last_perception = Perception(
@@ -828,7 +576,7 @@ async def test_desktop_interact_click_resolves_label_to_coords(config, eventbus,
 async def test_desktop_interact_reports_missing_label(config, eventbus, killswitch):
     """desktop_interact returns an error when the label is not found."""
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
 
     agent._last_perception = Perception(
@@ -848,7 +596,7 @@ async def test_desktop_interact_reports_missing_label(config, eventbus, killswit
 @pytest.mark.asyncio
 async def test_desktop_interact_no_perception_error(config, eventbus, killswitch):
     """desktop_interact errors when there is no perception data."""
-    agent = AgentOrchestrator(config, eventbus, FakeLLM([]), FakeMCP(), killswitch)
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
     agent._last_perception = None
 
     result = await agent._desktop_interact_impl(label=1, action="click")
@@ -863,7 +611,7 @@ async def test_desktop_interact_double_click_sets_times(config, eventbus, killsw
     from agent.perception import Perception
 
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
@@ -890,7 +638,7 @@ async def test_desktop_interact_right_click_sets_button(config, eventbus, killsw
     from agent.perception import Perception
 
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
@@ -917,7 +665,7 @@ async def test_desktop_interact_unknown_action_error(config, eventbus, killswitc
     from agent.perception import Perception
 
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
@@ -939,7 +687,7 @@ async def test_desktop_interact_uses_screen_dimension_fallback(config, eventbus,
     from agent.perception import Perception
 
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
@@ -961,7 +709,7 @@ async def test_desktop_interact_uses_screen_dimension_fallback(config, eventbus,
 async def test_desktop_interact_warns_on_uncertain_verdict(config, eventbus, killswitch):
     """DesktopInteract appends warning when matched element has verdict=uncertain."""
     mcp = FakeMCP()
-    llm = FakeLLM([])
+    llm = FakeLLM()
     agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
