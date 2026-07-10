@@ -263,21 +263,29 @@ class AgentOrchestrator:
         text_parts = [perception.description]
         if perception.som_annotations:
             text_parts.append(
-                "SoM annotations: "
-                + ", ".join(
-                    f"[{a.get('label', '?')}] ({a.get('center_x', 0):.3f}, {a.get('center_y', 0):.3f})"
+                "SoM annotations (numbered markers on screenshot):\n"
+                + "\n".join(
+                    f"  [{a.get('label', '?')}] at ({a.get('center_x', 0):.3f}, {a.get('center_y', 0):.3f})"
+                    + (f" score={a.get('score', 0):.2f}" if a.get('score') else "")
                     for a in perception.som_annotations
                 )
+            )
+            text_parts.append(
+                "To interact with an element, call DesktopInteract(label=<number>, action=<action>). "
+                "Actions: click, double_click, right_click, type (needs text=), scroll_down, scroll_up."
             )
 
         content: list[dict[str, Any]] = [
             {"type": "text", "text": "\n\n".join(text_parts)},
         ]
 
-        screenshot_path = perception.screenshot_path
-        if screenshot_path.exists():
+        # Prefer the SoM-annotated screenshot; fall back to raw.
+        image_path = (
+            perception.annotated_screenshot_path or perception.screenshot_path
+        )
+        if image_path is not None and image_path.exists():
             try:
-                image_bytes = screenshot_path.read_bytes()
+                image_bytes = image_path.read_bytes()
                 b64 = base64.b64encode(image_bytes).decode("utf-8")
                 content.append({
                     "type": "image_url",
@@ -291,7 +299,7 @@ class AgentOrchestrator:
         else:
             content.append({
                 "type": "text",
-                "text": f"Screenshot path not found: {screenshot_path}",
+                "text": "Screenshot not available.",
             })
 
         return content
@@ -358,7 +366,15 @@ class AgentOrchestrator:
         system_content = (
             "You are Caelum-Agent, a Windows desktop automation assistant. "
             "Use the provided tools to interact with the browser and desktop. "
-            "Always explain your reasoning briefly before acting."
+            "Always explain your reasoning briefly before acting.\n\n"
+            "## Working with the SoM (Set-of-Mark) screenshot\n"
+            "The screenshot contains numbered red circle markers on detected UI elements. "
+            "Each marker has a number (1, 2, 3, ...). To interact with a marked element:\n"
+            "- Use DesktopInteract(label=N, action='click') to click marker N\n"
+            "- Use DesktopInteract(label=N, action='type', text='...') to type into an input field\n"
+            "- Use DesktopInteract(label=N, action='scroll_down') to scroll at marker N\n"
+            "- For browser elements with refs (like e12), use playwright__browser_click(target='e12') instead.\n"
+            "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs."
         )
         if reflection_context:
             system_content += "\n\n" + reflection_context
