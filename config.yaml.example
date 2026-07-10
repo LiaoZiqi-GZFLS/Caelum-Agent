@@ -66,6 +66,14 @@ ui_detector:
   # needs SoM coordinates. Pure compute/filesystem/API tasks never load the
   # model. Set to false to load at startup and run vision every perception.
   lazy: true
+  # Warm-load the model at startup while keeping lazy inference. Only meaningful
+  # when lazy: true. The model stays resident so the first DesktopInteract does
+  # not stall on a multi-GB load, but perceive() still does NOT annotate every
+  # frame (so non-UI rounds pay nothing). Defaults to true; set to false to defer
+  # the multi-GB load to the first DesktopInteract (saves memory until then, but
+  # the first SoM click stalls). Trade-off: ~7.6GB resident memory for a fast
+  # first click. Has no effect when lazy: false (eager already preloads).
+  preload: true
   model_path: ./models/gui-actor-3b
   device: cuda:0
   dtype: bfloat16

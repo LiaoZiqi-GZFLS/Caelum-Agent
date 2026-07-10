@@ -46,6 +46,14 @@ class MCPConfig(BaseModel):
 class UIDetectorConfig(BaseModel):
     enabled: bool = True
     lazy: bool = True
+    # When True together with lazy=True, load the model at startup (warm) but keep
+    # on-demand inference: perceive() still skips annotate, and vision runs only
+    # when DesktopInteract needs SoM coordinates. Trades resident GPU/CPU memory
+    # for eliminating the first-click load stall. Defaults to True (warm start);
+    # set to False to defer the load to the first DesktopInteract. Ignored when
+    # lazy=False (eager mode already loads at startup and annotates every
+    # perception).
+    preload: bool = True
     model_path: str = "./models/gui-actor-3b"
     device: str = "cuda:0"
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"

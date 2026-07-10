@@ -165,6 +165,11 @@ class AgentOrchestrator:
                 # Eager mode: load the model at startup and run vision on every
                 # perception (legacy behaviour, useful for pure-vision tasks).
                 self.ui_detector.load()
+            elif self.config.ui_detector.preload:
+                # Warm load + lazy inference: keep the model resident so the first
+                # DesktopInteract doesn't stall, while perceive() still skips
+                # annotate. Costs resident memory for a fast first click.
+                self.ui_detector.load()
             # Lazy mode (default): the model loads on first predict/annotate,
             # so compute/filesystem/API tasks never pay the load cost.
             self.perception.ui_detector = self.ui_detector

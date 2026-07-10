@@ -1334,6 +1334,97 @@ async def test_eager_mode_runs_vision_each_loop(
 
 
 # ---------------------------------------------------------------------------
+# preload (warm load + lazy inference) tests
+# ---------------------------------------------------------------------------
+
+class _SpyUIDetector:
+    def __init__(self, config: Any) -> None:
+        self.config = config
+        self.load_calls = 0
+        self.shutdown_calls = 0
+
+    def load(self) -> None:
+        self.load_calls += 1
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_preload_loads_detector_at_startup(
+    monkeypatch, config, eventbus, killswitch
+):
+    # lazy=True + preload=True -> initialize() loads the model (warm), even though
+    # perceive() will still skip annotate (lazy inference).
+    config.ui_detector.lazy = True
+    config.ui_detector.preload = True
+    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.perception.shutdown = lambda: None
+
+    await agent.initialize()
+    try:
+        assert isinstance(agent.ui_detector, _SpyUIDetector)
+        assert agent.ui_detector.load_calls == 1
+    finally:
+        await agent.shutdown()
+
+
+def test_preload_default_is_on():
+    # Out-of-the-box, lazy mode preloads so the first SoM click never stalls.
+    from agent.config import UIDetectorConfig
+
+    assert UIDetectorConfig().lazy is True
+    assert UIDetectorConfig().preload is True
+
+
+@pytest.mark.asyncio
+async def test_lazy_preload_off_defers_load_to_first_click(
+    monkeypatch, config, eventbus, killswitch
+):
+    # lazy=True + preload=False (explicit opt-out) -> model is NOT loaded at
+    # startup; it loads on the first DesktopInteract instead.
+    config.ui_detector.lazy = True
+    config.ui_detector.preload = False
+    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.perception.shutdown = lambda: None
+
+    await agent.initialize()
+    try:
+        assert agent.ui_detector.load_calls == 0
+    finally:
+        await agent.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_eager_loads_at_startup_regardless_of_preload(
+    monkeypatch, config, eventbus, killswitch
+):
+    # lazy=False (eager) loads at startup no matter what preload is set to.
+    config.ui_detector.lazy = False
+    config.ui_detector.preload = False
+    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.perception.shutdown = lambda: None
+
+    await agent.initialize()
+    try:
+        assert agent.ui_detector.load_calls == 1
+    finally:
+        await agent.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # Desktop Type/Click (Snapshot->label) + verify failure-gate tests
 # ---------------------------------------------------------------------------
 
