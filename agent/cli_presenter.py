@@ -1,0 +1,225 @@
+"""Rich, event-driven terminal presenter for the Caelum-Agent CLI.
+
+The presenter subscribes to the EventBus events the orchestrator already emits
+and renders a live spinner, per-tool call/result lines, model narration, and a
+markdown final answer. It is a pure consumer: a rendering error is logged and
+swallowed so it can never abort a task.
+
+Handlers are declared ``async def`` on purpose: EventBus runs coroutine handlers
+on the event-loop thread, which keeps ``rich.status.Status`` (not thread-safe)
+on a single thread. Sync handlers would be dispatched via ``asyncio.to_thread``.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from typing import Any
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.prompt import Confirm
+from rich.status import Status
+
+from eventbus import EventBus
+from eventbus.events import (
+    AgentStateChanged,
+    KillSwitchTriggered,
+    LLMResponseReceived,
+    ToolCallCompleted,
+    ToolCallRequested,
+    UserInputReceived,
+)
+
+logger = logging.getLogger("caelum.cli")
+
+# Fixed theme (no user-configurable theme in this iteration).
+STYLE_ARROW = "bold cyan"
+STYLE_OK = "green"
+STYLE_ERR = "red"
+STYLE_NARRATION = "dim italic"
+STYLE_PANEL_BORDER = "cyan"
+
+MAX_ARG_CHARS = 60
+MAX_RESULT_CHARS = 120
+
+# FSM states whose spinner label we surface.
+_STATE_LABELS = {
+    "PLANNING": "Thinking…",
+    "EXECUTING": "Thinking…",
+    "VERIFYING": "Verifying…",
+    "REFLECT": "Reflecting…",
+    "WAITING_HUMAN": "Waiting for input…",
+}
+_TERMINAL_STATES = {"COMPLETED", "ERROR", "STUCK", "IDLE"}
+
+
+def _first_line(text: Any, n: int = MAX_RESULT_CHARS) -> str:
+    s = "" if text is None else str(text)
+    line = s.splitlines()[0] if s.splitlines() else s
+    return line if len(line) <= n else line[: n - 1] + "…"
+
+
+def _short_args(args: dict[str, Any] | None, n: int = MAX_ARG_CHARS) -> str:
+    if not args:
+        return ""
+    parts = []
+    for k, v in args.items():
+        sv = str(v)
+        if len(sv) > 24:
+            sv = sv[:23] + "…"
+        parts.append(f"{k}={sv}")
+    s = ", ".join(parts)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+class CLIPresenter:
+    def __init__(self, console: Console | None = None, *, enabled: bool = True) -> None:
+        self.console = console or Console()
+        self.enabled = enabled
+        self._bus: EventBus | None = None
+        self._status: Status | None = None
+        # Bind each handler exactly once and reuse the SAME objects for subscribe
+        # and unsubscribe. EventBus.unsubscribe compares handlers by identity
+        # (``h is not handler``); re-accessing ``self._on_x`` yields a fresh bound
+        # method every time, which would never match and detach would silently no-op.
+        self._handlers: dict[str, Any] = {
+            "UserInputReceived": self._on_user_input,
+            "AgentStateChanged": self._on_state,
+            "LLMResponseReceived": self._on_llm,
+            "ToolCallRequested": self._on_tool_requested,
+            "ToolCallCompleted": self._on_tool_completed,
+            "KillSwitchTriggered": self._on_kill,
+        }
+
+    # -- wiring ---------------------------------------------------------------
+
+    def attach(self, bus: EventBus) -> None:
+        self._bus = bus
+        for name, handler in self._handlers.items():
+            bus.subscribe(name, handler)
+
+    def detach(self) -> None:
+        if self._bus is None:
+            return
+        for name, handler in self._handlers.items():
+            self._bus.unsubscribe(name, handler)
+        self._bus = None
+        self._stop_status()
+
+    # -- direct calls from main.py -------------------------------------------
+
+    def banner(self) -> None:
+        self.console.print(
+            "[bold cyan]Caelum-Agent[/] [dim]· Kimi K2.6 · type /help for commands[/]"
+        )
+
+    def input(self, prompt: str = "[bold cyan]›[/] ") -> str:
+        # Console.input renders the prompt through the console then reads stdin;
+        # it raises EOFError on EOF, matching builtin input()'s contract.
+        return self.console.input(prompt)
+
+    def print_answer(self, text: str) -> None:
+        self._stop_status()
+        self.console.print(Panel(Markdown(text or ""), title="Caelum", border_style=STYLE_PANEL_BORDER))
+
+    def confirm(self, summary: str, action: dict[str, Any]) -> bool:
+        self.console.print(f"\n[bold yellow]Confirm:[/] {summary}")
+        if not sys.stdin.isatty():
+            self.console.print(
+                "[dim]Non-interactive: action requires approval but stdin is not a TTY; "
+                "denying. Re-run with --yes / --yes-destructive.[/]"
+            )
+            return False
+        try:
+            return bool(Confirm.ask("[yellow]Approve?[/]", console=self.console, default=False))
+        except EOFError:
+            self.console.print("[dim]EOF on stdin; denying.[/]")
+            return False
+
+    # -- status helpers -------------------------------------------------------
+
+    def _start_status(self, label: str) -> None:
+        if not self.enabled or self._status is not None:
+            if self._status is not None:
+                self._status.update(label)
+            return
+        self._status = Status(label, console=self.console, spinner="dots")
+        self._status.start()
+
+    def _update_status(self, label: str) -> None:
+        if self._status is not None:
+            self._status.update(label)
+
+    def _stop_status(self) -> None:
+        if self._status is not None:
+            try:
+                self._status.stop()
+            except Exception:
+                pass
+            self._status = None
+
+    # -- event handlers (async: run on the loop thread) -----------------------
+
+    async def _on_user_input(self, event: Any) -> None:
+        try:
+            if isinstance(event, UserInputReceived):
+                self._start_status("Thinking…")
+        except Exception as exc:
+            logger.warning("presenter _on_user_input failed: %s", exc)
+
+    async def _on_state(self, event: Any) -> None:
+        try:
+            if not isinstance(event, AgentStateChanged):
+                return
+            if event.new_state in _TERMINAL_STATES:
+                self._stop_status()
+                return
+            label = _STATE_LABELS.get(event.new_state)
+            if label:
+                self._update_status(label)
+        except Exception as exc:
+            logger.warning("presenter _on_state failed: %s", exc)
+
+    async def _on_llm(self, event: Any) -> None:
+        try:
+            if not isinstance(event, LLMResponseReceived):
+                return
+            if event.content:
+                self.console.print(f"[{STYLE_NARRATION}]{event.content}[/]")
+            self._update_status("Thinking…")
+        except Exception as exc:
+            logger.warning("presenter _on_llm failed: %s", exc)
+
+    async def _on_tool_requested(self, event: Any) -> None:
+        try:
+            if not isinstance(event, ToolCallRequested):
+                return
+            name = f"{event.server}__{event.tool_name}"
+            args = _short_args(event.arguments)
+            suffix = f"({args})" if args else ""
+            self.console.print(f"  [{STYLE_ARROW}]▶[/] {name}{suffix}")
+            self._update_status(f"Running {event.tool_name}…")
+        except Exception as exc:
+            logger.warning("presenter _on_tool_requested failed: %s", exc)
+
+    async def _on_tool_completed(self, event: Any) -> None:
+        try:
+            if not isinstance(event, ToolCallCompleted):
+                return
+            mark = "✓" if event.success else "✗"
+            style = STYLE_OK if event.success else STYLE_ERR
+            line = _first_line(event.result)
+            self.console.print(f"  [{style}]{mark}[/] {event.tool_name} — {line}")
+            self._update_status("Thinking…")
+        except Exception as exc:
+            logger.warning("presenter _on_tool_completed failed: %s", exc)
+
+    async def _on_kill(self, event: Any) -> None:
+        try:
+            if isinstance(event, KillSwitchTriggered):
+                self._stop_status()
+                self.console.print("[yellow]Cancelled.[/]")
+        except Exception as exc:
+            logger.warning("presenter _on_kill failed: %s", exc)
