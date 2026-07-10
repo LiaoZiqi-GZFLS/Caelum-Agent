@@ -1,13 +1,17 @@
 """Tests for MCP client data structures and tool mapping."""
 
 import asyncio
+import io
+import logging
+import os
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from agent.config import MCPConfig, MCPServerConfig
 from agent.tools import build_mcp_tools
-from mcp_client import MCPClient, MCPMultiplexer, ToolResult
+from mcp_client import MCPClient, MCPMultiplexer, ToolResult, _UpstreamNoiseFilter
 
 
 def test_tool_result_dataclass():
@@ -131,3 +135,87 @@ async def test_concurrent_calls_trigger_single_reconnect():
     await asyncio.gather(call1, call2)
 
     client.reconnect.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# _UpstreamNoiseFilter tests
+# ---------------------------------------------------------------------------
+
+def _make_filter() -> tuple[_UpstreamNoiseFilter, io.StringIO]:
+    downstream = io.StringIO()
+    filt = _UpstreamNoiseFilter(downstream)
+    return filt, downstream
+
+
+def test_upstream_noise_filter_suppresses_known_lines():
+    filt, downstream = _make_filter()
+    filt.write("Error in tree_traversal: cannot access local variable 'tree_node'\n")
+    filt.write("some real error\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "some real error\n"
+    assert filt._suppressed == 1
+
+
+def test_upstream_noise_filter_passes_real_errors():
+    filt, downstream = _make_filter()
+    filt.write("ValueError: bad arg\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "ValueError: bad arg\n"
+    assert filt._suppressed == 0
+
+
+def test_upstream_noise_filter_handles_partial_lines():
+    filt, downstream = _make_filter()
+    filt.write("Error in tree_")
+    filt.write("traversal\n")
+    filt.flush()
+
+    assert downstream.getvalue() == ""
+    assert filt._suppressed == 1
+
+
+def test_upstream_noise_filter_periodic_summary(caplog):
+    downstream = io.StringIO()
+    filt = _UpstreamNoiseFilter(downstream)
+    filt._last_report = time.monotonic() - (filt.SUMMARY_INTERVAL + 1)
+
+    with caplog.at_level(logging.INFO, logger="caelum.mcp"):
+        filt.write("Error getting nodes for handle 123: tree_node\n")
+        filt.flush()
+
+    assert any(
+        "Suppressed" in rec.message and "tree_node" in rec.message
+        for rec in caplog.records
+    )
+    assert filt._suppressed == 0
+
+
+def test_upstream_noise_filter_fileno_created_lazily():
+    filt, _ = _make_filter()
+    try:
+        assert filt._write_fd is None
+        fd = filt.fileno()
+        assert isinstance(fd, int)
+        assert filt._write_fd == fd
+        # A second call reuses the same pipe; it does not spawn another thread.
+        assert filt.fileno() == fd
+    finally:
+        filt.close()
+
+
+def test_upstream_noise_filter_reads_from_pipe():
+    downstream = io.StringIO()
+    filt = _UpstreamNoiseFilter(downstream)
+    try:
+        fd = filt.fileno()
+        os.write(fd, b"Error in tree_traversal: tree_node\nreal error\n")
+        # The reader thread drains asynchronously; wait for the forwarded line.
+        deadline = time.monotonic() + 3.0
+        while "real error" not in downstream.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert downstream.getvalue() == "real error\n"
+        assert filt._suppressed == 1
+    finally:
+        filt.close()

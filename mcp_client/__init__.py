@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import shutil
 import sys
+import threading
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +34,150 @@ class ToolResult:
     raw: Any | None = None
 
 
+_NOISE_PATTERNS = [
+    re.compile(r"tree_node", re.IGNORECASE),
+    re.compile(r"tree_traversal", re.IGNORECASE),
+    re.compile(r"Error in processing window", re.IGNORECASE),
+    re.compile(r"getting nodes for handle", re.IGNORECASE),
+    re.compile(r"Task failed completely for handle", re.IGNORECASE),
+    re.compile(r"UI services may be loading", re.IGNORECASE),
+]
+
+
+class _UpstreamNoiseFilter:
+    """Line-buffered stderr wrapper that drops known windows-mcp upstream noise.
+
+    windows-mcp prints a burst of ``tree_node`` / ``tree_traversal`` errors to
+    its stderr on every Snapshot (an upstream bug, see
+    docs/windows_mcp/upstream-tree-node-issue.md). The MCP SDK pipes that
+    straight to our ``sys.stderr`` via ``errlog=``, bypassing ``logging``, so a
+    ``logging.Filter`` cannot catch it. This stream is installed as the
+    ``errlog`` for the windows client: matching lines are counted and dropped,
+    everything else is forwarded unchanged, and a periodic summary is logged so
+    the user knows the upstream issue is still present.
+    """
+
+    SUMMARY_INTERVAL = 60.0  # seconds between "suppressed N lines" summaries
+
+    def __init__(
+        self,
+        downstream: Any,
+        summary_logger: logging.Logger | None = None,
+    ) -> None:
+        self._downstream = downstream
+        self._log = summary_logger or logger
+        self._buf = ""
+        self._suppressed = 0
+        self._last_report = time.monotonic()
+        self._lock = threading.Lock()
+        # OS pipe backing fileno(); created lazily so unit tests (which drive
+        # write()/flush() directly) pay no cost and spawn no thread.
+        self._read_fd: int | None = None
+        self._write_fd: int | None = None
+        self._reader_thread: threading.Thread | None = None
+
+    @staticmethod
+    def _is_noise(line: str) -> bool:
+        return any(p.search(line) for p in _NOISE_PATTERNS)
+
+    def _maybe_report(self) -> None:
+        now = time.monotonic()
+        if self._suppressed and (now - self._last_report) >= self.SUMMARY_INTERVAL:
+            n = self._suppressed
+            self._suppressed = 0
+            self._last_report = now
+            self._log.info(
+                "Suppressed %d windows-mcp upstream noise line(s) "
+                "(tree_node traversal bug); see docs/windows_mcp/upstream-tree-node-issue.md",
+                n,
+            )
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        with self._lock:
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if self._is_noise(line):
+                    self._suppressed += 1
+                else:
+                    self._downstream.write(line + "\n")
+            self._maybe_report()
+        return len(s)
+
+    def flush(self) -> None:
+        # Keep any partial line buffered until the next write completes it, so
+        # we never emit half a line (and never mis-judge a partial real error).
+        with self._lock:
+            self._maybe_report()
+        self._downstream.flush()
+
+    def fileno(self) -> int:
+        """Return a real OS write fd so this object can be used as ``stderr=``.
+
+        The MCP SDK passes ``errlog`` straight to ``subprocess.Popen(stderr=...)``
+        / ``anyio.open_process(stderr=...)``, which requires a real file object
+        with a ``fileno()`` (a plain Python stream fails with
+        ``'X' object has no attribute 'fileno'``). We create an OS pipe on first
+        use, hand the write end to the child, and drain the read end in a daemon
+        thread that runs the same line filter as :meth:`write`.
+        """
+        start_reader = False
+        with self._lock:
+            if self._write_fd is None:
+                r, w = os.pipe()
+                self._read_fd = r
+                self._write_fd = w
+                start_reader = True
+        if start_reader:
+            t = threading.Thread(
+                target=self._reader_loop,
+                name="windows-stderr-filter",
+                daemon=True,
+            )
+            self._reader_thread = t
+            t.start()
+        assert self._write_fd is not None
+        return self._write_fd
+
+    def _reader_loop(self) -> None:
+        assert self._read_fd is not None
+        while True:
+            try:
+                chunk = os.read(self._read_fd, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            text = chunk.decode("utf-8", errors="replace")
+            try:
+                self.write(text)
+            except Exception:
+                return
+
+    def close(self) -> None:
+        """Release the backing pipe (test/shutdown hygiene); optional in prod."""
+        write_fd = self._write_fd
+        read_fd = self._read_fd
+        self._write_fd = None
+        self._read_fd = None
+        # Close the write end first so the reader sees EOF and exits.
+        if write_fd is not None:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+        t = self._reader_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)
+        if read_fd is not None:
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+
+
 class MCPClient:
     def __init__(
         self,
@@ -38,6 +186,7 @@ class MCPClient:
         max_retries: int = 5,
         base_delay: float = 1.0,
         max_delay: float = 30.0,
+        errlog: Any | None = None,
     ) -> None:
         self.name = name
         self.config = config
@@ -50,6 +199,14 @@ class MCPClient:
         self.max_delay = max_delay
         self._reconnect_lock = asyncio.Lock()
         self._reconnect_lock_holder: asyncio.Task | None = None
+        # windows-mcp emits known upstream stderr noise (tree_node); install a
+        # filtering errlog for it unless the caller supplied their own stream.
+        if errlog is not None:
+            self._errlog = errlog
+        elif name == "windows":
+            self._errlog = _UpstreamNoiseFilter(sys.stderr)
+        else:
+            self._errlog = sys.stderr
 
     def _resolve_command(self) -> str:
         if shutil.which(self.config.command):
@@ -80,7 +237,9 @@ class MCPClient:
         )
         for attempt in range(1, self.max_retries + 1):
             try:
-                read, write = await self._stack.enter_async_context(stdio_client(params))
+                read, write = await self._stack.enter_async_context(
+                    stdio_client(params, errlog=self._errlog)
+                )
                 self.session = await self._stack.enter_async_context(
                     ClientSession(read, write)
                 )
