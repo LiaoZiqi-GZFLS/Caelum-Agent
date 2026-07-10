@@ -518,7 +518,9 @@ class AgentOrchestrator:
                         failure_reason="Verification failed",
                         fix_action=reflection,
                     )
-                    self.history.append({"role": "assistant", "content": reflection})
+                    # NOTE: _reflect() already appends the assistant message to
+                    # history; appending it again here produced two consecutive
+                    # assistant messages, which Kimi rejects with HTTP 400.
                     await self.state.transition("PLANNING", task_id=self.task_id)
             except TransientAPIError as exc:
                 await self.reflection.record(
