@@ -8,6 +8,87 @@ Caelum-Agent is a personal Windows CLI desktop-operation agent. Give it natural-
 
 ---
 
+## 中文简介
+
+**Caelum-Agent** 是一个面向个人使用的 Windows 命令行桌面操作 Agent。你用自然语言下指令，它就能自动控制浏览器和 Windows 桌面应用——看图、理解界面、点击、输入、读写文件，全程自主完成。
+
+- **平台：** Windows 10/11
+- **形态：** 纯 CLI（首版无 GUI、无 CI/CD、不打包、不自动更新）
+- **许可证：** BSD 3-Clause，Copyright (c) 2026 LiaoZiqi-GZFLS
+
+### 核心特性
+
+- **ReAct 闭环：** 感知（Perceive）→ 思考（Think）→ 行动（Act）→ 验证（Verify），失败时按需反思。
+- **多模态感知：** 截图 + RapidOCR 文字识别 + UIA/A11y 无障碍树 + GUI-Actor-3B 元素检测（SoM 标注），四路融合成结构化环境描述交给大模型。
+- **浏览器自动化：** 走 Playwright MCP，**无障碍树优先**，而非纯视觉。
+- **桌面自动化：** 走 Windows-MCP，**UIA/A11y 优先**，必要时才回退到坐标/图像方式。
+- **Kimi K2.6 大脑：** OpenAI 兼容 API，支持 Formula 工具与本地函数工具。
+- **三个 MCP 并发：** Playwright / Windows / filesystem 在一个 asyncio 事件循环里同时跑，断线指数退避重连。
+- **安全分级：** read / write_safe / write_risky / destructive 四级，危险与破坏性操作必须人工确认。
+- **急停：** `Ctrl+C` / `/stop` / `/quit` 随时取消或优雅退出。
+- **熔断：** 连续 API 失败、连续动作失败、同一 UI 原地打转都会被检测并处理。
+- **AutoSkill 自学习：** 从成功任务轨迹自动生成 `SKILL.md` 技能。
+- **记忆：** Kimi memory + rethink 工具，本地 SQLite 兜底。
+
+### 技术栈
+
+| 层 | 选型 |
+|---|---|
+| 大模型 | Kimi K2.6（`kimi-k2.6`，`https://api.moonshot.cn/v1`） |
+| 浏览器控制 | Playwright MCP（`npx -y @playwright/mcp@latest`） |
+| 桌面控制 | Windows-MCP（`windows-mcp serve`） |
+| 文件系统 | `@modelcontextprotocol/server-filesystem` |
+| UI 检测 | GUI-Actor-3B + Verifier（Transformers 原生推理） |
+| OCR | RapidOCR（ONNXRuntime，CPU） |
+| 本地记忆 | Kimi memory 工具 + SQLite 备份 |
+| 状态机 / 事件总线 | 自研 8 状态 FSM + asyncio EventBus |
+
+> 环境必须用 **Python 3.12**：GUI-Actor-3B 要求 `<3.13`，`windows-mcp` 要求 `>=3.12`。
+> GUI-Actor-3B 是自定义架构，**不能**走 Ollama / GGUF / vLLM / llama.cpp，只能 Transformers 原生推理。
+
+### 快速开始
+
+```powershell
+# 1) 首次初始化（建 venv、装依赖、生成 config.yaml、可选下载权重、跑 smoke）
+python setup.py
+
+# 2) 编辑 config.yaml，填入你的 Kimi API key（config.yaml 已被 gitignore，切勿提交）
+
+# 3a) 交互式 REPL（推荐第一次，能看到每一步 感知→思考→行动→验证）
+python main.py
+
+# 3b) 单次任务（非交互），--yes 自动批准 write_risky 动作
+python main.py --task "open notepad and type 'hello'" --yes
+
+# 3c) 先关视觉跑通 LLM+MCP 链路（不加载 ~7.6GB 模型，启动快、省显存）
+python main.py --no-vision --task "list the files on my desktop" --yes
+```
+
+建议顺序：先用 `--no-vision` 跑一次确认 Kimi + 三个 MCP 链路通，再去掉它加载 GUI-Actor 跑视觉定位。危险动作默认要在终端敲 `y` 确认；`--yes` **不**覆盖破坏性操作（需 `--yes-destructive` 才会，慎用）。
+
+### 本地模型权重
+
+GUI-Actor-3B 权重默认放在 `./models/gui-actor-3b/`（两个 safetensors 分片，约 7.6GB）。重新下载：
+
+```powershell
+# 国内推荐 GitHub Release 镜像
+python setup.py --download-weights --weights-source github
+# 或 HuggingFace（hf-mirror）
+python setup.py --download-weights --weights-source huggingface
+# 或 huggingface-cli 直拉
+huggingface-cli download microsoft/GUI-Actor-3B-Qwen2.5-VL --local-dir ./models/gui-actor-3b
+```
+
+### 当前进度
+
+按 v8 设计的所有模块均已落地并有测试：`agent/` 13 个核心模块 + `eventbus` + `mcp_client` + `ui_detector` + `main.py` + `setup.py`。仓库内无 TODO / `NotImplementedError` / 空 `pass` 桩；单元测试 **290 passed**、smoke（真实 API+MCP）**8 passed**、覆盖率约 **89%**（已排除 vendored 的 GUI-Actor 源码）。
+
+定位仍是**可跑的 MVP 骨架**：真实任务级端到端（如“打开记事本输入 hello”的完整 ReAct）和 GUI-Actor 真实推理尚未做生产级打磨；`reflection` / `kimi_memory` 是有意的薄封装（设计上交给 Kimi 内置 `rethink` / `memory` 工具）。
+
+详细设计见 [`docs/designs/desktop_agent_v8.agent.final.md`](docs/designs/desktop_agent_v8.agent.final.md)。
+
+---
+
 ## Features
 
 - **ReAct loop:** Perceive → Think → Act → Verify, with optional reflection on failure.
