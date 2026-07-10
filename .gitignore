@@ -225,6 +225,17 @@ __marimo__/
 /data/
 /models/
 
+# Runtime screenshots dumped to the repo root by perception/E2E/debug runs.
+# (Perception's own captures go under /data/ which is ignored above; these catch
+# the stragglers written to the working directory. Root-anchored so docs figures
+# are untouched.)
+/debug-*.png
+/debug-*.jpg
+/desktop-view.png
+/run-dialog-check.png
+/screenshot_*.png
+/screenshot_*.jpg
+
 # Agent-generated plans and scratch docs
 /docs/superpowers/
 
