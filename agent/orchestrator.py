@@ -279,10 +279,15 @@ class AgentOrchestrator:
             {"type": "text", "text": "\n\n".join(text_parts)},
         ]
 
-        # Prefer the SoM-annotated screenshot; fall back to raw.
-        image_path = (
-            perception.annotated_screenshot_path or perception.screenshot_path
-        )
+        # Prefer the SoM-annotated screenshot if it exists; fall back to raw.
+        image_path: Path | None = None
+        for candidate in (
+            perception.annotated_screenshot_path,
+            perception.screenshot_path,
+        ):
+            if candidate is not None and candidate.exists():
+                image_path = candidate
+                break
         if image_path is not None and image_path.exists():
             try:
                 image_bytes = image_path.read_bytes()
