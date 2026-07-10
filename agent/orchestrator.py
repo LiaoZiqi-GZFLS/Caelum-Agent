@@ -121,6 +121,9 @@ class AgentOrchestrator:
         # batch on the next round (a recurring token-wasting loop).
         self._last_batch_signature: tuple[tuple[str, str], ...] | None = None
         self._last_batch_all_succeeded = False
+        # Fire-and-forget background tasks (currently skill learning). Tracked so
+        # they are not garbage-collected and so shutdown() can drain them.
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._human_confirm_callback: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
@@ -162,6 +165,19 @@ class AgentOrchestrator:
         self.kill_switch.start()
 
     async def shutdown(self) -> None:
+        # Let in-flight skill learning finish (best-effort, bounded) so a just-
+        # completed task's skill isn't lost on a clean exit. The user already has
+        # their answer by now; this only delays process teardown, never the reply.
+        if self._background_tasks:
+            pending = list(self._background_tasks)
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending), timeout=45.0)
+            except asyncio.TimeoutError:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+            except asyncio.CancelledError:
+                raise
         self._save_state()
         self.kill_switch.stop()
         await self.mcp.disconnect_all()
@@ -558,7 +574,7 @@ class AgentOrchestrator:
                     self.consecutive_action_failures = 0
                     final_answer = await self._final_answer()
                     if self.state.current_state == "COMPLETED":
-                        await self._learn_skill()
+                        self._schedule_skill_learning()
                         return final_answer
                     if self.state.current_state == "ERROR":
                         return final_answer
@@ -849,6 +865,18 @@ class AgentOrchestrator:
             if not self._last_action_was_query():
                 return False
         return True
+
+    def _schedule_skill_learning(self) -> None:
+        """Fire-and-forget skill learning so it never blocks the final answer.
+
+        The task is tracked in ``_background_tasks`` (so it isn't GC'd and can
+        be drained on shutdown); failures are handled inside ``_learn_skill``.
+        """
+        if self.skill_learner is None:
+            return
+        task = asyncio.create_task(self._learn_skill())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _learn_skill(self) -> None:
         """Record a reusable skill after a successful task.

@@ -465,6 +465,11 @@ async def test_run_task_learns_skill_on_completion(config, eventbus, killswitch)
 
     result = await agent.run_task("list files")
 
+    # Skill learning is fire-and-forget now; drain the background task before
+    # asserting on the learner.
+    if agent._background_tasks:
+        await asyncio.gather(*agent._background_tasks)
+
     assert result == "Files: a.txt, b.txt."
     assert agent.state.current_state == "COMPLETED"
     assert len(learner.calls) == 1
@@ -982,6 +987,62 @@ async def test_different_args_not_deduped(config, eventbus, killswitch):
     await agent._execute_tool_calls([_tool_call("filesystem__list_directory", {"path": "."})])
     await agent._execute_tool_calls([_tool_call("filesystem__list_directory", {"path": "./other"})])
     assert len(mcp.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# skill-learning (non-blocking) tests
+# ---------------------------------------------------------------------------
+
+
+class _SlowLearner(FakeSkillLearner):
+    def __init__(self, delay: float = 0.2) -> None:
+        super().__init__()
+        self.delay = delay
+        self.finished = False
+
+    async def learn(self, task: str, trajectory: list[str]) -> dict[str, Any]:
+        await asyncio.sleep(self.delay)
+        self.finished = True
+        return await super().learn(task, trajectory)
+
+
+@pytest.mark.asyncio
+async def test_skill_learning_scheduled_without_blocking(config, eventbus, killswitch):
+    learner = _SlowLearner(delay=0.3)
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch, skill_learner=learner
+    )
+
+    agent._schedule_skill_learning()
+
+    # Returns immediately: the slow learn has not finished yet, and a task is
+    # tracked so it won't be garbage-collected.
+    assert learner.finished is False
+    assert len(agent._background_tasks) == 1
+
+    await asyncio.sleep(0.45)
+    assert learner.finished is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_background_skill_learning(config, eventbus, killswitch):
+    learner = _SlowLearner(delay=0.2)
+    agent = AgentOrchestrator(
+        config,
+        eventbus,
+        FakeLLM(),
+        FakeMCP(),
+        killswitch,
+        skill_learner=learner,
+        perception=FakePerception([_blank_perception()]),
+    )
+    # FakePerception does not initialize the real IO executor; stub shutdown.
+    agent.perception.shutdown = lambda: None
+
+    agent._schedule_skill_learning()
+    await agent.shutdown()  # drain timeout (45s) is far larger than the 0.2s learn
+
+    assert learner.finished is True
 
 
 def test_is_ui_tool_classification():
