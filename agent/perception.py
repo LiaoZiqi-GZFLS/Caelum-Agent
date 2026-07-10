@@ -87,6 +87,18 @@ class PerceptionModule:
         ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
         ui_tree = await self._fetch_ui_tree()
         som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
+        # Drop placeholder/invalid annotations (e.g. detector error sentinels)
+        # so visualize_som never crashes on a missing center_x/center_y.
+        valid_annotations = [
+            a for a in som_annotations
+            if isinstance(a, dict) and "center_x" in a and "center_y" in a
+        ]
+        if len(valid_annotations) != len(som_annotations):
+            logger.info(
+                "Filtered %d invalid SoM annotation(s) before visualization",
+                len(som_annotations) - len(valid_annotations),
+            )
+        som_annotations = valid_annotations
 
         ui_hash = self._compute_ui_hash(image_hash, ocr_text, ui_tree)
         description = self._build_description(ocr_text, ui_tree, som_annotations)
@@ -259,6 +271,9 @@ class PerceptionModule:
             annotations, blocked = await self.ui_detector.annotate(image, instruction)
             return annotations, blocked
         except Exception as exc:
+            logger.warning(
+                "UI detector failed during annotate: %s", exc, exc_info=True
+            )
             return [{"error": str(exc)}], 0
 
     @staticmethod

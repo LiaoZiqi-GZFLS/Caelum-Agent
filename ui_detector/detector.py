@@ -133,12 +133,22 @@ class UIDetector:
         for idx, (point_group, score) in enumerate(zip(points, values), start=1):
             if not point_group:
                 continue
-            xs = [p[0] for p in point_group]
-            ys = [p[1] for p in point_group]
+            # GUI-Actor returns topk_points as a flat list of (x, y) center
+            # tuples (one per region). Tolerate the legacy nested shape
+            # [[(x, y), ...], ...] in case the inference output changes.
+            first = point_group[0]
+            if isinstance(first, (int, float)):
+                center_x = float(point_group[0])
+                center_y = float(point_group[1])
+            else:
+                xs = [p[0] for p in point_group]
+                ys = [p[1] for p in point_group]
+                center_x = sum(xs) / len(xs)
+                center_y = sum(ys) / len(ys)
             annotations.append({
                 "label": idx,
-                "center_x": sum(xs) / len(xs),
-                "center_y": sum(ys) / len(ys),
+                "center_x": center_x,
+                "center_y": center_y,
                 "score": score,
                 "normalized": True,
             })
