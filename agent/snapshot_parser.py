@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+
+logger = logging.getLogger("caelum.snapshot")
 
 
 class UIElement:
@@ -114,7 +118,8 @@ def parse_playwright_snapshot(text: str) -> UIElement:
         import yaml
 
         data = yaml.safe_load(text)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to parse Playwright snapshot as YAML: %s", exc)
         # Fallback: treat the whole text as an unstructured root.
         return UIElement(element_id="root", role="document", name=text[:500])
 
