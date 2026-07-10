@@ -21,6 +21,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.status import Status
+from rich.text import Text
 
 from eventbus import EventBus
 from eventbus.events import (
@@ -125,7 +126,13 @@ class CLIPresenter:
         self.console.print(Panel(Markdown(text or ""), title="Caelum", border_style=STYLE_PANEL_BORDER))
 
     def confirm(self, summary: str, action: dict[str, Any]) -> bool:
-        self.console.print(f"\n[bold yellow]Confirm:[/] {summary}")
+        # Build the confirm line from styled + plain Text spans so the untrusted
+        # ``summary`` is never parsed as rich markup (a ``[/]`` or ``[x]`` in it
+        # would otherwise be eaten or raise MarkupError).
+        confirm_line = Text("\n")
+        confirm_line.append("Confirm:", style="bold yellow")
+        confirm_line.append(f" {summary}")
+        self.console.print(confirm_line)
         if not sys.stdin.isatty():
             self.console.print(
                 "[dim]Non-interactive: action requires approval but stdin is not a TTY; "
@@ -187,7 +194,9 @@ class CLIPresenter:
             if not isinstance(event, LLMResponseReceived):
                 return
             if event.content:
-                self.console.print(f"[{STYLE_NARRATION}]{event.content}[/]")
+                # Text applies the style without parsing markup, so brackets in
+                # narration ("[1]", "[link](url)", paths) render literally.
+                self.console.print(Text(event.content, style=STYLE_NARRATION))
             self._update_status("Thinking…")
         except Exception as exc:
             logger.warning("presenter _on_llm failed: %s", exc)
@@ -199,7 +208,10 @@ class CLIPresenter:
             name = f"{event.server}__{event.tool_name}"
             args = _short_args(event.arguments)
             suffix = f"({args})" if args else ""
-            self.console.print(f"  [{STYLE_ARROW}]▶[/] {name}{suffix}")
+            line = Text("  ")
+            line.append("▶", style=STYLE_ARROW)
+            line.append(f" {name}{suffix}")
+            self.console.print(line)
             self._update_status(f"Running {event.tool_name}…")
         except Exception as exc:
             logger.warning("presenter _on_tool_requested failed: %s", exc)
@@ -210,8 +222,11 @@ class CLIPresenter:
                 return
             mark = "✓" if event.success else "✗"
             style = STYLE_OK if event.success else STYLE_ERR
-            line = _first_line(event.result)
-            self.console.print(f"  [{style}]{mark}[/] {event.tool_name} — {line}")
+            result = _first_line(event.result)
+            line = Text("  ")
+            line.append(mark, style=style)
+            line.append(f" {event.tool_name} — {result}")
+            self.console.print(line)
             self._update_status("Thinking…")
         except Exception as exc:
             logger.warning("presenter _on_tool_completed failed: %s", exc)

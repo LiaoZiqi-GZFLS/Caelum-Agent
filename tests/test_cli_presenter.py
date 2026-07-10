@@ -73,6 +73,7 @@ async def test_tool_completed_failure_renders_cross():
     out = buf.getvalue()
     assert "✗" in out
     assert "Type" in out
+    assert "no focus" in out
     presenter.detach()
 
 
@@ -102,6 +103,18 @@ async def test_llm_narration_printed_dim():
     await bus.emit(LLMResponseReceived(content="I will click the button.", tool_calls=[]))
 
     assert "I will click the button." in buf.getvalue()
+    presenter.detach()
+
+
+@pytest.mark.asyncio
+async def test_narration_with_brackets_rendered_literally():
+    presenter, buf = _make_presenter()
+    bus = EventBus()
+    presenter.attach(bus)
+    await bus.emit(LLMResponseReceived(content="see [1] and [link](url) here", tool_calls=[]))
+    out = buf.getvalue()
+    assert "[1]" in out
+    assert "[link](url)" in out
     presenter.detach()
 
 
