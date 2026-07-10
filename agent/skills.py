@@ -12,6 +12,7 @@ The learner follows the v8 AutoSkill flow:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 from agent.memory import MemoryStore
 
 
+logger = logging.getLogger("caelum.skills")
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 
 
@@ -130,8 +132,8 @@ class SkillLearner:
         if self.llm_client is not None:
             try:
                 return await self._generate_with_llm(task, trajectory)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("LLM skill generation failed; using fallback: %s", exc)
         return self._fallback_skill(task, trajectory)
 
     async def _generate_with_llm(
@@ -169,8 +171,8 @@ class SkillLearner:
         if self.llm_client is not None:
             try:
                 return await self._merge_with_llm(existing, task, trajectory)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("LLM skill merge failed; using fallback: %s", exc)
         return self._fallback_merge(existing, task, trajectory)
 
     async def _merge_with_llm(
