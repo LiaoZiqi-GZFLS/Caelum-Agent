@@ -227,14 +227,14 @@ class AgentOrchestrator:
             if not focus_result.success:
                 return f"[error] Failed to focus element at ({screen_x}, {screen_y}): {focus_result.content}"
             type_result = await self.mcp.call("windows", "Type", {"text": text or ""})
-            return type_result.content if type_result.success else f"[error] {type_result.content}"
+            return f"OK: typed text at ({screen_x}, {screen_y}) — {type_result.content[:200]}" if type_result.success else f"[error] {type_result.content}"
         elif action in ("scroll_down", "scroll_up"):
             direction = "down" if action == "scroll_down" else "up"
             scroll_result = await self.mcp.call("windows", "Scroll", {
                 "loc": [screen_x, screen_y],
                 "direction": direction,
             })
-            return scroll_result.content if scroll_result.success else f"[error] {scroll_result.content}"
+            return f"OK: {direction} scroll at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}" if scroll_result.success else f"[error] {scroll_result.content}"
         else:
             return f"[error] Unknown action: {action}"
 
