@@ -47,6 +47,23 @@ DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
 }
 
 
+COMPLETE_TASK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "description": (
+                "The final answer to return to the user. Calling this tool ends "
+                "the turn immediately and skips verification, so only use it for "
+                "purely conversational turns or when no screen/file action was "
+                "needed and nothing needs verifying."
+            ),
+        },
+    },
+    "required": ["answer"],
+}
+
+
 CODERUNNER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

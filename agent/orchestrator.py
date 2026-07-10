@@ -22,7 +22,7 @@ from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.skills import SkillLearner
 from agent.state_machine import AgentStateMachine
-from agent.tools import DESKTOP_INTERACT_SCHEMA, register_all
+from agent.tools import COMPLETE_TASK_SCHEMA, DESKTOP_INTERACT_SCHEMA, register_all
 from eventbus import EventBus
 from eventbus.events import (
     KillSwitchTriggered,
@@ -112,13 +112,12 @@ class AgentOrchestrator:
         # it (e.g. tests calling _verify/_execute_tool_calls directly) never see
         # a missing attribute.
         self._used_ui_tool = False
-        # Whether any tool call in the current ReAct round was actually
-        # dispatched. Reset at the top of each loop and set by _execute_tool_calls
-        # only when a real (non-deduped) call runs. When False after
-        # _think_and_act, the model answered without acting, so run_task returns
-        # that reply directly and skips the post-action perceive/verify/final-
-        # answer cycle (the fast path for greetings and pure-Q&A).
-        self._round_tool_used = False
+        # When the model explicitly finishes via the CompleteTask tool, its
+        # answer is stashed here and run_task returns it directly, skipping the
+        # post-action perceive/verify/final-answer cycle. Reset each round; the
+        # decision to skip verification is the model's (via the tool call), not a
+        # hard-coded rule.
+        self._pending_completion: str | None = None
         # Whether any tool call in the current ReAct round returned failure.
         # Reset at the top of each loop; _verify refuses to mark a round that
         # had a tool failure as COMPLETED (blocks hallucinated success).
@@ -157,6 +156,7 @@ class AgentOrchestrator:
         await self.mcp.connect_all()
         register_all(self.llm, self.mcp)
         self._register_desktop_interact()
+        self._register_complete_task()
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
 
@@ -335,6 +335,33 @@ class AgentOrchestrator:
             ),
         )
 
+    def _complete_task_impl(self, answer: str) -> str:
+        """Handler for the CompleteTask tool: stash the final answer for run_task.
+
+        The orchestrator checks ``self._pending_completion`` after the Think step
+        and, when set, returns it directly and skips verification. The decision to
+        finish (and to skip verify) is therefore the model's, made by choosing to
+        call this tool.
+        """
+        self._pending_completion = answer
+        return "Task marked as complete; returning your answer to the user."
+
+    def _register_complete_task(self) -> None:
+        """Register the CompleteTask local function tool with the LLM."""
+        self.llm.register_local_function(
+            "CompleteTask",
+            self._complete_task_impl,
+            schema=COMPLETE_TASK_SCHEMA,
+            description=(
+                "Finish the task and return `answer` to the user, SKIPPING the "
+                "verification step. Call this ONLY for purely conversational turns "
+                "(greetings, thanks, 'what can you do') or when you are certain no "
+                "screen/file action was needed and nothing needs verifying. For "
+                "tasks that changed the screen or files, do NOT call this — give a "
+                "normal final answer instead so the result can be verified."
+            ),
+        )
+
     @staticmethod
     def _format_perception(perception: Any) -> list[dict[str, Any]]:
         """Convert a Perception dataclass into a multimodal message for the LLM."""
@@ -471,7 +498,13 @@ class AgentOrchestrator:
             "- windows__Click(label=<id>)  — never call Click with no loc/label.\n"
             "- windows__Type(text='...', label=<id>)  — Type with no loc/label fails.\n"
             "Example: Snapshot shows [5] Edit 'Text Editor' -> Type(text='hello', label=5).\n"
-            "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead."
+            "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead.\n\n"
+            "## Finishing a turn\n"
+            "When the request is purely conversational (a greeting, thanks, or a "
+            "question about your capabilities) and needs no screen or file action, "
+            "call CompleteTask(answer='...') to reply immediately. For tasks that "
+            "change the screen or files, finish with a normal text answer so the "
+            "result is verified."
         )
         if reflection_context:
             system_content += "\n\n" + reflection_context
@@ -510,7 +543,7 @@ class AgentOrchestrator:
 
             await self.state.transition("EXECUTING", task_id=self.task_id)
             self._round_tool_failed = False
-            self._round_tool_used = False
+            self._pending_completion = None
             perception = await self.perception.perceive(
                 instruction=self.current_instruction,
                 with_vision=not self.config.ui_detector.lazy,
@@ -565,17 +598,18 @@ class AgentOrchestrator:
                     await self.state.transition("IDLE", task_id=self.task_id)
                     return "Task cancelled by kill switch."
 
-                # Fast path (first round only): the model produced a final answer
-                # without dispatching any tool (greeting, pure Q&A, a recall it
-                # already knew). There is nothing to verify, so skip the post-
-                # action perception + _verify + _final_answer cycle entirely and
-                # return the reply. Restricted to the FIRST round so that mid-task
-                # stalls or post-reflection re-plans (which also emit no tool) keep
-                # flowing through the normal verify/guard logic. No skill is
-                # learned because no action was taken.
-                if loop == 0 and not self._round_tool_used:
+                # Model-decided fast path: the model called CompleteTask(answer),
+                # explicitly finishing and opting out of verification. Honor its
+                # decision and return the answer without the post-action perceive
+                # / _verify / _final_answer cycle. If the model also acted this
+                # round (action_traces non-empty), still learn a skill from it.
+                if self._pending_completion is not None:
+                    answer = self._pending_completion
+                    self._pending_completion = None
                     await self.state.transition("COMPLETED", task_id=self.task_id)
-                    return response
+                    if self.action_traces:
+                        self._schedule_skill_learning()
+                    return answer
 
                 # Capture the post-action perception for state-based verification.
                 post_action_perception = await self.perception.perceive(
@@ -669,6 +703,14 @@ class AgentOrchestrator:
 
             tool_results = await self._execute_tool_calls(tool_calls)
             self.history.extend(tool_results)
+            if self._pending_completion is not None:
+                # The model called CompleteTask inside this batch: surface its
+                # answer as this round's final message so the tool loop stops and
+                # run_task can return it without another LLM round-trip.
+                self.history.append(
+                    {"role": "assistant", "content": self._pending_completion}
+                )
+                return self._pending_completion
 
     def _batch_signature(self, tool_calls: list[Any]) -> tuple[tuple[str, str], ...]:
         """Canonical, order-preserving signature of a tool-call batch.
@@ -705,10 +747,6 @@ class AgentOrchestrator:
                 for call in tool_calls
             ]
 
-        # Reaching here means at least one tool call is being dispatched for real
-        # (not a deduped repeat). Mark the round so run_task knows an action was
-        # attempted and runs the verify stage afterwards.
-        self._round_tool_used = True
         results = []
         succeeded: list[bool] = []
         llm_tools = self.llm.tool_names()

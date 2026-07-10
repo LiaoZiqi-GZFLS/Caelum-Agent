@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -40,47 +41,22 @@ def test_orchestrator_starts_in_idle(config, eventbus, killswitch):
 
 @pytest.mark.asyncio
 async def test_run_task_direct_completion(config, eventbus, killswitch):
-    # A no-tool Think reply IS the final answer: it returns right after the
-    # Perceive -> Think step, with no post-action perception / verify / final-
-    # answer cycle.
-    perception = FakePerception([_blank_perception()])
-    llm = FakeLLM([_message("Here are the files: a.txt, b.txt.")])
+    # A plain no-tool reply (the model did NOT call CompleteTask) still flows
+    # through the verify + final-answer cycle, exactly as before.
+    llm = FakeLLM([
+        _message("I will list the files."),
+        _message("YES"),
+        _message("Here are the files: a.txt, b.txt."),
+    ])
     agent = AgentOrchestrator(
         config, eventbus, llm, FakeMCP(), killswitch,
-        perception=perception,
+        perception=FakePerception([_blank_perception()]),
     )
 
     result = await agent.run_task("list files")
 
     assert result == "Here are the files: a.txt, b.txt."
     assert agent.state.current_state == "COMPLETED"
-    assert agent._round_tool_used is False
-    assert len(perception.calls) == 1  # top-of-loop perceive only; no post-action
-    assert len(llm.calls) == 1         # the single Think call; no verify/final-answer
-
-
-@pytest.mark.asyncio
-async def test_greeting_returns_directly_without_verify(config, eventbus, killswitch):
-    # Pure chit-chat: Perceive runs once, the model answers with no tool, and
-    # the orchestrator returns immediately — no second perception, no verify,
-    # no skill learning scheduled.
-    perception = FakePerception([_blank_perception()])
-    learner = FakeSkillLearner()
-    llm = FakeLLM([_message("你好！有什么可以帮你的？")])
-    agent = AgentOrchestrator(
-        config, eventbus, llm, FakeMCP(), killswitch,
-        perception=perception,
-        skill_learner=learner,
-    )
-
-    result = await agent.run_task("你好")
-
-    assert result == "你好！有什么可以帮你的？"
-    assert agent.state.current_state == "COMPLETED"
-    assert agent._round_tool_used is False
-    assert len(perception.calls) == 1
-    assert len(llm.calls) == 1
-    assert learner.calls == []  # no action taken -> nothing to learn
 
 
 @pytest.mark.asyncio
@@ -105,9 +81,132 @@ async def test_tool_round_still_runs_verify(config, eventbus, killswitch):
 
     assert result == "Files: a.txt."
     assert agent.state.current_state == "COMPLETED"
-    assert agent._round_tool_used is True
     assert len(perception.calls) == 2  # top-of-loop + post-action
     assert mcp.calls == [("filesystem", "list_directory", {"path": "."})]
+
+
+# ---------------------------------------------------------------------------
+# CompleteTask (model-decided fast path) tests
+# ---------------------------------------------------------------------------
+
+class _CompletingLLM(FakeLLM):
+    """FakeLLM that routes the CompleteTask local tool to the agent's handler."""
+
+    def __init__(self, agent: AgentOrchestrator, chat_responses: list[Any]) -> None:
+        super().__init__(chat_responses)
+        self._agent = agent
+
+    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for c in calls:
+            if c.function.name == "CompleteTask":
+                args = json.loads(c.function.arguments)
+                content = self._agent._complete_task_impl(args.get("answer", ""))
+            else:
+                content = "{}"
+            out.append({"role": "tool", "tool_call_id": c.id, "content": content})
+        return out
+
+
+def _wire_complete_task(agent: AgentOrchestrator, llm: "_CompletingLLM") -> None:
+    agent.llm = llm
+    agent._register_complete_task()  # adds "CompleteTask" to llm.tool_names()
+
+
+@pytest.mark.asyncio
+async def test_complete_task_impl_sets_pending(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    assert agent._pending_completion is None
+
+    content = agent._complete_task_impl("done answer")
+
+    assert agent._pending_completion == "done answer"
+    assert "complete" in content.lower()
+
+
+@pytest.mark.asyncio
+async def test_complete_task_returns_answer_skipping_verify(config, eventbus, killswitch):
+    # The model decides the greeting needs no action and calls CompleteTask, so
+    # the orchestrator returns its answer right after Perceive -> Think: no second
+    # perception, no _verify, no _final_answer.
+    perception = FakePerception([_blank_perception()])
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch, perception=perception
+    )
+    llm = _CompletingLLM(
+        agent,
+        [
+            _message(
+                "你好！",
+                tool_calls=[_tool_call("CompleteTask", {"answer": "你好！有什么可以帮你的？"})],
+            )
+        ],
+    )
+    _wire_complete_task(agent, llm)
+
+    result = await agent.run_task("你好")
+
+    assert result == "你好！有什么可以帮你的？"
+    assert agent.state.current_state == "COMPLETED"
+    assert len(perception.calls) == 1  # top-of-loop perceive only; no post-action
+
+
+@pytest.mark.asyncio
+async def test_complete_task_after_action_skips_verify_by_model_choice(
+    config, eventbus, killswitch
+):
+    # The model acted (filesystem list) and THEN chose CompleteTask to finish,
+    # explicitly opting out of verification. We honor its decision: return the
+    # answer, skip the post-action perceive/verify, and still learn a skill
+    # because an action was taken (action_traces is non-empty).
+    perception = FakePerception([_blank_perception()])
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+    learner = FakeSkillLearner()
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), mcp, killswitch,
+        perception=perception,
+        skill_learner=learner,
+    )
+    llm = _CompletingLLM(
+        agent,
+        [
+            _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+            _message("Done.", tool_calls=[_tool_call("CompleteTask", {"answer": "Here: a.txt"})]),
+        ],
+    )
+    _wire_complete_task(agent, llm)
+
+    result = await agent.run_task("list files")
+
+    assert result == "Here: a.txt"
+    assert agent.state.current_state == "COMPLETED"
+    assert len(perception.calls) == 1  # no post-action perceive
+    assert mcp.calls == [("filesystem", "list_directory", {"path": "."})]
+    if agent._background_tasks:
+        await asyncio.gather(*agent._background_tasks)
+    assert len(learner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
+    # The system prompt must tell the model when to use CompleteTask vs a normal
+    # final answer, so the skip-verify decision stays the model's.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    llm = _CompletingLLM(
+        agent,
+        [_message("hi", tool_calls=[_tool_call("CompleteTask", {"answer": "hi"})])],
+    )
+    _wire_complete_task(agent, llm)
+
+    await agent.run_task("hi")
+
+    system_content = agent.history[0]["content"]
+    assert "CompleteTask" in system_content
+    assert "verified" in system_content
 
 
 @pytest.mark.asyncio
