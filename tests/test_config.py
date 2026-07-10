@@ -13,6 +13,13 @@ def test_llm_model_name_normalization():
     assert cfg.model == "kimi-k2.6"
 
 
+def test_llm_config_repr_hides_api_key():
+    cfg = LLMConfig(api_key="sk-secret-key", model="kimi-k2.6")
+    representation = repr(cfg)
+    assert "sk-secret-key" not in representation
+    assert "api_key" not in representation or "***" in representation
+
+
 def test_config_from_dict():
     data = {
         "llm": {"api_key": "test"},

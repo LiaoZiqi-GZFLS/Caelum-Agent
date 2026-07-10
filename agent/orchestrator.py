@@ -225,9 +225,13 @@ class AgentOrchestrator:
                 mcp_args["button"] = "right"
         elif action == "type":
             # Type: click first to focus, then type.
+            if self._check_cancelled():
+                return "[error] Task cancelled by kill switch."
             focus_result = await self.mcp.call("windows", "Click", {"loc": [screen_x, screen_y]})
             if not focus_result.success:
                 return f"[error] Failed to focus element at ({screen_x}, {screen_y}): {focus_result.content}"
+            if self._check_cancelled():
+                return "[error] Task cancelled by kill switch."
             type_result = await self.mcp.call("windows", "Type", {"text": text or ""})
             if type_result.success:
                 msg = f"OK: typed text at ({screen_x}, {screen_y}) — {type_result.content[:200]}"
@@ -237,6 +241,8 @@ class AgentOrchestrator:
             return f"[error] {type_result.content}"
         elif action in ("scroll_down", "scroll_up"):
             direction = "down" if action == "scroll_down" else "up"
+            if self._check_cancelled():
+                return "[error] Task cancelled by kill switch."
             scroll_result = await self.mcp.call("windows", "Scroll", {
                 "loc": [screen_x, screen_y],
                 "direction": direction,
@@ -250,6 +256,8 @@ class AgentOrchestrator:
         else:
             return f"[error] Unknown action: {action}"
 
+        if self._check_cancelled():
+            return "[error] Task cancelled by kill switch."
         result = await self.mcp.call("windows", mcp_action, mcp_args)
         if result.success:
             msg = f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
@@ -570,6 +578,14 @@ class AgentOrchestrator:
         results = []
         llm_tools = self.llm.tool_names()
         for call in tool_calls:
+            if self._check_cancelled():
+                results.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": "[error] Task cancelled by kill switch.",
+                })
+                break
+
             name = call.function.name
             args = json.loads(call.function.arguments)
             if name in llm_tools:

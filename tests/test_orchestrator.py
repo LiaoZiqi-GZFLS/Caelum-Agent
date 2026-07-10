@@ -145,6 +145,37 @@ async def test_run_task_kill_switch_cancels(config, eventbus, killswitch):
 
 
 @pytest.mark.asyncio
+async def test_kill_switch_cancels_remaining_tool_calls(config, eventbus, killswitch):
+    """If the kill switch fires during a tool call, subsequent calls are skipped."""
+
+    class TriggeringMCP(FakeMCP):
+        async def call(
+            self, server: str, tool_name: str, arguments: dict[str, Any]
+        ) -> ToolResult:
+            if len(self.calls) == 0:
+                await killswitch.trigger()
+            return await super().call(server, tool_name, arguments)
+
+    llm = FakeLLM([
+        _message("Clicking twice.", tool_calls=[
+            _tool_call("windows__Click", {"x": 10, "y": 10}),
+            _tool_call("windows__Click", {"x": 20, "y": 20}),
+        ]),
+    ])
+    mcp = TriggeringMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.set_human_confirmation_callback(lambda summary, action: True)
+
+    result = await agent.run_task("click twice")
+
+    assert len(mcp.calls) == 1
+    assert "cancelled" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_run_task_action_failure_threshold(config, eventbus, killswitch):
     llm = FakeLLM(
         [

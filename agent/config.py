@@ -9,13 +9,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LLMConfig(BaseModel):
+    model_config = ConfigDict(repr=False)
+
     provider: str = "kimi"
     base_url: str = "https://api.moonshot.cn/v1"
-    api_key: str
+    api_key: str = Field(repr=False)
     model: str = "kimi-k2.6"
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     enable_builtin_tools: bool = True

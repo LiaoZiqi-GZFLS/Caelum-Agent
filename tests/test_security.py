@@ -28,3 +28,12 @@ def test_classify_tool_call():
     assert guard.classify_tool_call("windows", "Snapshot") == "read"
     assert guard.classify_tool_call("windows", "Click") == "write_risky"
     assert guard.classify_tool_call("windows", "PowerShell") == "destructive"
+    # Browser mutating actions should be risky.
+    assert guard.classify_tool_call("playwright", "browser_type") == "write_risky"
+    assert guard.classify_tool_call("playwright", "browser_fill_form") == "write_risky"
+    assert guard.classify_tool_call("playwright", "browser_evaluate") == "write_risky"
+    assert guard.classify_tool_call("playwright", "browser_route") == "write_risky"
+    # Windows MCP specific tools.
+    assert guard.classify_tool_call("windows", "App") == "write_risky"
+    assert guard.classify_tool_call("windows", "MultiEdit") == "write_risky"
+    assert guard.classify_tool_call("windows", "FileSystem") == "write_risky"

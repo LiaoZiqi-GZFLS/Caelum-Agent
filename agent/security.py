@@ -75,7 +75,22 @@ class SecurityGuard:
     def classify_tool_call(self, server: str, tool_name: str) -> str:
         """Map a tool call to a security level."""
         destructive = {"delete", "remove", "format", "registry", "powershell"}
-        risky = {"write", "edit", "type", "click", "move", "shortcut", "browser_click"}
+        risky = {
+            "write",
+            "edit",
+            "type",
+            "click",
+            "move",
+            "shortcut",
+            "browser_click",
+            "browser_type",
+            "browser_fill_form",
+            "browser_evaluate",
+            "browser_route",
+            "windows/app",
+            "multiedit",
+            "windows/filesystem",
+        }
         lowered = f"{server}/{tool_name}".lower()
         if any(d in lowered for d in destructive):
             return "destructive"
