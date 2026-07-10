@@ -190,9 +190,9 @@ class AgentOrchestrator:
     ) -> str:
         """Convert a SoM label to screen coordinates and execute the action.
 
-        Looks up the label in the most recent perception's som_annotations,
-        converts normalized coordinates to screen pixels, then calls the
-        appropriate MCP tool (Windows desktop or Playwright browser).
+        Look up the label in the most recent perception's som_annotations,
+        convert normalized coordinates to screen pixels, then call the
+        appropriate Windows-MCP tool.
         """
         perception = getattr(self, "_last_perception", None)
         if perception is None:
@@ -211,8 +211,8 @@ class AgentOrchestrator:
         # Convert normalized [0,1] to screen pixel coordinates.
         sw = perception.screen_width or 1920
         sh = perception.screen_height or 1080
-        screen_x = int(round(match["center_x"] * sw))
-        screen_y = int(round(match["center_y"] * sh))
+        screen_x = int(round(match.get("center_x", 0) * sw))
+        screen_y = int(round(match.get("center_y", 0) * sh))
 
         if action in ("click", "double_click", "right_click"):
             mcp_action = "Click"
@@ -234,7 +234,7 @@ class AgentOrchestrator:
                 "loc": [screen_x, screen_y],
                 "direction": direction,
             })
-            return f"OK: {direction} scroll at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}" if scroll_result.success else f"[error] {scroll_result.content}"
+            return f"OK: {action} at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}" if scroll_result.success else f"[error] {scroll_result.content}"
         else:
             return f"[error] Unknown action: {action}"
 
@@ -244,9 +244,9 @@ class AgentOrchestrator:
         return f"[error] {result.content}"
 
     def _register_desktop_interact(self) -> None:
-        """Register the desktop_interact local function tool with the LLM."""
+        """Register the DesktopInteract local function tool with the LLM."""
         self.llm.register_local_function(
-            "desktop_interact",
+            "DesktopInteract",
             self._desktop_interact_impl,
             schema=DESKTOP_INTERACT_SCHEMA,
             description=(

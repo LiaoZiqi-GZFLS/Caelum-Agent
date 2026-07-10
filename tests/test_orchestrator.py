@@ -745,7 +745,7 @@ async def test_desktop_interact_tool_registered(config, eventbus, killswitch):
     register_all(llm, mcp)
     agent._register_desktop_interact()
 
-    assert "desktop_interact" in llm.tool_names()
+    assert "DesktopInteract" in llm.tool_names()
 
 
 @pytest.mark.asyncio
@@ -809,3 +809,103 @@ async def test_desktop_interact_no_perception_error(config, eventbus, killswitch
 
     assert result.startswith("[error]")
     assert "No perception data" in result
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_double_click_sets_times(config, eventbus, killswitch):
+    """desktop_interact double_click sends times=2 to Click."""
+    from agent.perception import Perception
+
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+        screen_width=1920,
+        screen_height=1080,
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="double_click")
+
+    assert "OK" in result
+    server, tool, args = mcp.calls[-1]
+    assert server == "windows"
+    assert tool == "Click"
+    assert args["times"] == 2
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_right_click_sets_button(config, eventbus, killswitch):
+    """desktop_interact right_click sends button='right' to Click."""
+    from agent.perception import Perception
+
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+        screen_width=1920,
+        screen_height=1080,
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="right_click")
+
+    assert "OK" in result
+    server, tool, args = mcp.calls[-1]
+    assert server == "windows"
+    assert tool == "Click"
+    assert args["button"] == "right"
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_unknown_action_error(config, eventbus, killswitch):
+    """desktop_interact returns error for unknown action types."""
+    from agent.perception import Perception
+
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="drag")
+
+    assert result.startswith("[error]")
+    assert "Unknown action" in result
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_uses_screen_dimension_fallback(config, eventbus, killswitch):
+    """desktop_interact falls back to 1920x1080 when screen dimensions are 0."""
+    from agent.perception import Perception
+
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.25, "center_y": 0.5}],
+    )  # screen_width/screen_height default to 0
+
+    result = await agent._desktop_interact_impl(label=1, action="click")
+
+    assert "OK" in result
+    server, tool, args = mcp.calls[-1]
+    # 0.25 * 1920 = 480, 0.5 * 1080 = 540
+    assert args["loc"] == [480, 540]
