@@ -363,25 +363,35 @@ async def test_api_failure_threshold_triggers_local_mode(config, eventbus, kills
 
 @pytest.mark.asyncio
 async def test_same_ui_loop_detection(config, eventbus, killswitch):
+    # Same-UI-loop detection only applies to UI tools (windows/playwright). A
+    # repeating Click that never changes the screen should trip the guard.
     llm = FakeLLM(
         [
-            _message("Trying.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
-            _message("I tried."),
+            # loop 1
+            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"x": 10, "y": 10})]),
+            _message("Clicked."),
             _message("NO"),
+            _message("reflect 1"),
+            # loop 2
+            _message("Clicking again.", tool_calls=[_tool_call("windows__Click", {"x": 10, "y": 10})]),
+            _message("Clicked again."),
+            _message("NO"),
+            _message("reflect 2"),
         ],
-        default_chat=_message("Retrying."),
     )
-    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
-    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content=""))
+    mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Click", ToolResult(success=True, content="ok"))
     agent = AgentOrchestrator(
         config, eventbus, llm, mcp, killswitch,
-        perception=FakePerception([_same_hash_perception()] * 5),
+        perception=FakePerception([_same_hash_perception("same")] * 5),
     )
+    agent.set_human_confirmation_callback(lambda summary, action: True)
 
-    result = await agent.run_task("list files")
+    result = await agent.run_task("click something")
 
     assert "UI state unchanged" in result
     assert agent.state.current_state == "STUCK"
+    assert agent._used_ui_tool is True
 
 
 @pytest.mark.asyncio
@@ -853,3 +863,77 @@ def test_format_perception_falls_back_when_annotated_missing():
         for p in (raw, annotated):
             if p.exists():
                 p.unlink()
+
+
+@pytest.mark.asyncio
+async def test_pure_compute_task_completes_without_stuck(config, eventbus, killswitch):
+    # A pure-compute Formula tool (quickjs) never touches the screen, so an
+    # unchanged UI must not trip the same-UI-loop guard or fail verification.
+    llm = FakeLLM(
+        [
+            _message("Computing.", tool_calls=[_tool_call("quickjs", {"code": "2**20"})]),
+            _message("The answer is 1048576."),
+            _message("YES"),
+            _message("1048576"),
+        ],
+        tool_responses=[
+            [{"role": "tool", "tool_call_id": "call_1", "content": "1048576"}],
+        ],
+        tool_names=["quickjs"],
+    )
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_same_hash_perception("same")] * 3),
+    )
+
+    result = await agent.run_task("compute 2^20")
+
+    assert result == "1048576"
+    assert agent.state.current_state == "COMPLETED"
+    assert agent._used_ui_tool is False
+
+
+@pytest.mark.asyncio
+async def test_verify_trusts_llm_for_non_ui_task(config, eventbus, killswitch):
+    # When no UI tool was used, _verify trusts the model's YES even though the
+    # screen did not change.
+    llm = FakeLLM([_message("YES")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_same_hash_perception("same")]),
+    )
+    assert agent._used_ui_tool is False
+
+    prev = _same_hash_perception("same")
+    curr = _same_hash_perception("same")
+    assert await agent._verify(prev, curr) is True
+
+
+@pytest.mark.asyncio
+async def test_windows_tool_sets_used_ui_flag(config, eventbus, killswitch):
+    # Executing a windows MCP tool flips _used_ui_tool; a filesystem tool does not.
+    mcp = FakeMCP([
+        {"server": "windows", "name": "Click", "description": "", "schema": {}},
+        {"server": "filesystem", "name": "list_directory", "description": "", "schema": {}},
+    ])
+    mcp.set_result("windows", "Click", ToolResult(success=True, content="ok"))
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+
+    ui_agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    ui_agent.set_human_confirmation_callback(lambda summary, action: True)
+    await ui_agent._execute_tool_calls([_tool_call("windows__Click", {"x": 1, "y": 1})])
+    assert ui_agent._used_ui_tool is True
+
+    fs_agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    await fs_agent._execute_tool_calls([_tool_call("filesystem__list_directory", {"path": "."})])
+    assert fs_agent._used_ui_tool is False
+
+
+def test_is_ui_tool_classification():
+    # Screen-touching servers/tools are classified as UI; everything else is not.
+    assert AgentOrchestrator._is_ui_tool("windows__Click", "windows") is True
+    assert AgentOrchestrator._is_ui_tool("playwright__browser_click", "playwright") is True
+    assert AgentOrchestrator._is_ui_tool("desktop_interact", None) is True
+    assert AgentOrchestrator._is_ui_tool("DesktopInteract", None) is True
+    assert AgentOrchestrator._is_ui_tool("filesystem__list_directory", "filesystem") is False
+    assert AgentOrchestrator._is_ui_tool("quickjs", None) is False

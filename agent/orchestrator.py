@@ -101,6 +101,11 @@ class AgentOrchestrator:
         self._recent_hashes: deque[str] = deque(
             maxlen=self.config.kill_switch.same_ui_loop_threshold
         )
+        # Whether the current/last task used a screen-touching tool. Reset at
+        # the start of each run_task; initialized here so helpers that inspect
+        # it (e.g. tests calling _verify/_execute_tool_calls directly) never see
+        # a missing attribute.
+        self._used_ui_tool = False
         self._human_confirm_callback: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
@@ -421,6 +426,11 @@ class AgentOrchestrator:
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
         self.action_traces = []
+        # Tracks whether this task has invoked any tool that touches the screen
+        # (windows/playwright MCP, or the desktop_interact local tool). Pure
+        # compute/API/filesystem tasks never set it, so the same-UI-loop guard
+        # and the UI-change verification do not apply to them.
+        self._used_ui_tool = False
 
         max_loops = 10
         for loop in range(max_loops):
@@ -467,7 +477,7 @@ class AgentOrchestrator:
                 await self.state.transition("PLANNING", task_id=self.task_id)
                 continue
 
-            if self._is_same_ui_loop(perception.ui_hash):
+            if self._used_ui_tool and self._is_same_ui_loop(perception.ui_hash):
                 loops = len(self._recent_hashes)
                 reason = f"UI state unchanged for {loops} loops"
                 await self.reflection.record(
@@ -599,6 +609,8 @@ class AgentOrchestrator:
                 # Built-in Formula tool handled by LLM client.
                 outputs = await self.llm.execute_tool_calls([call])
                 results.extend(outputs)
+                if self._is_ui_tool(name, None):
+                    self._used_ui_tool = True
                 continue
 
             server, tool_name = self._resolve_mcp_tool(name)
@@ -610,6 +622,8 @@ class AgentOrchestrator:
                     "content": f"[error] Tool {name} not found.",
                 })
                 continue
+            if self._is_ui_tool(name, server):
+                self._used_ui_tool = True
 
             await self.eventbus.emit(
                 ToolCallRequested(
@@ -666,6 +680,21 @@ class AgentOrchestrator:
         query_indicators = ["read", "list", "get", "find", "search", "snapshot", "screenshot"]
         return any(ind in summary for ind in query_indicators)
 
+    @staticmethod
+    def _is_ui_tool(name: str, server: str | None) -> bool:
+        """Return True if a tool call interacts with the desktop/browser screen.
+
+        MCP servers ``windows`` and ``playwright`` operate on the screen, as does
+        the local ``desktop_interact`` tool (which clicks via Windows-MCP).
+        Everything else (filesystem MCP, Kimi Formula tools, code runners) does
+        not change the UI.
+        """
+        if server in {"windows", "playwright"}:
+            return True
+        if name in {"desktop_interact", "DesktopInteract"}:
+            return True
+        return False
+
     async def _verify(
         self,
         previous_perception: Any | None,
@@ -685,8 +714,8 @@ class AgentOrchestrator:
         self.history.append({
             "role": "user",
             "content": (
-                "Did the last action produce enough information to answer the user's request? "
-                "Reply with a single word: YES or NO."
+                "Did the last action successfully complete the user's request, or make "
+                "clear, sufficient progress toward it? Reply with a single word: YES or NO."
             ),
         })
         completion = await self._llm_chat_with_breaker(self.history)
@@ -696,6 +725,11 @@ class AgentOrchestrator:
 
         if not llm_says_yes:
             return False
+
+        # Tasks that never touched the screen (pure compute / API / filesystem)
+        # cannot be judged by UI changes; trust the model's YES.
+        if not self._used_ui_tool:
+            return True
 
         # For mutating actions, require evidence of UI change.
         if previous_perception is not None and current_perception is not None:
