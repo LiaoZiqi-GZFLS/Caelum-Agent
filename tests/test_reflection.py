@@ -10,41 +10,18 @@ from agent.config import Config
 from agent.kimi_memory import KimiMemoryClient
 from agent.memory import MemoryStore
 from agent.reflection import ReflectionEngine
-
-
-class FakeLLMForRethink:
-    def __init__(self, responses: list[list[dict[str, Any]]] | None = None) -> None:
-        self.responses = list(responses or [])
-        self.calls: list[list[Any]] = []
-
-    def tool_names(self) -> list[str]:
-        return ["rethink"]
-
-    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
-        self.calls.append(calls)
-        if self.responses:
-            return self.responses.pop(0)
-        return [{"role": "tool", "tool_call_id": calls[0].id, "content": "Retry."}]
-
-
-@pytest.fixture
-def memory(tmp_path):
-    return MemoryStore(
-        db_path=tmp_path / "memory.db",
-        skills_dir=tmp_path / "skills",
-        vector_dir=tmp_path / "chroma",
-    )
+from tests.fakes import FakeLLM
 
 
 @pytest.mark.asyncio
-async def test_record_uses_rethink_when_available(memory):
-    llm = FakeLLMForRethink([[{"role": "tool", "tool_call_id": "call_rethink", "content": "Use a different path."}]])
+async def test_record_uses_rethink_when_available(memory_store):
+    llm = FakeLLM(tool_responses=[[{"role": "tool", "tool_call_id": "call_rethink", "content": "Use a different path."}]], tool_names=['rethink'])
     config = Config(
         llm={"api_key": "test"},
         mcp_servers={},
         reflection={"use_rethink": True},
     )
-    engine = ReflectionEngine(config, memory, kimi=KimiMemoryClient(llm))
+    engine = ReflectionEngine(config, memory_store, kimi=KimiMemoryClient(llm))
 
     rid = await engine.record("list files", "directory empty", "tried ./docs")
 
@@ -59,15 +36,15 @@ async def test_record_uses_rethink_when_available(memory):
 
 
 @pytest.mark.asyncio
-async def test_record_falls_back_to_sqlite_when_rethink_unavailable(memory):
-    llm = FakeLLMForRethink()
+async def test_record_falls_back_to_sqlite_when_rethink_unavailable(memory_store):
+    llm = FakeLLM()
     llm.tool_names = lambda: []
     config = Config(
         llm={"api_key": "test"},
         mcp_servers={},
         reflection={"use_rethink": True},
     )
-    engine = ReflectionEngine(config, memory, kimi=KimiMemoryClient(llm))
+    engine = ReflectionEngine(config, memory_store, kimi=KimiMemoryClient(llm))
 
     rid = await engine.record("list files", "directory empty", "tried ./docs")
 
@@ -77,8 +54,8 @@ async def test_record_falls_back_to_sqlite_when_rethink_unavailable(memory):
 
 
 @pytest.mark.asyncio
-async def test_record_falls_back_to_sqlite_on_rethink_exception(memory):
-    class FakeLLMBoom(FakeLLMForRethink):
+async def test_record_falls_back_to_sqlite_on_rethink_exception(memory_store):
+    class FakeLLMBoom(FakeLLM):
         async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
             raise RuntimeError("boom")
 
@@ -88,7 +65,7 @@ async def test_record_falls_back_to_sqlite_on_rethink_exception(memory):
         mcp_servers={},
         reflection={"use_rethink": True},
     )
-    engine = ReflectionEngine(config, memory, kimi=KimiMemoryClient(llm))
+    engine = ReflectionEngine(config, memory_store, kimi=KimiMemoryClient(llm))
 
     rid = await engine.record("list files", "directory empty", "tried ./docs")
 
@@ -99,20 +76,20 @@ async def test_record_falls_back_to_sqlite_on_rethink_exception(memory):
     assert stored[0]["fix_action"] == "tried ./docs"
 
 
-def test_build_context_without_reflections(memory):
+def test_build_context_without_reflections(memory_store):
     config = Config(llm={"api_key": "test"}, mcp_servers={})
-    engine = ReflectionEngine(config, memory)
+    engine = ReflectionEngine(config, memory_store)
     assert engine.build_context("anything") == ""
 
 
-def test_record_sync_persists_without_llm(memory):
-    llm = FakeLLMForRethink()
+def test_record_sync_persists_without_llm(memory_store):
+    llm = FakeLLM()
     config = Config(
         llm={"api_key": "test"},
         mcp_servers={},
         reflection={"use_rethink": True},
     )
-    engine = ReflectionEngine(config, memory, kimi=KimiMemoryClient(llm))
+    engine = ReflectionEngine(config, memory_store, kimi=KimiMemoryClient(llm))
 
     rid = engine.record_sync("sync task", "it broke", "reboot")
 
@@ -125,14 +102,14 @@ def test_record_sync_persists_without_llm(memory):
 
 
 @pytest.mark.asyncio
-async def test_record_falls_back_to_sqlite_when_rethink_disabled(memory):
-    llm = FakeLLMForRethink([[{"role": "tool", "tool_call_id": "call_rethink", "content": "Ignored."}]])
+async def test_record_falls_back_to_sqlite_when_rethink_disabled(memory_store):
+    llm = FakeLLM(tool_responses=[[{"role": "tool", "tool_call_id": "call_rethink", "content": "Ignored."}]], tool_names=['rethink'])
     config = Config(
         llm={"api_key": "test"},
         mcp_servers={},
         reflection={"use_rethink": False},
     )
-    engine = ReflectionEngine(config, memory, kimi=KimiMemoryClient(llm))
+    engine = ReflectionEngine(config, memory_store, kimi=KimiMemoryClient(llm))
 
     rid = await engine.record("list files", "directory empty", "tried ./docs")
 
@@ -143,9 +120,9 @@ async def test_record_falls_back_to_sqlite_when_rethink_disabled(memory):
     assert stored[0]["fix_action"] == "tried ./docs"
 
 
-def test_build_context_formats_stored_reflection(memory):
+def test_build_context_formats_stored_reflection(memory_store):
     config = Config(llm={"api_key": "test"}, mcp_servers={})
-    engine = ReflectionEngine(config, memory)
+    engine = ReflectionEngine(config, memory_store)
     engine.record_sync("resize window", "window too small", "maximize it")
 
     context = engine.build_context("resize window")

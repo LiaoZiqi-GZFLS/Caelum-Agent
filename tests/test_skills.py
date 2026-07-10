@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,45 +12,15 @@ import pytest
 from agent.memory import MemoryStore
 from agent.security import SecurityGuard
 from agent.skills import SkillLearner
+from tests.fakes import FakeLLM
 
 
 @pytest.fixture
-def memory(tmp_path: Path) -> MemoryStore:
-    return MemoryStore(
-        db_path=tmp_path / "memory.db",
-        skills_dir=tmp_path / "skills",
-        vector_dir=tmp_path / "chroma",
-    )
-
-
-@pytest.fixture
-def learner(memory: MemoryStore, tmp_path: Path) -> SkillLearner:
+def learner(memory_store: MemoryStore, tmp_path: Path) -> SkillLearner:
     return SkillLearner(
         skills_dir=tmp_path / "skills",
-        memory=memory,
+        memory=memory_store,
     )
-
-
-class FakeLLM:
-    """Returns a canned skill JSON wrapped in a ChatCompletion-like object."""
-
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.payload = payload
-        self.calls: list[list[dict[str, Any]]] = []
-
-    async def chat(
-        self, messages: list[dict[str, Any]], tools: Any | None = None
-    ) -> Any:
-        self.calls.append(messages)
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content=f"```json\n{__import__('json').dumps(self.payload)}\n```"
-                    )
-                )
-            ]
-        )
 
 
 @pytest.mark.asyncio
@@ -69,14 +40,14 @@ async def test_learn_creates_new_skill(learner: SkillLearner, tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_learn_merges_similar_skill(
-    learner: SkillLearner, memory: MemoryStore, tmp_path: Path
+    learner: SkillLearner, memory_store: MemoryStore, tmp_path: Path
 ) -> None:
     # Seed an existing skill about Notepad.
     learned_dir = tmp_path / "skills" / "learned"
     learned_dir.mkdir(parents=True)
     original = learned_dir / "open-notepad.md"
     original.write_text("open notepad", encoding="utf-8")
-    memory.sync_skills()
+    memory_store.sync_skills()
 
     result = await learner.learn(
         "open notepad",
@@ -91,7 +62,7 @@ async def test_learn_merges_similar_skill(
 
 @pytest.mark.asyncio
 async def test_learn_uses_llm_when_available(
-    memory: MemoryStore, tmp_path: Path
+    memory_store: MemoryStore, tmp_path: Path
 ) -> None:
     payload = {
         "name": "launch-calculator",
@@ -101,10 +72,19 @@ async def test_learn_uses_llm_when_available(
         "tags": "calculator,math",
         "version": "v0.1.0",
     }
-    fake_llm = FakeLLM(payload)
+    chat_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=f"```json\n{json.dumps(payload)}\n```"
+                )
+            )
+        ]
+    )
+    fake_llm = FakeLLM(chat_responses=[chat_response])
     learner = SkillLearner(
         skills_dir=tmp_path / "skills",
-        memory=memory,
+        memory=memory_store,
         llm_client=fake_llm,
     )
 
@@ -174,7 +154,7 @@ def test_security_typed_confirmation_allows_on_match(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_learn_falls_back_when_llm_fails(
-    memory: MemoryStore, tmp_path: Path
+    memory_store: MemoryStore, tmp_path: Path
 ) -> None:
     class BrokenLLM:
         async def chat(
@@ -184,7 +164,7 @@ async def test_learn_falls_back_when_llm_fails(
 
     learner = SkillLearner(
         skills_dir=tmp_path / "skills",
-        memory=memory,
+        memory=memory_store,
         llm_client=BrokenLLM(),
     )
 

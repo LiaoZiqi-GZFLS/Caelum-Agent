@@ -38,14 +38,14 @@ class FakeLLM:
     ) -> None:
         self._chat_queue = list(chat_responses or [])
         self._tool_queue = list(tool_responses or [])
-        self._tool_names = list(tool_names or [])
         self._default_chat = default_chat
         self._chat_index = 0
         self._tool_index = 0
         # Public recording fields.
         self.calls: list[list[dict[str, Any]]] = []
         self.last_tools: list[Any] = []
-        self.tools: list[str] = []
+        # tools holds both constructor-provided names and registered names.
+        self.tools: list[str] = list(tool_names or [])
 
     def register_function_tools(self, tools: list[dict[str, Any]]) -> None:
         for t in tools:
@@ -85,6 +85,7 @@ class FakeLLM:
     async def execute_tool_calls(
         self, calls: list[Any]
     ) -> list[dict[str, Any]]:
+        self.calls.append(calls)
         if self._tool_index < len(self._tool_queue):
             result = self._tool_queue[self._tool_index]
             self._tool_index += 1

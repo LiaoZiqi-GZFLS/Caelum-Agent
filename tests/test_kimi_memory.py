@@ -7,31 +7,12 @@ from typing import Any
 import pytest
 
 from agent.kimi_memory import KimiMemoryClient, ToolNotAvailableError
-
-
-class FakeLLM:
-    def __init__(
-        self,
-        responses: list[Any] | None = None,
-        tool_names: list[str] | None = None,
-    ) -> None:
-        self.responses = list(responses or [])
-        self._tool_names = list(tool_names if tool_names is not None else ["memory", "rethink"])
-        self.calls: list[list[Any]] = []
-
-    def tool_names(self) -> list[str]:
-        return self._tool_names
-
-    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
-        self.calls.append(calls)
-        if self.responses:
-            return self.responses.pop(0)
-        return [{"role": "tool", "tool_call_id": calls[0].id, "content": "{}"}]
+from tests.fakes import FakeLLM
 
 
 @pytest.mark.asyncio
 async def test_set_memory_calls_memory_tool():
-    llm = FakeLLM([[{"role": "tool", "tool_call_id": "call_1", "content": "ok"}]])
+    llm = FakeLLM(tool_responses=[[{"role": "tool", "tool_call_id": "call_1", "content": "ok"}]], tool_names=["memory", "rethink"])
     client = KimiMemoryClient(llm)
     await client.set_memory("user_name", "Alice")
 
@@ -47,7 +28,7 @@ async def test_set_memory_calls_memory_tool():
 
 @pytest.mark.asyncio
 async def test_get_memory_returns_top_result_value():
-    llm = FakeLLM([[{
+    llm = FakeLLM(tool_responses=[[{
         "role": "tool",
         "tool_call_id": "call_1",
         "content": __import__("json").dumps({
@@ -56,7 +37,7 @@ async def test_get_memory_returns_top_result_value():
             ],
             "count": 1,
         }),
-    }]])
+    }]], tool_names=["memory", "rethink"])
     client = KimiMemoryClient(llm)
     value = await client.get_memory("user_name")
 
@@ -67,11 +48,11 @@ async def test_get_memory_returns_top_result_value():
 
 @pytest.mark.asyncio
 async def test_get_memory_returns_none_when_empty_results():
-    llm = FakeLLM([[{
+    llm = FakeLLM(tool_responses=[[{
         "role": "tool",
         "tool_call_id": "call_1",
         "content": __import__("json").dumps({"results": [], "count": 0}),
-    }]])
+    }]], tool_names=["memory", "rethink"])
     client = KimiMemoryClient(llm)
     value = await client.get_memory("missing_key")
 
@@ -80,11 +61,11 @@ async def test_get_memory_returns_none_when_empty_results():
 
 @pytest.mark.asyncio
 async def test_rethink_returns_reflection():
-    llm = FakeLLM([[{
+    llm = FakeLLM(tool_responses=[[{
         "role": "tool",
         "tool_call_id": "call_1",
         "content": "Try a different directory.",
-    }]])
+    }]], tool_names=['memory', 'rethink'])
     client = KimiMemoryClient(llm)
     result = await client.rethink(
         task_summary="list files",
@@ -131,11 +112,11 @@ async def test_rethink_raises_when_rethink_tool_not_registered():
 
 @pytest.mark.asyncio
 async def test_set_memory_raises_runtime_error_on_error_output():
-    llm = FakeLLM([[{
+    llm = FakeLLM(tool_responses=[[{
         "role": "tool",
         "tool_call_id": "call_1",
         "content": "[error] tool execution failed",
-    }]])
+    }]], tool_names=['memory', 'rethink'])
     client = KimiMemoryClient(llm)
 
     with pytest.raises(RuntimeError, match="tool execution failed"):
@@ -144,11 +125,11 @@ async def test_set_memory_raises_runtime_error_on_error_output():
 
 @pytest.mark.asyncio
 async def test_get_memory_raises_runtime_error_on_error_output():
-    llm = FakeLLM([[{
+    llm = FakeLLM(tool_responses=[[{
         "role": "tool",
         "tool_call_id": "call_1",
         "content": "[error] recall failed",
-    }]])
+    }]], tool_names=['memory', 'rethink'])
     client = KimiMemoryClient(llm)
 
     with pytest.raises(RuntimeError, match="recall failed"):
@@ -157,11 +138,11 @@ async def test_get_memory_raises_runtime_error_on_error_output():
 
 @pytest.mark.asyncio
 async def test_rethink_raises_runtime_error_on_error_output():
-    llm = FakeLLM([[{
+    llm = FakeLLM(tool_responses=[[{
         "role": "tool",
         "tool_call_id": "call_1",
         "content": "[error] rethink failed",
-    }]])
+    }]], tool_names=['memory', 'rethink'])
     client = KimiMemoryClient(llm)
 
     with pytest.raises(RuntimeError, match="rethink failed"):
