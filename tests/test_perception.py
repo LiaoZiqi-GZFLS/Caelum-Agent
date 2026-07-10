@@ -150,3 +150,42 @@ def test_has_changed_treats_missing_hash_as_changed(config: Config) -> None:
     )
 
     assert module.has_changed(p1, p2) is True
+
+
+def test_perception_stores_screen_dimensions():
+    p = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[],
+        screen_width=1920,
+        screen_height=1080,
+    )
+    assert p.screen_width == 1920
+    assert p.screen_height == 1080
+
+
+def test_perception_stores_annotated_screenshot_path():
+    p = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[],
+        annotated_screenshot_path=Path("/tmp/test_annotated.jpg"),
+    )
+    assert p.annotated_screenshot_path == Path("/tmp/test_annotated.jpg")
+
+
+def test_perception_defaults_screen_dims_to_zero():
+    p = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[],
+    )
+    assert p.screen_width == 0
+    assert p.screen_height == 0
+    assert p.annotated_screenshot_path is None

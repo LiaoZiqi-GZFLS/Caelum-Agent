@@ -35,6 +35,9 @@ class Perception:
     ui_tree: dict[str, Any]
     som_annotations: list[dict[str, Any]]
     ui_hash: str = ""
+    screen_width: int = 0
+    screen_height: int = 0
+    annotated_screenshot_path: Path | None = None
 
 
 class PerceptionModule:
@@ -65,6 +68,7 @@ class PerceptionModule:
 
         loop = asyncio.get_event_loop()
         image = await loop.run_in_executor(self._io_executor, self._capture_screenshot)
+        orig_w, orig_h = image.size
         image_bytes = await loop.run_in_executor(
             self._io_executor, self._compress, image
         )
@@ -81,6 +85,26 @@ class PerceptionModule:
 
         ui_hash = self._compute_ui_hash(image_hash, ocr_text, ui_tree)
         description = self._build_description(ocr_text, ui_tree, som_annotations)
+
+        annotated_screenshot_path: Path | None = None
+        if som_annotations and self.ui_detector is not None:
+            from ui_detector.visualizer import visualize_som
+
+            annotated_image = await loop.run_in_executor(
+                self._io_executor, self._generate_annotated,
+                screenshot_path, som_annotations, cache_dir, timestamp,
+            )
+            if annotated_image is not None:
+                annotated_screenshot_path = (
+                    cache_dir / f"screenshot_{timestamp}_annotated.jpg"
+                )
+                await loop.run_in_executor(
+                    self._io_executor,
+                    annotated_image.save,
+                    annotated_screenshot_path,
+                    "JPEG",
+                )
+
         return Perception(
             screenshot_path=screenshot_path,
             description=description,
@@ -88,7 +112,23 @@ class PerceptionModule:
             ui_tree=ui_tree,
             som_annotations=som_annotations,
             ui_hash=ui_hash,
+            screen_width=orig_w,
+            screen_height=orig_h,
+            annotated_screenshot_path=annotated_screenshot_path,
         )
+
+    @staticmethod
+    def _generate_annotated(
+        screenshot_path: Path,
+        som_annotations: list[dict[str, Any]],
+        cache_dir: Path,
+        timestamp: int,
+    ) -> Image.Image | None:
+        """Generate a SoM-annotated image from the compressed screenshot."""
+        from ui_detector.visualizer import visualize_som
+
+        compressed = Image.open(screenshot_path)
+        return visualize_som(compressed, som_annotations)
 
     def _capture_screenshot(self) -> Image.Image:
         if self.config.screenshot.backend == "mss":
