@@ -45,6 +45,12 @@ class APIBreakerTripped(Exception):
     """Raised when the API failure threshold is reached."""
 
 
+# Windows-MCP tools that require a target (`loc` [x, y] or `label` from Snapshot).
+# Calling them without either raises a server-side ValueError; we short-circuit
+# client-side with an actionable error that points the model at Snapshot first.
+_POSITIONAL_WINDOWS_TOOLS = frozenset({"Click", "Type", "Scroll", "Move"})
+
+
 class AgentOrchestrator:
     STATE_KEY = "orchestrator_state"
 
@@ -106,6 +112,10 @@ class AgentOrchestrator:
         # it (e.g. tests calling _verify/_execute_tool_calls directly) never see
         # a missing attribute.
         self._used_ui_tool = False
+        # Whether any tool call in the current ReAct round returned failure.
+        # Reset at the top of each loop; _verify refuses to mark a round that
+        # had a tool failure as COMPLETED (blocks hallucinated success).
+        self._round_tool_failed = False
         self._human_confirm_callback: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
@@ -424,7 +434,14 @@ class AgentOrchestrator:
             "- Use DesktopInteract(label=N, action='type', text='...') to type into an input field\n"
             "- Use DesktopInteract(label=N, action='scroll_down') to scroll at marker N\n"
             "- For browser elements with refs (like e12), use playwright__browser_click(target='e12') instead.\n"
-            "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs."
+            "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n\n"
+            "## Working with desktop (Windows-MCP) tools\n"
+            "Before clicking or typing in a desktop app you MUST call windows__Snapshot first to "
+            "get the target element's [id], then pass it as `label`:\n"
+            "- windows__Click(label=<id>)  — never call Click with no loc/label.\n"
+            "- windows__Type(text='...', label=<id>)  — Type with no loc/label fails.\n"
+            "Example: Snapshot shows [5] Edit 'Text Editor' -> Type(text='hello', label=5).\n"
+            "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead."
         )
         if reflection_context:
             system_content += "\n\n" + reflection_context
@@ -462,6 +479,7 @@ class AgentOrchestrator:
                 break
 
             await self.state.transition("EXECUTING", task_id=self.task_id)
+            self._round_tool_failed = False
             perception = await self.perception.perceive(
                 instruction=self.current_instruction,
                 with_vision=not self.config.ui_detector.lazy,
@@ -643,6 +661,24 @@ class AgentOrchestrator:
             if self._is_ui_tool(name, server):
                 self._used_ui_tool = True
 
+            if (
+                server == "windows"
+                and tool_name in _POSITIONAL_WINDOWS_TOOLS
+                and not (args.get("loc") or args.get("label") is not None)
+            ):
+                self.consecutive_action_failures += 1
+                self._round_tool_failed = True
+                results.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": (
+                        f"[error] windows/{tool_name} requires a `label` (element id from "
+                        f"windows__Snapshot) or `loc` [x, y]. Call windows__Snapshot first, "
+                        f"read the target [id], then retry {tool_name} with label=<id>."
+                    ),
+                })
+                continue
+
             await self.eventbus.emit(
                 ToolCallRequested(
                     server=server, tool_name=tool_name, arguments=args, task_id=self.task_id
@@ -676,6 +712,7 @@ class AgentOrchestrator:
             self.action_traces.append(self.last_action_summary)
             if not success:
                 self.consecutive_action_failures += 1
+                self._round_tool_failed = True
             else:
                 self.consecutive_action_failures = 0
             results.append({
@@ -729,6 +766,12 @@ class AgentOrchestrator:
         we trust the result. If the LLM says NO or the UI is unchanged after a
         mutating action, verification fails.
         """
+        if self._round_tool_failed:
+            # A tool in this round failed (e.g. Type without label). Do not let
+            # a hallucinated YES plus an unrelated UI change pass as COMPLETED;
+            # force a reflect/replan instead.
+            return False
+
         self.history.append({
             "role": "user",
             "content": (

@@ -158,8 +158,8 @@ async def test_kill_switch_cancels_remaining_tool_calls(config, eventbus, killsw
 
     llm = FakeLLM([
         _message("Clicking twice.", tool_calls=[
-            _tool_call("windows__Click", {"x": 10, "y": 10}),
-            _tool_call("windows__Click", {"x": 20, "y": 20}),
+            _tool_call("windows__Click", {"loc": [10, 10]}),
+            _tool_call("windows__Click", {"loc": [20, 20]}),
         ]),
     ])
     mcp = TriggeringMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
@@ -228,7 +228,7 @@ async def test_run_task_unknown_tool_returns_error(config, eventbus, killswitch)
 async def test_run_task_blocked_tool_counts_as_failure(config, eventbus, killswitch):
     llm = FakeLLM(
         [
-            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"x": 10, "y": 10})]),
+            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})]),
             _message("Tool was blocked."),
             _message("NO"),
         ],
@@ -368,12 +368,12 @@ async def test_same_ui_loop_detection(config, eventbus, killswitch):
     llm = FakeLLM(
         [
             # loop 1
-            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"x": 10, "y": 10})]),
+            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})]),
             _message("Clicked."),
             _message("NO"),
             _message("reflect 1"),
             # loop 2
-            _message("Clicking again.", tool_calls=[_tool_call("windows__Click", {"x": 10, "y": 10})]),
+            _message("Clicking again.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})]),
             _message("Clicked again."),
             _message("NO"),
             _message("reflect 2"),
@@ -398,7 +398,7 @@ async def test_same_ui_loop_detection(config, eventbus, killswitch):
 async def test_state_based_verifier_rejects_unchanged_ui_after_mutating_action(config, eventbus, killswitch):
     llm = FakeLLM(
         [
-            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"x": 10, "y": 10})]),
+            _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})]),
             _message("Clicked."),
             _message("YES"),
             _message("Retrying."),
@@ -921,7 +921,7 @@ async def test_windows_tool_sets_used_ui_flag(config, eventbus, killswitch):
 
     ui_agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
     ui_agent.set_human_confirmation_callback(lambda summary, action: True)
-    await ui_agent._execute_tool_calls([_tool_call("windows__Click", {"x": 1, "y": 1})])
+    await ui_agent._execute_tool_calls([_tool_call("windows__Click", {"loc": [1, 1]})])
     assert ui_agent._used_ui_tool is True
 
     fs_agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
@@ -1062,3 +1062,76 @@ async def test_eager_mode_runs_vision_each_loop(
     assert agent.state.current_state == "COMPLETED"
     # Top-of-loop + post-action perceptions in a single one-round task.
     assert spy.calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# Desktop Type/Click (Snapshot->label) + verify failure-gate tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_windows_type_without_label_returns_actionable_error(
+    config, eventbus, killswitch
+):
+    mcp = FakeMCP([{"server": "windows", "name": "Type", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Type", ToolResult(success=True, content="typed"))
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent.set_human_confirmation_callback(lambda summary, action: True)
+
+    # Missing loc/label -> client-side actionable error, never reaches the server.
+    results = await agent._execute_tool_calls(
+        [_tool_call("windows__Type", {"text": "hi"})]
+    )
+    assert len(results) == 1
+    assert results[0]["content"].startswith("[error]")
+    assert "Snapshot" in results[0]["content"]
+    assert mcp.calls == []
+    assert agent.consecutive_action_failures == 1
+    assert agent._round_tool_failed is True
+
+    # With a label, the call is forwarded to the server normally.
+    await agent._execute_tool_calls(
+        [_tool_call("windows__Type", {"text": "hi", "label": 5})]
+    )
+    assert any(c[0] == "windows" and c[1] == "Type" for c in mcp.calls)
+
+
+@pytest.mark.asyncio
+async def test_verify_returns_false_when_round_had_tool_failure(
+    config, eventbus, killswitch
+):
+    # Failure gate fires before the LLM is even asked.
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._used_ui_tool = True
+    agent._round_tool_failed = True
+    prev = _same_hash_perception("before")
+    curr = _same_hash_perception("after")  # different hash => has_changed True
+    assert await agent._verify(prev, curr) is False
+
+    # Same inputs but no failure this round -> gate is the only variable.
+    agent2 = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("YES")]), FakeMCP(), killswitch
+    )
+    agent2._used_ui_tool = True
+    agent2._round_tool_failed = False
+    assert await agent2._verify(prev, curr) is True
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_guides_snapshot_before_type(
+    config, eventbus, killswitch
+):
+    llm = FakeLLM([
+        _message("done."),
+        _message("YES"),
+        _message("finished."),
+    ])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.run_task("do nothing")
+
+    system_content = agent.history[0]["content"]
+    assert "windows__Snapshot" in system_content
+    assert "label=<id>" in system_content
