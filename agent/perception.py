@@ -88,22 +88,19 @@ class PerceptionModule:
 
         annotated_screenshot_path: Path | None = None
         if som_annotations and self.ui_detector is not None:
-            from ui_detector.visualizer import visualize_som
-
             annotated_image = await loop.run_in_executor(
                 self._io_executor, self._generate_annotated,
-                screenshot_path, som_annotations, cache_dir, timestamp,
+                screenshot_path, som_annotations,
             )
-            if annotated_image is not None:
-                annotated_screenshot_path = (
-                    cache_dir / f"screenshot_{timestamp}_annotated.jpg"
-                )
-                await loop.run_in_executor(
-                    self._io_executor,
-                    annotated_image.save,
-                    annotated_screenshot_path,
-                    "JPEG",
-                )
+            annotated_screenshot_path = (
+                cache_dir / f"screenshot_{timestamp}_annotated.jpg"
+            )
+            await loop.run_in_executor(
+                self._io_executor,
+                annotated_image.save,
+                annotated_screenshot_path,
+                "JPEG",
+            )
 
         return Perception(
             screenshot_path=screenshot_path,
@@ -121,9 +118,7 @@ class PerceptionModule:
     def _generate_annotated(
         screenshot_path: Path,
         som_annotations: list[dict[str, Any]],
-        cache_dir: Path,
-        timestamp: int,
-    ) -> Image.Image | None:
+    ) -> Image.Image:
         """Generate a SoM-annotated image from the compressed screenshot."""
         from ui_detector.visualizer import visualize_som
 
