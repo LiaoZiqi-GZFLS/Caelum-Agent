@@ -140,7 +140,7 @@ def _cfg(tmp_path) -> SimpleNamespace:
 def _wire(monkeypatch, cfg, agent: _ReplAgent) -> None:
     monkeypatch.setattr(main, "load_config", lambda path: cfg)
     monkeypatch.setattr(main, "setup_logging", lambda **kw: logging.getLogger("test.repl"))
-    monkeypatch.setattr(main, "EventBus", lambda: SimpleNamespace(subscribe=lambda *a: None))
+    monkeypatch.setattr(main, "EventBus", lambda: SimpleNamespace(subscribe=lambda *a: None, unsubscribe=lambda *a: None))
     monkeypatch.setattr(main, "LLMClient", lambda llm: SimpleNamespace())
     monkeypatch.setattr(main, "MCPMultiplexer", lambda c: agent.mcp)
     monkeypatch.setattr(main, "KillSwitch", lambda eb: SimpleNamespace())
@@ -199,3 +199,34 @@ async def test_repl_eof_breaks_loop(monkeypatch, tmp_path):
     rc = await main.main([])
     assert rc == 0
     assert agent.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_repl_prints_banner(monkeypatch, tmp_path, capsys):
+    agent = _ReplAgent()
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+    _feed(monkeypatch, ["/quit"])
+
+    await main.main([])
+
+    out = capsys.readouterr().out
+    assert "Caelum-Agent" in out  # banner
+
+
+@pytest.mark.asyncio
+async def test_presenter_active_suppresses_console_log_handler(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+
+    def spy_setup_logging(**kw):
+        captured.update(kw)
+        return logging.getLogger("test.repl")
+
+    agent = _ReplAgent()
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+    # Re-apply our spy after _wire (which also sets setup_logging).
+    monkeypatch.setattr(main, "setup_logging", spy_setup_logging)
+    _feed(monkeypatch, ["/quit"])
+
+    await main.main([])
+
+    assert captured.get("console") is False

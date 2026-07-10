@@ -23,9 +23,13 @@ from agent.kill_switch import KillSwitch
 from agent.llm_client import LLMClient
 from agent.logging_config import setup_logging
 from agent.orchestrator import AgentOrchestrator
+from agent.cli_presenter import CLIPresenter
 from eventbus import EventBus
 from eventbus.events import AgentStateChanged, KillSwitchTriggered
 from mcp_client import MCPMultiplexer
+
+
+_presenter: CLIPresenter | None = None
 
 
 def _log_state(event: Any, logger: Any) -> None:
@@ -90,10 +94,12 @@ def _build_argparser() -> argparse.ArgumentParser:
 def confirm_interactive(summary: str, action: dict[str, Any]) -> bool:
     """Default human-confirmation callback for risky and destructive actions.
 
-    In a real TTY this prompts the user for a y/n answer. When stdin is not a
-    TTY (scripts, CI, or exhausted piped input) it prints a warning and denies
-    the action instead of blocking on input() or raising EOFError.
+    Delegates to the rich presenter when one is installed (REPL / one-shot);
+    otherwise falls back to a plain input() prompt. In a non-TTY it prints a
+    warning and denies the action instead of blocking.
     """
+    if _presenter is not None:
+        return _presenter.confirm(summary, action)
     print(f"\n[confirm] {summary}")
     if not sys.stdin.isatty():
         print(
@@ -118,7 +124,10 @@ def confirm_interactive(summary: str, action: dict[str, Any]) -> bool:
 async def _run_one_shot(agent: AgentOrchestrator, task: str, logger: Any) -> int:
     try:
         result = await agent.run_task(task)
-        print(result)
+        if _presenter is not None:
+            _presenter.print_answer(result)
+        else:
+            print(result)
     except Exception as exc:
         logger.exception("Task failed: %s", exc)
         return 1
@@ -127,13 +136,18 @@ async def _run_one_shot(agent: AgentOrchestrator, task: str, logger: Any) -> int
 
 async def _run_repl(agent: AgentOrchestrator, logger: Any) -> int:
     await agent.initialize()
+    if _presenter is not None:
+        _presenter.banner()
     logger.info("Caelum-Agent ready. Type a command or /quit.")
 
     loop = asyncio.get_running_loop()
     try:
         while True:
             try:
-                user_input = await loop.run_in_executor(None, input, "> ")
+                if _presenter is not None:
+                    user_input = await loop.run_in_executor(None, _presenter.input)
+                else:
+                    user_input = await loop.run_in_executor(None, input, "> ")
             except EOFError:
                 break
             user_input = user_input.strip()
@@ -156,7 +170,10 @@ async def _run_repl(agent: AgentOrchestrator, logger: Any) -> int:
                 continue
             try:
                 result = await agent.run_task(user_input)
-                print(result)
+                if _presenter is not None:
+                    _presenter.print_answer(result)
+                else:
+                    print(result)
             except Exception as exc:
                 logger.exception("Task failed: %s", exc)
     finally:
@@ -183,16 +200,21 @@ async def main(argv: list[str] | None = None) -> int:
     logger = setup_logging(
         level=log_level,
         log_dir=Path(config.logging.data_dir) / "logs",
+        console=False,
     )
 
     eventbus = EventBus()
     eventbus.subscribe("AgentStateChanged", lambda e: _log_state(e, logger))
 
+    global _presenter
+    presenter = CLIPresenter()
+    presenter.attach(eventbus)
+    _presenter = presenter
+
     llm = LLMClient(config.llm)
     mcp = MCPMultiplexer(config.mcp_servers)
     kill_switch = KillSwitch(eventbus)
     agent = AgentOrchestrator(config, eventbus, llm, mcp, kill_switch)
-
     agent.set_human_confirmation_callback(confirm_interactive)
 
     if args.yes_destructive:
@@ -209,14 +231,17 @@ async def main(argv: list[str] | None = None) -> int:
             "destructive actions still require typed input."
         )
 
-    if args.task:
-        await agent.initialize()
-        try:
-            return await _run_one_shot(agent, args.task, logger)
-        finally:
-            await agent.shutdown()
-
-    return await _run_repl(agent, logger)
+    try:
+        if args.task:
+            await agent.initialize()
+            try:
+                return await _run_one_shot(agent, args.task, logger)
+            finally:
+                await agent.shutdown()
+        return await _run_repl(agent, logger)
+    finally:
+        presenter.detach()
+        _presenter = None
 
 
 if __name__ == "__main__":
