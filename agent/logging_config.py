@@ -27,8 +27,9 @@ def setup_logging(
     level: str = "INFO",
     log_dir: Path | str = "./data/logs",
     fmt: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    console: bool = True,
 ) -> logging.Logger:
-    """Configure root logger with console + rotating file handlers."""
+    """Configure root logger with optional console + rotating file handlers."""
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
@@ -38,10 +39,11 @@ def setup_logging(
 
     formatter = _ExtraFormatter(fmt)
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(logging.DEBUG)
-    console.setFormatter(formatter)
-    root.addHandler(console)
+    if console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
 
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)

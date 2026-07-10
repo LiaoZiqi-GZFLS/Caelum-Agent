@@ -110,3 +110,46 @@ def test_extra_formatter_flattens_extras():
 
 def test_get_logger_returns_named_logger():
     assert get_logger("caelum.foo").name == "caelum.foo"
+
+
+def _reset_root() -> None:
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.setLevel(logging.WARNING)
+
+
+def test_console_true_attaches_stream_handler(tmp_path):
+    _reset_root()
+    setup_logging(level="INFO", log_dir=tmp_path, console=True)
+    stream_handlers = [
+        h for h in logging.getLogger().handlers
+        if isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+    ]
+    assert len(stream_handlers) == 1
+    _reset_root()
+
+
+def test_console_false_skips_stream_handler(tmp_path):
+    _reset_root()
+    setup_logging(level="INFO", log_dir=tmp_path, console=False)
+    stream_handlers = [
+        h for h in logging.getLogger().handlers
+        if isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+    ]
+    assert stream_handlers == []
+    # File handler still present.
+    assert any(isinstance(h, logging.FileHandler) for h in logging.getLogger().handlers)
+    _reset_root()
+
+
+def test_default_console_is_true(tmp_path):
+    _reset_root()
+    setup_logging(level="INFO", log_dir=tmp_path)
+    assert any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in logging.getLogger().handlers
+    )
+    _reset_root()
