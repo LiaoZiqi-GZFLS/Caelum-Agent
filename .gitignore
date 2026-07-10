@@ -228,6 +228,9 @@ __marimo__/
 # Agent-generated plans and scratch docs
 /docs/superpowers/
 
+# Claude Code local session state
+/.claude/
+
 # Agent auto-learned skills (generated at runtime)
 /skills/learned/
 
