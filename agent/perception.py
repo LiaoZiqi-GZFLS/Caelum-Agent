@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +26,9 @@ from agent.snapshot_parser import parse_playwright_snapshot, parse_windows_snaps
 if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
     from ui_detector import UIDetector
+
+
+logger = logging.getLogger("caelum.perception")
 
 
 @dataclass
@@ -233,8 +237,8 @@ class PerceptionModule:
             if result.success and result.content:
                 tree = parse_windows_snapshot(result.content)
                 return {"snapshot": summarize_tree(tree)}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to fetch Windows UI tree: %s", exc)
         try:
             result = await self.mcp.call("playwright", "browser_snapshot", {})
             if result.success and result.content:

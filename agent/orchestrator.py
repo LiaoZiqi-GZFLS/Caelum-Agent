@@ -351,6 +351,11 @@ class AgentOrchestrator:
         except Exception as exc:
             # Treat any remaining exception as transient for robustness; the
             # outer loop will record it and decide whether to continue.
+            logger.warning(
+                "Unexpected exception type during LLM call: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             self.consecutive_api_failures += 1
             if self.consecutive_api_failures >= self.config.kill_switch.api_failure_threshold:
                 await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
