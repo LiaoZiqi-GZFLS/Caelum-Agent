@@ -237,7 +237,6 @@ __marimo__/
 /screenshot_*.jpg
 
 # Agent-generated plans and scratch docs
-/docs/superpowers/
 
 # Claude Code local session state
 /.claude/
