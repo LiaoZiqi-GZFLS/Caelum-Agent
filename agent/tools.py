@@ -19,6 +19,30 @@ if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
 
 
+DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "integer",
+            "description": (
+                "The number on the SoM (Set-of-Mark) marker overlay to interact with. "
+                "Look at the screenshot: each red circle has a number. Use that number."
+            ),
+        },
+        "action": {
+            "type": "string",
+            "enum": ["click", "double_click", "right_click", "type", "scroll_down", "scroll_up"],
+            "description": "What action to perform on the element.",
+        },
+        "text": {
+            "type": "string",
+            "description": "Text to type. Required when action is 'type'.",
+        },
+    },
+    "required": ["label", "action"],
+}
+
+
 CODERUNNER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

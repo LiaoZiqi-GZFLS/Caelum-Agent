@@ -22,7 +22,7 @@ from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.skills import SkillLearner
 from agent.state_machine import AgentStateMachine
-from agent.tools import register_all
+from agent.tools import DESKTOP_INTERACT_SCHEMA, register_all
 from eventbus import EventBus
 from eventbus.events import (
     KillSwitchTriggered,
@@ -126,6 +126,7 @@ class AgentOrchestrator:
         await self.llm.initialize()
         await self.mcp.connect_all()
         register_all(self.llm, self.mcp)
+        self._register_desktop_interact()
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
 
@@ -183,6 +184,78 @@ class AgentOrchestrator:
             logger.info("Orchestrator state restored")
         except Exception as exc:
             logger.warning("Failed to restore orchestrator state: %s", exc)
+
+    async def _desktop_interact_impl(
+        self, label: int, action: str, text: str | None = None
+    ) -> str:
+        """Convert a SoM label to screen coordinates and execute the action.
+
+        Looks up the label in the most recent perception's som_annotations,
+        converts normalized coordinates to screen pixels, then calls the
+        appropriate MCP tool (Windows desktop or Playwright browser).
+        """
+        perception = getattr(self, "_last_perception", None)
+        if perception is None:
+            return "[error] No perception data available. Run perception first."
+
+        # Find the annotation with the matching label.
+        match = None
+        for ann in perception.som_annotations:
+            if ann.get("label") == label:
+                match = ann
+                break
+        if match is None:
+            available = [a.get("label") for a in perception.som_annotations]
+            return f"[error] SoM label {label} not found. Available labels: {available}"
+
+        # Convert normalized [0,1] to screen pixel coordinates.
+        sw = perception.screen_width or 1920
+        sh = perception.screen_height or 1080
+        screen_x = int(round(match["center_x"] * sw))
+        screen_y = int(round(match["center_y"] * sh))
+
+        if action in ("click", "double_click", "right_click"):
+            mcp_action = "Click"
+            mcp_args: dict[str, Any] = {"loc": [screen_x, screen_y]}
+            if action == "double_click":
+                mcp_args["times"] = 2
+            elif action == "right_click":
+                mcp_args["button"] = "right"
+        elif action == "type":
+            # Type: click first to focus, then type.
+            focus_result = await self.mcp.call("windows", "Click", {"loc": [screen_x, screen_y]})
+            if not focus_result.success:
+                return f"[error] Failed to focus element at ({screen_x}, {screen_y}): {focus_result.content}"
+            type_result = await self.mcp.call("windows", "Type", {"text": text or ""})
+            return type_result.content if type_result.success else f"[error] {type_result.content}"
+        elif action in ("scroll_down", "scroll_up"):
+            direction = "down" if action == "scroll_down" else "up"
+            scroll_result = await self.mcp.call("windows", "Scroll", {
+                "loc": [screen_x, screen_y],
+                "direction": direction,
+            })
+            return scroll_result.content if scroll_result.success else f"[error] {scroll_result.content}"
+        else:
+            return f"[error] Unknown action: {action}"
+
+        result = await self.mcp.call("windows", mcp_action, mcp_args)
+        if result.success:
+            return f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
+        return f"[error] {result.content}"
+
+    def _register_desktop_interact(self) -> None:
+        """Register the desktop_interact local function tool with the LLM."""
+        self.llm.register_local_function(
+            "desktop_interact",
+            self._desktop_interact_impl,
+            schema=DESKTOP_INTERACT_SCHEMA,
+            description=(
+                "Interact with a UI element identified by a SoM (Set-of-Mark) label number. "
+                "The screenshot shows numbered red circles on detected elements. "
+                "Use the label number to click, double-click, right-click, type text, or scroll. "
+                "For 'type' action, provide the 'text' parameter."
+            ),
+        )
 
     @staticmethod
     def _format_perception(perception: Any) -> list[dict[str, Any]]:

@@ -727,3 +727,85 @@ async def test_orchestrator_skips_kimi_memory_client_when_disabled(config, event
     assert agent._kimi_client is None
     assert agent.memory.kimi is None
     assert agent.reflection.kimi is None
+
+
+# ---------------------------------------------------------------------------
+# desktop_interact tool tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_tool_registered(config, eventbus, killswitch):
+    """desktop_interact is available when tools are registered."""
+    llm = FakeLLM([])
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+
+    from agent.tools import DESKTOP_INTERACT_SCHEMA, register_all
+    register_all(llm, mcp)
+    agent._register_desktop_interact()
+
+    assert "desktop_interact" in llm.tool_names()
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_click_resolves_label_to_coords(config, eventbus, killswitch):
+    """desktop_interact resolves a SoM label to screen coords and calls Click."""
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[
+            {"label": 1, "center_x": 0.5, "center_y": 0.4, "score": 0.95, "normalized": True},
+            {"label": 2, "center_x": 0.25, "center_y": 0.75, "score": 0.87, "normalized": True},
+        ],
+        screen_width=1920,
+        screen_height=1080,
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="click")
+
+    assert "OK" in result
+    assert mcp.calls
+    server, tool, args = mcp.calls[-1]
+    assert server == "windows"
+    assert tool == "Click"
+    assert args["loc"] == [960, 432]  # 0.5*1920, 0.4*1080
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_reports_missing_label(config, eventbus, killswitch):
+    """desktop_interact returns an error when the label is not found."""
+    mcp = FakeMCP()
+    llm = FakeLLM([])
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+    )
+
+    result = await agent._desktop_interact_impl(label=99, action="click")
+
+    assert result.startswith("[error]")
+    assert "99" in result
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_no_perception_error(config, eventbus, killswitch):
+    """desktop_interact errors when there is no perception data."""
+    agent = AgentOrchestrator(config, eventbus, FakeLLM([]), FakeMCP(), killswitch)
+    agent._last_perception = None
+
+    result = await agent._desktop_interact_impl(label=1, action="click")
+
+    assert result.startswith("[error]")
+    assert "No perception data" in result
