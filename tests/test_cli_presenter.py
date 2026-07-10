@@ -139,3 +139,28 @@ def test_detach_stops_rendering():
         bus.emit(ToolCallRequested(server="x", tool_name="y", arguments={}))
     )
     assert buf.getvalue() == ""
+
+
+def test_confirm_approve_returns_true(monkeypatch):
+    presenter, _ = _make_presenter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("agent.cli_presenter.Confirm.ask", lambda *a, **kw: True)
+    assert presenter.confirm("delete file", {"action": "delete"}) is True
+
+
+def test_confirm_deny_returns_false(monkeypatch):
+    presenter, _ = _make_presenter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("agent.cli_presenter.Confirm.ask", lambda *a, **kw: False)
+    assert presenter.confirm("delete file", {"action": "delete"}) is False
+
+
+def test_confirm_non_tty_returns_false_without_prompt(monkeypatch):
+    presenter, _ = _make_presenter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def boom(*a, **kw):
+        raise AssertionError("Confirm.ask must not be called on a non-TTY")
+
+    monkeypatch.setattr("agent.cli_presenter.Confirm.ask", boom)
+    assert presenter.confirm("delete file", {"action": "delete"}) is False
