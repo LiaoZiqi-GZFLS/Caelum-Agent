@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Coverage is on by default so the suite always reports where tests are thin.
+# Opt out any time with `pytest --no-cov`. Markers are registered in tests/conftest.py.
+addopts = "--cov=. --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    ".venv/*",
+    "*/tests/*",
+    "spikes/*",
+    "setup.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
