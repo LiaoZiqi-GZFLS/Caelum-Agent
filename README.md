@@ -1,5 +1,7 @@
 # Caelum-Agent
 
+> 中文文档：见 [README.zh.md](README.zh.md)。
+
 Caelum-Agent is a personal Windows CLI desktop-operation agent. Give it natural-language instructions and it autonomously controls the browser and Windows desktop applications.
 
 - **Platform:** Windows 10/11
