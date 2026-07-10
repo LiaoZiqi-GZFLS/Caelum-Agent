@@ -117,7 +117,7 @@ python setup.py --skip-smoke-tests
 Key sections in `config.yaml`:
 - `llm`: Kimi API key, model (`kimi-k2.6`), optional `reasoning_effort`, and which Formula tools to register.
   - Do **not** set `reasoning_effort="none"` for `kimi-k2.6`; omit it or use `minimal/low/medium/high`.
-  - `moonshot/code_runner:latest` is unavailable (404). Implement code execution as a custom `CodeRunner` function tool exposed through Function Calling and run it in a local sandbox.
+  - `moonshot/code-runner:latest` (hyphen) is the correct URI and is available; the registered tool name is `code_runner` (underscore). The local `RestrictedCodeRunner` remains the default code execution backend; enable the Formula `code-runner` as an alternative if you prefer Kimi-side execution.
 - `mcp_servers`: commands and arguments for Playwright, Windows, and filesystem MCP servers.
 - `ui_detector`: GUI-Actor-3B model path, device, dtype, verifier settings.
 - `screenshot`: resolution, compression, and cropping strategy.
@@ -300,7 +300,7 @@ The user-editable config is `config.yaml` (gitignored). `config.py` validates it
 - Browser automation uses the accessibility tree first (Playwright MCP), not pure vision.
 - Desktop automation uses UIA/A11y first (Windows-MCP), falling back to coordinate/image methods only when needed.
 - Kimi's built-in tools (`web-search`, `memory`, `rethink`, `fetch`, `excel`, `convert`, `date`, `base64`, `quickjs`, `random-choice`, `mew`) replace local implementations for search, memory, reflection, fetch, Excel/CSV analysis, and light code execution.
-- `moonshot/code_runner:latest` is **not available** (404). For code execution, implement a custom `CodeRunner` function tool and expose it via regular OpenAI-style Function Calling. The agent can then run user/model-generated Python/JavaScript inside a local sandbox (e.g., restricted subprocess, QuickJS, or `RestrictedPython`) and return the result as a `role="tool"` message. This is more flexible and safer than relying on a Formula tool.
+- `moonshot/code-runner:latest` (hyphen) is the correct URI and is available; the registered tool name is `code_runner` (underscore). For code execution, the agent uses a custom `RestrictedCodeRunner` function tool exposed via OpenAI-style Function Calling, running user/model-generated Python inside a local sandbox (subprocess + AST validation + import whitelist). The Formula `code-runner` can be enabled as an alternative. This is more flexible and safer than relying solely on a Formula tool.
 - Skills are stored as `SKILL.md` files compatible with the OpenClaw/Claude Code skill format.
 
 ## Where to find context

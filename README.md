@@ -204,7 +204,7 @@ Screenshot
 
 - **Python 3.12 only** for the virtual environment. Do not use 3.13+ for the environment that loads GUI-Actor-3B.
 - **GUI-Actor-3B must run via Transformers native inference.** It cannot be loaded through Ollama, GGUF, vLLM, or llama.cpp.
-- **`moonshot/code_runner:latest` is unavailable.** Code execution uses the local `CodeRunner` sandbox instead.
+- **`moonshot/code-runner:latest` (hyphen) is the correct URI.** Formula URIs use hyphens (e.g. `web-search`, `code-runner`); registered tool names use underscores (`web_search`, `code_runner`). Code execution uses the local `RestrictedCodeRunner` sandbox by default; the Formula `code-runner` can be enabled as an alternative.
 - **Browser automation uses accessibility tree first**, not pure vision.
 - **Desktop automation uses UIA/A11y first**, falling back to coordinate/image methods only when needed.
 
