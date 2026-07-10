@@ -11,6 +11,8 @@ omit = [
     "*/tests/*",
     "spikes/*",
     "setup.py",
+    # Vendored GUI-Actor-3B source (third-party model code, patched copy).
+    "ui_detector/gui_actor/*",
 ]
 
 [tool.coverage.report]
