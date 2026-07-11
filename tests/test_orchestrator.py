@@ -13,6 +13,7 @@ import httpx
 
 from agent.orchestrator import AgentOrchestrator
 from agent.perception import Perception
+from eventbus.events import AgentStateChanged
 from mcp_client import ToolResult
 
 from tests.fakes import (
@@ -230,6 +231,106 @@ async def test_text_answer_mentioning_complete_task_still_verifies(
     assert len(llm.calls) == 3  # answer + verify + final answer
 
 
+# ---------------------------------------------------------------------------
+# RequestHumanHelp (human handoff) tests
+# ---------------------------------------------------------------------------
+
+class _HumanHelpLLM(FakeLLM):
+    """FakeLLM that routes RequestHumanHelp to the agent's real handler."""
+
+    def __init__(self, agent: AgentOrchestrator, chat_responses: list[Any]) -> None:
+        super().__init__(chat_responses)
+        self._agent = agent
+
+    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for c in calls:
+            args = json.loads(c.function.arguments)
+            content = await self._agent._request_human_help_impl(**args)
+            out.append({"role": "tool", "tool_call_id": c.id, "content": content})
+        return out
+
+
+def _wire_human_help(agent: AgentOrchestrator, llm: "_HumanHelpLLM") -> None:
+    agent.llm = llm
+    agent._register_human_help()  # adds "RequestHumanHelp" to llm.tool_names()
+
+
+@pytest.mark.asyncio
+async def test_request_human_help_pauses_and_resumes(config, eventbus, killswitch):
+    scripted = [
+        _message("需要登录", tool_calls=[_tool_call(
+            "RequestHumanHelp",
+            {"question": "是否已经手动完成登录？",
+             "options": ["是，已完成登录", "否，我暂时无法完成登录"]},
+        )]),
+        _message("继续完成任务。"),
+        _message("YES"),
+        _message("热榜前三：……"),
+    ]
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    _wire_human_help(agent, _HumanHelpLLM(agent, scripted))
+    agent.set_human_question_callback(lambda q, o: "是，已完成登录")
+
+    states: list[str] = []
+
+    async def _rec(e: Any) -> None:
+        if isinstance(e, AgentStateChanged):
+            states.append(e.new_state)
+
+    eventbus.subscribe("AgentStateChanged", _rec)
+
+    result = await agent.run_task("总结知乎热榜")
+
+    assert result == "热榜前三：……"
+    tool_msgs = [m for m in agent.history if m.get("role") == "tool"]
+    assert any("Human answered: 是，已完成登录" in m["content"] for m in tool_msgs)
+    assert "WAITING_HUMAN" in states
+    # The handler restores EXECUTING after the human answers.
+    assert "EXECUTING" in states[states.index("WAITING_HUMAN"):]
+
+
+@pytest.mark.asyncio
+async def test_request_human_help_cancel_returns_cancelled(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.set_human_question_callback(lambda q, o: None)
+    await agent.state.transition("PLANNING", task_id="t1")
+    await agent.state.transition("EXECUTING", task_id="t1")
+
+    content = await agent._request_human_help_impl("q", ["a", "b"])
+
+    assert content.startswith("[cancelled]")
+    assert agent.state.current_state == "EXECUTING"  # restored after cancel
+
+
+@pytest.mark.asyncio
+async def test_request_human_help_without_callback_is_unavailable(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    content = await agent._request_human_help_impl("q", ["a", "b"])
+    assert content.startswith("[unavailable]")
+
+
+@pytest.mark.asyncio
+async def test_request_human_help_rejects_bad_options(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.set_human_question_callback(lambda q, o: "x")
+    assert (await agent._request_human_help_impl("q", [])).startswith("[error]")
+    assert (await agent._request_human_help_impl("q", ["a"])).startswith("[error]")
+    assert (await agent._request_human_help_impl("", ["a", "b"])).startswith("[error]")
+
+
 @pytest.mark.asyncio
 async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     # The system prompt must tell the model when to use CompleteTask vs a normal
@@ -254,6 +355,8 @@ async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     # No copy-pasteable call literal: models parrot "CompleteTask(answer=..."
     # as plain text instead of invoking the tool.
     assert "CompleteTask(answer=" not in system_content
+    # The human-handoff tool must be advertised in the system prompt.
+    assert "RequestHumanHelp" in system_content
 
 
 @pytest.mark.asyncio

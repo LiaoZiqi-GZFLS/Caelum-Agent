@@ -23,7 +23,12 @@ from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.skills import SkillLearner
 from agent.state_machine import AgentStateMachine
-from agent.tools import COMPLETE_TASK_SCHEMA, DESKTOP_INTERACT_SCHEMA, register_all
+from agent.tools import (
+    COMPLETE_TASK_SCHEMA,
+    DESKTOP_INTERACT_SCHEMA,
+    REQUEST_HUMAN_HELP_SCHEMA,
+    register_all,
+)
 from eventbus import EventBus
 from eventbus.events import (
     KillSwitchTriggered,
@@ -150,10 +155,14 @@ class AgentOrchestrator:
         # they are not garbage-collected and so shutdown() can drain them.
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._human_confirm_callback: Any | None = None
+        self._human_question_callback: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
     def set_human_confirmation_callback(self, callback: Any) -> None:
         self._human_confirm_callback = callback
+
+    def set_human_question_callback(self, callback: Any) -> None:
+        self._human_question_callback = callback
 
     def _request_human_confirmation(self, summary: str, action: dict[str, Any]) -> bool:
         if self._human_confirm_callback is not None:
@@ -176,6 +185,7 @@ class AgentOrchestrator:
         register_all(self.llm, self.mcp)
         self._register_desktop_interact()
         self._register_complete_task()
+        self._register_human_help()
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
 
@@ -386,6 +396,52 @@ class AgentOrchestrator:
             ),
         )
 
+    async def _request_human_help_impl(self, question: str, options: list) -> str:
+        """Handler for RequestHumanHelp: ask the human and return their answer.
+
+        The call itself is the pause: the ReAct loop blocks here (same thread
+        model as confirm_interactive) with full history intact, the state
+        machine shows WAITING_HUMAN, and the answer goes back to the model as
+        the tool result. None from the callback means the human cancelled
+        (ESC/Ctrl+C) or no human is present (non-TTY).
+        """
+        options = [str(o).strip() for o in (options or []) if str(o).strip()]
+        if not question or not (2 <= len(options) <= 4):
+            return "[error] RequestHumanHelp requires a question and 2-4 options."
+        callback = self._human_question_callback
+        if callback is None:
+            return (
+                "[unavailable] No human is present to answer. End the task and "
+                "explain what the user must do manually."
+            )
+        await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
+        try:
+            answer = callback(question, options)
+        except Exception as exc:
+            logger.warning("human question callback failed: %s", exc)
+            answer = None
+        finally:
+            await self.state.transition("EXECUTING", task_id=self.task_id)
+        if answer is None:
+            return "[cancelled] The human dismissed the question without answering."
+        return f"Human answered: {answer}"
+
+    def _register_human_help(self) -> None:
+        """Register the RequestHumanHelp local function tool with the LLM."""
+        self.llm.register_local_function(
+            "RequestHumanHelp",
+            self._request_human_help_impl,
+            schema=REQUEST_HUMAN_HELP_SCHEMA,
+            description=(
+                "Ask the human to perform a step you cannot do yourself (login, "
+                "scan a QR code, solve a CAPTCHA, enter a 2FA code, OS permission "
+                "dialog). The CLI shows your question with the given options plus "
+                "a free-text option and returns the human's answer. Prefer this "
+                "over retrying an action that keeps failing because it requires "
+                "human involvement."
+            ),
+        )
+
     @staticmethod
     def _format_perception(perception: Any) -> list[dict[str, Any]]:
         """Convert a Perception dataclass into a multimodal message for the LLM."""
@@ -523,6 +579,16 @@ class AgentOrchestrator:
             "- windows__Type(text='...', label=<id>)  — Type with no loc/label fails.\n"
             "Example: Snapshot shows [5] Edit 'Text Editor' -> Type(text='hello', label=5).\n"
             "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead.\n\n"
+            "## Asking the human for help\n"
+            "If a step needs a human — login, scanning a QR code, CAPTCHA, SMS/2FA "
+            "codes, OS permission dialogs — call RequestHumanHelp(question, options) "
+            "instead of retrying the failing action. Make the question specific (name "
+            "the site or app) and give 2-4 options; the CLI always adds a free-text "
+            "'type something' option, so never include one yourself.\n"
+            "Reading the answer: if the human completed the step, look at the screen "
+            "again and continue the original plan. If they could not complete it or "
+            "the answer is unclear, stop and finish with a normal text answer that "
+            "explains where the task is blocked and what the user must do manually.\n\n"
             "## Finishing a turn\n"
             "- If the request is purely conversational (a greeting, thanks, or a "
             "question about your capabilities) and needs no screen or file action, "

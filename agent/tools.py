@@ -64,6 +64,29 @@ COMPLETE_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
+REQUEST_HUMAN_HELP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "question": {
+            "type": "string",
+            "description": (
+                "The question shown to the human, e.g. "
+                "'是否已经手动完成知乎登录？'."
+            ),
+        },
+        "options": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "2-4 mutually exclusive choices for the human. Do NOT include a "
+                "free-text option: the CLI always appends 'type something' itself."
+            ),
+        },
+    },
+    "required": ["question", "options"],
+}
+
+
 CODERUNNER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
