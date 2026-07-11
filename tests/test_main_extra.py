@@ -177,6 +177,8 @@ async def test_repl_quit_immediately(monkeypatch, tmp_path):
     assert agent.initialized is True
     assert agent.shutdown_called is True
     assert agent.ran == []
+    # main() must wire the human-question callback for RequestHumanHelp.
+    assert agent.help_cb is main.ask_human_interactive
 
 
 @pytest.mark.asyncio
