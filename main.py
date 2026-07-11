@@ -88,11 +88,11 @@ def _build_argparser() -> argparse.ArgumentParser:
         help=(
             "Auto-approve write_risky confirmations (Click/Type/App/browser edits). "
             "Destructive actions still require typed confirmation unless "
-            "--yes-destructive is set."
+            "--yes-all is set."
         ),
     )
     parser.add_argument(
-        "--yes-destructive",
+        "--yes-all",
         action="store_true",
         help=(
             "Also auto-approve destructive actions, skipping typed confirmation. "
@@ -116,7 +116,7 @@ def confirm_interactive(summary: str, action: dict[str, Any]) -> bool:
         print(
             "[warning] Non-interactive mode: this action requires approval but stdin "
             "is not a TTY.\n"
-            "          Re-run with --yes (write_risky) or --yes-destructive to "
+            "          Re-run with --yes (write_risky) or --yes-all to "
             "auto-approve.\n"
             "          Denying this action."
         )
@@ -264,11 +264,11 @@ async def main(argv: list[str] | None = None) -> int:
         agent.set_human_confirmation_callback(confirm_interactive)
         agent.set_human_question_callback(ask_human_interactive)
 
-        if args.yes_destructive:
+        if args.yes_all:
             agent.security.auto_approve = True
             agent.security.auto_approve_destructive = True
             logger.warning(
-                "--yes-destructive: ALL confirmations (including destructive) "
+                "--yes-all: ALL confirmations (including destructive) "
                 "will be auto-approved."
             )
         elif args.yes:

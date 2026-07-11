@@ -57,7 +57,7 @@ def test_auto_approve_does_not_cover_destructive():
 
 
 def test_auto_approve_destructive_skips_typed_confirmation(monkeypatch):
-    """--yes-destructive approves destructive actions without invoking input()."""
+    """--yes-all approves destructive actions without invoking input()."""
 
     def _no_input(_prompt: str = "") -> str:
         raise AssertionError("input() must not be called when auto-approving destructive")

@@ -44,7 +44,7 @@ class SecurityGuard:
             if self.auto_approve_destructive:
                 return Approval(
                     allowed=True,
-                    reason="auto-approved (--yes-destructive)",
+                    reason="auto-approved (--yes-all)",
                     level=action_level,
                 )
             return self._request_confirmation(action_level, action)

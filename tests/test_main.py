@@ -96,14 +96,14 @@ def test_argparse_yes_flags():
     parser = main._build_argparser()
     args = parser.parse_args(["--task", "x", "--yes"])
     assert args.yes is True
-    assert args.yes_destructive is False
+    assert args.yes_all is False
 
     args = parser.parse_args(["--task", "x", "-y"])
     assert args.yes is True
 
-    args = parser.parse_args(["--task", "x", "--yes-destructive"])
-    assert args.yes_destructive is True
-    assert args.yes is False  # --yes-destructive does not itself set args.yes
+    args = parser.parse_args(["--task", "x", "--yes-all"])
+    assert args.yes_all is True
+    assert args.yes is False  # --yes-all does not itself set args.yes
 
 
 def test_confirm_interactive_non_tty_denies(monkeypatch):
@@ -153,7 +153,7 @@ async def test_yes_flag_sets_auto_approve(mock_agent, mock_load_config):
 
 
 @pytest.mark.asyncio
-async def test_yes_destructive_implies_yes(mock_agent, mock_load_config):
+async def test_yes_all_implies_yes(mock_agent, mock_load_config):
     security = SimpleNamespace(auto_approve=False, auto_approve_destructive=False)
     mock_agent.security = security
 
@@ -164,7 +164,7 @@ async def test_yes_destructive_implies_yes(mock_agent, mock_load_config):
          patch("main.KillSwitch", MagicMock()), \
          patch("main.AgentOrchestrator", return_value=mock_agent), \
          patch("main.EventBus", MagicMock()):
-        await main.main(["--task", "list files", "--yes-destructive"])
+        await main.main(["--task", "list files", "--yes-all"])
 
     assert security.auto_approve is True
     assert security.auto_approve_destructive is True

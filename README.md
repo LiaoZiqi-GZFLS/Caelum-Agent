@@ -110,11 +110,11 @@ replaced by a warning and the action is denied, so the task never hangs on
 python main.py --task "open notepad" --yes
 
 # Also auto-approve destructive actions, skipping typed confirmation. Use with caution.
-python main.py --task "delete temp files" --yes-destructive
+python main.py --task "delete temp files" --yes-all
 ```
 
 `--yes` does **not** cover destructive actions; they still require retyping the
-action summary unless `--yes-destructive` is also passed.
+action summary unless `--yes-all` is also passed.
 
 ### Disable vision/OCR for faster testing
 

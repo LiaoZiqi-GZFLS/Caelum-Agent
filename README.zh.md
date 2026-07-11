@@ -122,10 +122,10 @@ python main.py --task "list files in E:/code/project"
 python main.py --task "open notepad" --yes
 
 # 同时自动批准 destructive 动作，跳过逐字确认。请谨慎使用。
-python main.py --task "delete temp files" --yes-destructive
+python main.py --task "delete temp files" --yes-all
 ```
 
-`--yes` **不**涵盖破坏性动作；除非同时传入 `--yes-destructive`，否则破坏性动作仍需逐字输入动作摘要来确认。
+`--yes` **不**涵盖破坏性动作；除非同时传入 `--yes-all`，否则破坏性动作仍需逐字输入动作摘要来确认。
 
 ### 关闭视觉/OCR 以加快测试
 

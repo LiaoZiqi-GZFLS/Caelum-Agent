@@ -205,7 +205,7 @@ python main.py --task "open notepad" --yes
 
 In `--task` mode the confirmation callback denies the action (with a warning)
 when stdin is not a TTY instead of blocking on `input()`. Pass `--yes`/`-y` to
-auto-approve `write_risky` actions, or `--yes-destructive` to also auto-approve
+auto-approve `write_risky` actions, or `--yes-all` to also auto-approve
 destructive actions (implies `--yes`; use with caution). `--yes` does not cover
 destructive actions on its own.
 

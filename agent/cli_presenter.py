@@ -141,7 +141,7 @@ class CLIPresenter:
         if not sys.stdin.isatty():
             self.console.print(
                 "[dim]Non-interactive: action requires approval but stdin is not a TTY; "
-                "denying. Re-run with --yes / --yes-destructive.[/]"
+                "denying. Re-run with --yes / --yes-all.[/]"
             )
             return False
         try:
