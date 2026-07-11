@@ -15,6 +15,7 @@ import httpx
 import openai
 
 from agent.config import Config
+from agent.content_writer import register_draft_content
 from agent.file_reader import register_read_document
 from agent.kill_switch import KillSwitch
 from agent.kimi_memory import KimiMemoryClient
@@ -208,6 +209,9 @@ class AgentOrchestrator:
         self._register_human_help()
         register_read_document(
             self.llm, self.config.llm, self.config.cache_dir_absolute()
+        )
+        register_draft_content(
+            self.llm, self.config.cache_dir_absolute() / "drafts"
         )
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
