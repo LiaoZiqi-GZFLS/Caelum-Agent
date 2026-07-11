@@ -263,6 +263,7 @@ async def main(argv: list[str] | None = None) -> int:
         agent = AgentOrchestrator(config, eventbus, llm, mcp, kill_switch)
         agent.set_human_confirmation_callback(confirm_interactive)
         agent.set_human_question_callback(ask_human_interactive)
+        agent.set_interactive(sys.stdin.isatty())
 
         if args.yes_all:
             agent.security.auto_approve = True

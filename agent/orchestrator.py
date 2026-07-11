@@ -157,6 +157,10 @@ class AgentOrchestrator:
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._human_confirm_callback: Any | None = None
         self._human_question_callback: Any | None = None
+        # Whether a human is at the keyboard (TTY). main.py sets this from
+        # sys.stdin.isatty(); piped/one-shot scripted runs get False so the
+        # system prompt can steer the model away from human-in-the-loop tools.
+        self._interactive: bool = True
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
     def set_human_confirmation_callback(self, callback: Any) -> None:
@@ -164,6 +168,9 @@ class AgentOrchestrator:
 
     def set_human_question_callback(self, callback: Any) -> None:
         self._human_question_callback = callback
+
+    def set_interactive(self, interactive: bool) -> None:
+        self._interactive = interactive
 
     def _request_human_confirmation(self, summary: str, action: dict[str, Any]) -> bool:
         if self._human_confirm_callback is not None:
@@ -566,6 +573,23 @@ class AgentOrchestrator:
                 f"- {s['name']}: {s['content'][:500]}" for s in skill_matches
             )
 
+        if self._interactive:
+            exec_context = (
+                "## Execution context\n"
+                "A human is at the keyboard (interactive terminal). Use "
+                "RequestHumanHelp when a step needs human involvement.\n\n"
+            )
+        else:
+            exec_context = (
+                "## Execution context\n"
+                "This run is non-interactive (piped or scripted input): no human "
+                "can answer questions or confirmations. Do NOT call "
+                "RequestHumanHelp — it can only come back cancelled. If a step "
+                "needs a human (login, CAPTCHA, 2FA codes, OS permission "
+                "dialogs), finish with a normal text answer explaining exactly "
+                "what the user must do manually.\n\n"
+            )
+
         system_content = (
             "You are Caelum-Agent, a Windows desktop automation assistant. "
             "Use the provided tools to interact with the browser and desktop. "
@@ -591,6 +615,7 @@ class AgentOrchestrator:
             f"{self.config.cache_dir_absolute()} — never in the project root or "
             "the current working directory. Only write outside that directory "
             "when the user explicitly asks for a file at a specific path.\n\n"
+            + exec_context +
             "## Asking the human for help\n"
             "If a step needs a human — login, scanning a QR code, CAPTCHA, SMS/2FA "
             "codes, OS permission dialogs — call RequestHumanHelp(question, options) "

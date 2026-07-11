@@ -122,6 +122,9 @@ class _ReplAgent:
     def set_human_question_callback(self, cb) -> None:
         self.help_cb = cb
 
+    def set_interactive(self, value: bool) -> None:
+        self.interactive = value
+
     async def initialize(self) -> None:
         self.initialized = True
 
@@ -170,6 +173,7 @@ async def test_repl_quit_immediately(monkeypatch, tmp_path):
     agent = _ReplAgent()
     _wire(monkeypatch, _cfg(tmp_path), agent)
     _feed(monkeypatch, ["/quit"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
     rc = await main.main([])
 
@@ -179,6 +183,8 @@ async def test_repl_quit_immediately(monkeypatch, tmp_path):
     assert agent.ran == []
     # main() must wire the human-question callback for RequestHumanHelp.
     assert agent.help_cb is main.ask_human_interactive
+    # ...and tell the agent whether a human is at the keyboard.
+    assert agent.interactive is False
 
 
 @pytest.mark.asyncio

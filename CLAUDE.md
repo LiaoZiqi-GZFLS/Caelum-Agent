@@ -209,6 +209,12 @@ auto-approve `write_risky` actions, or `--yes-all` to also auto-approve
 destructive actions (implies `--yes`; use with caution). `--yes` does not cover
 destructive actions on its own.
 
+At startup `main()` calls `agent.set_interactive(sys.stdin.isatty())`. The
+system prompt then tells the model either that a human is at the keyboard (so
+`RequestHumanHelp` is worth calling) or that the run is non-interactive (so it
+must not call `RequestHumanHelp` and should finish with manual instructions
+when blocked).
+
 ### GUI-Actor-3B weight download
 
 ```powershell

@@ -380,6 +380,30 @@ async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     assert "RequestHumanHelp" in system_content
     # Scratch files must be steered to the cache directory, not the repo root.
     assert str(config.cache_dir_absolute()) in system_content
+    # Interactive by default: the prompt says a human is available.
+    assert "A human is at the keyboard" in system_content
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_non_interactive_forbids_human_help(config, eventbus, killswitch):
+    # Piped/scripted runs must tell the model up front that no human can
+    # answer, so it skips RequestHumanHelp instead of burning a round-trip.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    llm = _CompletingLLM(
+        agent,
+        [_message("hi", tool_calls=[_tool_call("CompleteTask", {"answer": "hi"})])],
+    )
+    _wire_complete_task(agent, llm)
+    agent.set_interactive(False)
+
+    await agent.run_task("hi")
+
+    system_content = agent.history[0]["content"]
+    assert "non-interactive" in system_content
+    assert "A human is at the keyboard" not in system_content
 
 
 @pytest.mark.asyncio
