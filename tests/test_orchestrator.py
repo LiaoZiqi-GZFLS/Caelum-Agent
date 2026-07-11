@@ -310,6 +310,26 @@ async def test_request_human_help_cancel_returns_cancelled(config, eventbus, kil
 
 
 @pytest.mark.asyncio
+async def test_request_human_help_callback_exception_returns_cancelled(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    def boom(q, o):
+        raise RuntimeError("menu exploded")
+
+    agent.set_human_question_callback(boom)
+    await agent.state.transition("PLANNING", task_id="t1")
+    await agent.state.transition("EXECUTING", task_id="t1")
+
+    content = await agent._request_human_help_impl("q", ["a", "b"])
+
+    assert content.startswith("[cancelled]")
+    assert agent.state.current_state == "EXECUTING"  # restored even on callback failure
+
+
+@pytest.mark.asyncio
 async def test_request_human_help_without_callback_is_unavailable(config, eventbus, killswitch):
     agent = AgentOrchestrator(
         config, eventbus, FakeLLM(), FakeMCP(), killswitch,
@@ -329,6 +349,7 @@ async def test_request_human_help_rejects_bad_options(config, eventbus, killswit
     assert (await agent._request_human_help_impl("q", [])).startswith("[error]")
     assert (await agent._request_human_help_impl("q", ["a"])).startswith("[error]")
     assert (await agent._request_human_help_impl("", ["a", "b"])).startswith("[error]")
+    assert (await agent._request_human_help_impl("q", ["a", "b", "c", "d", "e"])).startswith("[error]")
 
 
 @pytest.mark.asyncio
