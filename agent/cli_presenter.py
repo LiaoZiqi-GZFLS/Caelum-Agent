@@ -58,7 +58,8 @@ _TERMINAL_STATES = {"COMPLETED", "ERROR", "STUCK", "IDLE"}
 
 def _first_line(text: Any, n: int = MAX_RESULT_CHARS) -> str:
     s = "" if text is None else str(text)
-    line = s.splitlines()[0] if s.splitlines() else s
+    lines = s.splitlines()
+    line = lines[0] if lines else s
     return line if len(line) <= n else line[: n - 1] + "…"
 
 
@@ -76,9 +77,8 @@ def _short_args(args: dict[str, Any] | None, n: int = MAX_ARG_CHARS) -> str:
 
 
 class CLIPresenter:
-    def __init__(self, console: Console | None = None, *, enabled: bool = True) -> None:
+    def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
-        self.enabled = enabled
         self._bus: EventBus | None = None
         self._status: Status | None = None
         # Bind each handler exactly once and reuse the SAME objects for subscribe
@@ -152,9 +152,8 @@ class CLIPresenter:
     # -- status helpers -------------------------------------------------------
 
     def _start_status(self, label: str) -> None:
-        if not self.enabled or self._status is not None:
-            if self._status is not None:
-                self._status.update(label)
+        if self._status is not None:
+            self._status.update(label)
             return
         self._status = Status(label, console=self.console, spinner="dots")
         self._status.start()
