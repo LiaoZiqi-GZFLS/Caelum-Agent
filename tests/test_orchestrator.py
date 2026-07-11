@@ -189,6 +189,48 @@ async def test_complete_task_after_action_skips_verify_by_model_choice(
 
 
 @pytest.mark.asyncio
+async def test_text_form_complete_task_is_honored(config, eventbus, killswitch):
+    # The model parrots the call as plain text instead of invoking the tool:
+    # content is exactly CompleteTask(answer='...') with NO tool_calls. Treat it
+    # as a real CompleteTask: return the answer, skip verify + final answer.
+    perception = FakePerception([_blank_perception()])
+    llm = FakeLLM([_message("CompleteTask(answer='你好！很高兴为你服务。')")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch, perception=perception,
+    )
+
+    result = await agent.run_task("你好")
+
+    assert result == "你好！很高兴为你服务。"
+    assert agent.state.current_state == "COMPLETED"
+    assert len(llm.calls) == 1  # no verify / final-answer round-trips
+    assert len(perception.calls) == 1  # no post-action perceive
+    assert agent._pending_completion is None  # consumed
+
+
+@pytest.mark.asyncio
+async def test_text_answer_mentioning_complete_task_still_verifies(
+    config, eventbus, killswitch
+):
+    # Only an ENTIRE-content match counts. A text answer that merely starts
+    # with the call syntax (e.g. explaining it) stays on the normal verify path.
+    llm = FakeLLM([
+        _message("CompleteTask(answer='x') is the fast-finish tool."),
+        _message("YES"),
+        _message("It lets the model finish a conversational turn directly."),
+    ])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    result = await agent.run_task("what does CompleteTask do?")
+
+    assert result == "It lets the model finish a conversational turn directly."
+    assert len(llm.calls) == 3  # answer + verify + final answer
+
+
+@pytest.mark.asyncio
 async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     # The system prompt must tell the model when to use CompleteTask vs a normal
     # final answer, so the skip-verify decision stays the model's.
@@ -209,6 +251,9 @@ async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     assert "verified" in system_content
     # Browser/website tasks must be steered to Playwright, not the desktop icon.
     assert "browser_navigate" in system_content
+    # No copy-pasteable call literal: models parrot "CompleteTask(answer=..."
+    # as plain text instead of invoking the tool.
+    assert "CompleteTask(answer=" not in system_content
 
 
 @pytest.mark.asyncio

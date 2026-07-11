@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from collections import deque
 from typing import Any
 
@@ -49,6 +50,24 @@ class APIBreakerTripped(Exception):
 # Calling them without either raises a server-side ValueError; we short-circuit
 # client-side with an actionable error that points the model at Snapshot first.
 _POSITIONAL_WINDOWS_TOOLS = frozenset({"Click", "Type", "Scroll", "Move"})
+
+# Matches when the ENTIRE assistant text is a parroted tool call, e.g.
+#   CompleteTask(answer='你好！')
+# The model sometimes writes the call as plain text instead of invoking it
+# through function calling. Only a full-content match counts, so an answer
+# that merely mentions the syntax stays on the normal path.
+_TEXT_COMPLETION_RE = re.compile(
+    r"""^\s*CompleteTask\s*\(\s*answer\s*=\s*(['"])(.*?)\1\s*\)\s*$""",
+    re.DOTALL,
+)
+
+
+def _parse_text_completion(content: str) -> str | None:
+    """Extract the answer from a text-form ``CompleteTask(answer=...)``, else None."""
+    if not content:
+        return None
+    m = _TEXT_COMPLETION_RE.match(content)
+    return m.group(2) if m else None
 
 
 class AgentOrchestrator:
@@ -507,8 +526,10 @@ class AgentOrchestrator:
             "## Finishing a turn\n"
             "- If the request is purely conversational (a greeting, thanks, or a "
             "question about your capabilities) and needs no screen or file action, "
-            "your ENTIRE response must be a single CompleteTask(answer='...') call: "
-            "no other tools, no plain-text answer.\n"
+            "finish by INVOKING the CompleteTask tool with your reply in its `answer` "
+            "argument — a real function call through the tool-calling interface. Do "
+            "not write the tool call out as plain text, do not call any other tool, "
+            "and do not add a separate text answer.\n"
             "- If the task changes the screen or files, finish with a normal text "
             "answer (no CompleteTask) so the result is verified.\n"
             "- Browser/website tasks (open a site, read a page, fill a web form) must "
@@ -705,6 +726,15 @@ class AgentOrchestrator:
 
             if not tool_calls:
                 self.history.append({"role": "assistant", "content": content})
+                text_answer = _parse_text_completion(content)
+                if text_answer is not None:
+                    # The model wrote CompleteTask(...) as plain text instead of
+                    # invoking the tool. Honor it as a real call: stash the answer
+                    # so run_task takes the fast path (no verify / final answer).
+                    logger.info(
+                        "Model emitted CompleteTask as text; treating as a tool call."
+                    )
+                    self._pending_completion = text_answer
                 return content
 
             self.history.append({
