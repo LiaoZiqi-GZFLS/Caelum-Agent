@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
@@ -91,6 +92,67 @@ def test_load_cuda_falls_back_when_unavailable(monkeypatch):
             d.load()
         assert calls[0]["device_map"] == "cpu"
         assert calls[0]["torch_dtype"] is torch.float32  # forced on CPU fallback
+    finally:
+        d.shutdown()
+
+
+def _stub_model_and_tokenizer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        detmod,
+        "Qwen2_5_VLForConditionalGenerationWithPointer",
+        type("M", (), {"from_pretrained": classmethod(lambda c, *a, **k: "MODEL")}),
+    )
+    monkeypatch.setattr(
+        detmod,
+        "AutoTokenizer",
+        type("T", (), {"from_pretrained": classmethod(lambda c, *a, **k: "TOK")}),
+    )
+
+
+def test_load_requests_fast_image_processor(monkeypatch):
+    proc_calls: list[dict[str, Any]] = []
+
+    class FakeProc:
+        @classmethod
+        def from_pretrained(cls, *a, **kw):
+            proc_calls.append(kw)
+            return "PROC"
+
+    _stub_model_and_tokenizer(monkeypatch)
+    monkeypatch.setattr(detmod, "AutoProcessor", FakeProc)
+
+    d = UIDetector(_cfg())
+    try:
+        d.load()
+        assert d.processor == "PROC"
+        assert proc_calls[0].get("use_fast") is True
+    finally:
+        d.shutdown()
+
+
+def test_load_falls_back_to_slow_processor_when_fast_fails(monkeypatch, caplog):
+    proc_calls: list[dict[str, Any]] = []
+
+    class FakeProc:
+        @classmethod
+        def from_pretrained(cls, *a, **kw):
+            proc_calls.append(kw)
+            if kw.get("use_fast"):
+                raise RuntimeError("fast image processor exploded")
+            return "PROC"
+
+    _stub_model_and_tokenizer(monkeypatch)
+    monkeypatch.setattr(detmod, "AutoProcessor", FakeProc)
+
+    d = UIDetector(_cfg())
+    try:
+        with caplog.at_level(logging.WARNING, logger="caelum.ui_detector"):
+            d.load()
+        assert d.processor == "PROC"
+        assert len(proc_calls) == 2
+        assert proc_calls[0].get("use_fast") is True
+        assert "use_fast" not in proc_calls[1]
+        assert "slow" in caplog.text.lower()
     finally:
         d.shutdown()
 

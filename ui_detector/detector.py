@@ -70,9 +70,24 @@ class UIDetector:
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True
         )
-        self.processor = AutoProcessor.from_pretrained(
-            model_path, trust_remote_code=True
-        )
+        # Prefer the fast (torchvision-based) image processor — transformers
+        # warns when `use_fast` is unset and it becomes the default in v4.52.
+        # If the fast path fails to build (e.g. a broken torchvision/CUDA
+        # install), fall back to the slow PIL-based processor instead of
+        # aborting the whole model load.
+        try:
+            self.processor = AutoProcessor.from_pretrained(
+                model_path, trust_remote_code=True, use_fast=True
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fast image processor failed to load (%s); "
+                "falling back to the slow processor.",
+                exc,
+            )
+            self.processor = AutoProcessor.from_pretrained(
+                model_path, trust_remote_code=True
+            )
         self.verifier.detector = self
         logger.info("Loaded GUI-Actor-3B from %s", model_path)
 
