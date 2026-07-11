@@ -505,11 +505,18 @@ class AgentOrchestrator:
             "Example: Snapshot shows [5] Edit 'Text Editor' -> Type(text='hello', label=5).\n"
             "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead.\n\n"
             "## Finishing a turn\n"
-            "When the request is purely conversational (a greeting, thanks, or a "
+            "- If the request is purely conversational (a greeting, thanks, or a "
             "question about your capabilities) and needs no screen or file action, "
-            "call CompleteTask(answer='...') to reply immediately. For tasks that "
-            "change the screen or files, finish with a normal text answer so the "
-            "result is verified."
+            "your ENTIRE response must be a single CompleteTask(answer='...') call: "
+            "no other tools, no plain-text answer.\n"
+            "- If the task changes the screen or files, finish with a normal text "
+            "answer (no CompleteTask) so the result is verified.\n"
+            "- Browser/website tasks (open a site, read a page, fill a web form) must "
+            "use the Playwright tools: playwright__browser_navigate to open the URL, "
+            "playwright__browser_snapshot to read the page, playwright__browser_click / "
+            "playwright__browser_type to interact. Do NOT click the desktop/taskbar "
+            "browser icon for these tasks; only use desktop-level control when the "
+            "user explicitly asks for it (e.g. 'open the browser app')."
         )
         if reflection_context:
             system_content += "\n\n" + reflection_context

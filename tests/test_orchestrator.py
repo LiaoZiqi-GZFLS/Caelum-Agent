@@ -207,6 +207,8 @@ async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     system_content = agent.history[0]["content"]
     assert "CompleteTask" in system_content
     assert "verified" in system_content
+    # Browser/website tasks must be steered to Playwright, not the desktop icon.
+    assert "browser_navigate" in system_content
 
 
 @pytest.mark.asyncio
