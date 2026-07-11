@@ -179,3 +179,23 @@ async def test_stop_clears_running_status():
 
     assert presenter._status is None
     presenter.detach()
+
+
+def test_confirm_stops_spinner_while_asking(monkeypatch):
+    presenter, _ = _make_presenter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    seen = {}
+
+    def fake_ask(*a, **kw):
+        seen["status_during_ask"] = presenter._status
+        return True
+
+    monkeypatch.setattr("agent.cli_presenter.Confirm.ask", fake_ask)
+    presenter._start_status("Thinking…")
+    assert presenter._status is not None
+
+    assert presenter.confirm("click OK", {"action": "click"}) is True
+
+    assert seen["status_during_ask"] is None  # spinner suspended while asking
+    assert presenter._status is not None  # restored after the answer
+    presenter._stop_status()

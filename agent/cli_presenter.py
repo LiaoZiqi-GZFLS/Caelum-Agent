@@ -144,7 +144,17 @@ class CLIPresenter:
             )
             return False
         try:
-            return bool(Confirm.ask("[yellow]Approve?[/]", console=self.console, default=False))
+            # Suspend the live spinner while waiting for the answer: Status (a
+            # Live) and Console.input both write to the terminal, and rich does
+            # not suspend a running Live around input() — the two fight over the
+            # same line and the prompt appears to hang.
+            was_running = self._status is not None
+            self._stop_status()
+            try:
+                return bool(Confirm.ask("[yellow]Approve?[/]", console=self.console, default=False))
+            finally:
+                if was_running:
+                    self._start_status("Thinking…")
         except EOFError:
             self.console.print("[dim]EOF on stdin; denying.[/]")
             return False
