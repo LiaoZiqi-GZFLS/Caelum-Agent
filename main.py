@@ -211,31 +211,32 @@ async def main(argv: list[str] | None = None) -> int:
     eventbus.subscribe("AgentStateChanged", lambda e: _log_state(e, logger))
 
     global _presenter
-    presenter = CLIPresenter()
-    presenter.attach(eventbus)
-    _presenter = presenter
-
-    llm = LLMClient(config.llm)
-    mcp = MCPMultiplexer(config.mcp_servers)
-    kill_switch = KillSwitch(eventbus)
-    agent = AgentOrchestrator(config, eventbus, llm, mcp, kill_switch)
-    agent.set_human_confirmation_callback(confirm_interactive)
-
-    if args.yes_destructive:
-        agent.security.auto_approve = True
-        agent.security.auto_approve_destructive = True
-        logger.warning(
-            "--yes-destructive: ALL confirmations (including destructive) "
-            "will be auto-approved."
-        )
-    elif args.yes:
-        agent.security.auto_approve = True
-        logger.info(
-            "--yes: write_risky confirmations will be auto-approved; "
-            "destructive actions still require typed input."
-        )
-
+    presenter: CLIPresenter | None = None
     try:
+        presenter = CLIPresenter()
+        presenter.attach(eventbus)
+        _presenter = presenter
+
+        llm = LLMClient(config.llm)
+        mcp = MCPMultiplexer(config.mcp_servers)
+        kill_switch = KillSwitch(eventbus)
+        agent = AgentOrchestrator(config, eventbus, llm, mcp, kill_switch)
+        agent.set_human_confirmation_callback(confirm_interactive)
+
+        if args.yes_destructive:
+            agent.security.auto_approve = True
+            agent.security.auto_approve_destructive = True
+            logger.warning(
+                "--yes-destructive: ALL confirmations (including destructive) "
+                "will be auto-approved."
+            )
+        elif args.yes:
+            agent.security.auto_approve = True
+            logger.info(
+                "--yes: write_risky confirmations will be auto-approved; "
+                "destructive actions still require typed input."
+            )
+
         if args.task:
             await agent.initialize()
             try:
@@ -244,7 +245,8 @@ async def main(argv: list[str] | None = None) -> int:
                 await agent.shutdown()
         return await _run_repl(agent, logger)
     finally:
-        presenter.detach()
+        if presenter is not None:
+            presenter.detach()
         _presenter = None
 
 

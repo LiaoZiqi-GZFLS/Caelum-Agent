@@ -309,3 +309,19 @@ async def test_one_shot_stops_spinner_when_task_raises(monkeypatch, tmp_path):
 
     assert rc == 1
     assert holder["spy"].stop_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_presenter_cleared_when_agent_construction_fails(monkeypatch, tmp_path):
+    agent = _ReplAgent()
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+
+    def boom(llm):
+        raise RuntimeError("llm construct failed")
+
+    monkeypatch.setattr(main, "LLMClient", boom)
+
+    with pytest.raises(RuntimeError):
+        await main.main([])
+
+    assert main._presenter is None
