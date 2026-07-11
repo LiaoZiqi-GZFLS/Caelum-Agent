@@ -89,8 +89,8 @@ screenshot:
   # Capture backend: mss (recommended) or PIL
   backend: mss
   # Default resize/compression strategy to keep image tokens low.
-  max_width: 800
-  max_height: 600
+  max_width: 1280
+  max_height: 720
   quality: 60
   format: JPEG
   # Whether to crop around the active window by default.

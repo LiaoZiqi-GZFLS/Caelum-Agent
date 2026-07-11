@@ -236,7 +236,8 @@ async def test_perceive_without_vision_skips_detector(
 async def test_perceive_runs_ocr_on_full_resolution_image(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OCR must see the original screenshot, not the 800x600 compressed copy.
+    """OCR must see the pre-compression screenshot, not the 1280x720 copy
+    destined for the LLM.
 
     Downscaling erases small text; OCR is local CPU work and costs no tokens,
     so it must run before _compress() thumbnails the image in place.
@@ -253,6 +254,41 @@ async def test_perceive_runs_ocr_on_full_resolution_image(
     await module.perceive(instruction="x", with_vision=False)
 
     assert seen_sizes == [(1920, 1080)]
+
+
+def _record_ocr_input_size(module: PerceptionModule) -> list[tuple[int, int]]:
+    """Install a fake OCR engine that records the temp image's dimensions."""
+    seen: list[tuple[int, int]] = []
+
+    def fake_ocr(path: str) -> list:
+        with Image.open(path) as img:
+            seen.append(img.size)
+        return []
+
+    module._ocr = fake_ocr
+    return seen
+
+
+def test_run_ocr_downscales_beyond_1080p(config: Config) -> None:
+    """Screens larger than 1080p are capped at 1080p for OCR: text gets no
+    sharper beyond that, while inference time grows with pixel count."""
+    module = PerceptionModule(config)
+    seen = _record_ocr_input_size(module)
+
+    module._run_ocr(Image.new("RGB", (2560, 1440)))
+
+    assert seen == [(1920, 1080)]
+
+
+def test_run_ocr_keeps_native_resolution_within_1080p(config: Config) -> None:
+    """Screens at or below 1080p pass through at native resolution."""
+    module = PerceptionModule(config)
+    seen = _record_ocr_input_size(module)
+
+    module._run_ocr(Image.new("RGB", (1920, 1080)))
+    module._run_ocr(Image.new("RGB", (1366, 768)))
+
+    assert seen == [(1920, 1080), (1366, 768)]
 
 
 @pytest.mark.asyncio

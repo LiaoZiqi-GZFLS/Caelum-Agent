@@ -64,8 +64,8 @@ class UIDetectorConfig(BaseModel):
 
 class ScreenshotConfig(BaseModel):
     backend: Literal["mss", "PIL"] = "mss"
-    max_width: int = 800
-    max_height: int = 600
+    max_width: int = 1280
+    max_height: int = 720
     quality: int = 60
     format: Literal["JPEG", "PNG"] = "JPEG"
     crop_to_active_window: bool = False

@@ -35,6 +35,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("caelum.perception")
 
+# OCR input is capped at 1080p: beyond that, on-screen text gets no sharper
+# while RapidOCR inference time and the temp PNG grow with pixel count.
+# thumbnail() never upscales, so smaller screens pass through untouched.
+_OCR_MAX_SIZE = (1920, 1080)
+
 
 @dataclass
 class Perception:
@@ -80,9 +85,10 @@ class PerceptionModule:
         image = await loop.run_in_executor(self._io_executor, self._capture_screenshot)
         orig_w, orig_h = image.size
 
-        # OCR reads the full-resolution screenshot: downscaling to 800x600
-        # erases small text, and OCR is local CPU work that costs no tokens.
-        # This must run before _compress(), which thumbnails the image in place.
+        # OCR reads the screenshot before the LLM-bound compression (capped at
+        # 1080p inside _run_ocr): the 1280x720 copy would erase small text,
+        # and OCR is local CPU work that costs no tokens. This must run before
+        # _compress(), which thumbnails the image in place.
         ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
 
         image_bytes = await loop.run_in_executor(
@@ -253,10 +259,13 @@ class PerceptionModule:
             from rapidocr_onnxruntime import RapidOCR
 
             self._ocr = RapidOCR()
-        # Lossless PNG: OCR receives the full-resolution screenshot (it runs
-        # before compression); keep it free of extra JPEG artifacts.
+        # Lossless PNG: OCR receives the screenshot before the LLM-bound
+        # compression; keep it free of extra JPEG artifacts. Cap at 1080p —
+        # larger screens gain no text sharpness but cost inference time.
+        ocr_image = image.copy()
+        ocr_image.thumbnail(_OCR_MAX_SIZE)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            image.save(tmp.name, format="PNG")
+            ocr_image.save(tmp.name, format="PNG")
             tmp_path = tmp.name
         try:
             result = self._ocr(tmp_path)
