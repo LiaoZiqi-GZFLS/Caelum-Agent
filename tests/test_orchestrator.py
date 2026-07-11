@@ -2006,3 +2006,54 @@ async def test_run_task_starts_with_cleared_task_list(config, eventbus, killswit
     assert all(
         "stale" not in str(m.get("content", "")) for m in agent.history
     )
+
+
+@pytest.mark.asyncio
+async def test_run_task_nudges_task_list_at_loop_5(config, eventbus, killswitch):
+    # Five rounds of grinding with no task list created; the loop-5 perception
+    # must carry a one-time nudge to use UpdateTaskList.
+    grind = _message("Working.")
+    llm = FakeLLM([grind] * 20, default_chat=grind)
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 12),
+    )
+
+    await agent.run_task("long grind")
+
+    nudges = [
+        m for m in agent.history
+        if m.get("role") == "user"
+        and "UpdateTaskList" in str(m.get("content", ""))
+        and "consider" in str(m.get("content", "")).lower()
+    ]
+    assert len(nudges) == 1  # exactly once, at loop 5
+
+
+@pytest.mark.asyncio
+async def test_run_task_no_nudge_when_task_list_exists(config, eventbus, killswitch):
+    # The model creates a task list in round 1 (via the real registered
+    # handler), so the loop-5 nudge must NOT fire.
+    from agent.task_list import register_task_list
+
+    llm = _TaskListLLM([
+        _message("planning", tool_calls=[_tool_call("UpdateTaskList", {"tasks": [
+            {"content": "only step", "status": "in_progress"},
+        ]})]),
+    ] + [_message("Working.")] * 20)
+    llm._default_chat = _message("Working.")
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 12),
+    )
+    register_task_list(llm, agent.task_list)
+
+    await agent.run_task("planned grind")
+
+    nudges = [
+        m for m in agent.history
+        if m.get("role") == "user"
+        and "consider" in str(m.get("content", "")).lower()
+        and "UpdateTaskList" in str(m.get("content", ""))
+    ]
+    assert nudges == []

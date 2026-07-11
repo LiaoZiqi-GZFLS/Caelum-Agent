@@ -68,6 +68,11 @@ _INITIAL_LOOP_LIMIT = 10
 _LOOP_LIMIT_INCREMENT = 10
 _MAX_LOOP_LIMIT = 50
 
+# If the model still hasn't created a task list by this loop, inject a one-time
+# reminder. By loop 5 a task has clearly become multi-step, and a salient plan
+# matters more as the context grows.
+_TASK_LIST_NUDGE_LOOP = 5
+
 # Matches when the ENTIRE assistant text is a parroted tool call, e.g.
 #   CompleteTask(answer='你好！')
 # The model sometimes writes the call as plain text instead of invoking it
@@ -137,6 +142,8 @@ class AgentOrchestrator:
         # history every loop so long-task plans stay salient. Cleared at the
         # start of each run_task and self-clears when all items complete.
         self.task_list = TaskList()
+        # Whether the one-time "consider a task list" nudge has fired this run.
+        self._task_list_nudged = False
         self.task_id: str | None = None
         self.current_instruction: str = ""
         self.last_action_summary: str = ""
@@ -746,6 +753,7 @@ class AgentOrchestrator:
         self._last_perception: Any | None = None
         self._pending_som_followup = None
         self.task_list.clear()
+        self._task_list_nudged = False
         self.action_traces = []
         # Tracks whether this task has invoked any tool that touches the screen
         # (windows/playwright MCP, or the desktop_interact local tool). Pure
@@ -811,6 +819,21 @@ class AgentOrchestrator:
                 self.history.append({
                     "role": "user",
                     "content": self.task_list.render(),
+                })
+            elif (
+                loop >= _TASK_LIST_NUDGE_LOOP
+                and not self._task_list_nudged
+            ):
+                # One-time nudge: the task has clearly become multi-step but
+                # the model never planned. Fires once per run_task.
+                self._task_list_nudged = True
+                self.history.append({
+                    "role": "user",
+                    "content": (
+                        "You are several loops into this task without a plan. "
+                        "Consider calling UpdateTaskList to break the remaining "
+                        "work into concrete steps and track their status."
+                    ),
                 })
 
             # Check for total rejection by verifier (all candidates blocked).
