@@ -59,6 +59,14 @@ class APIBreakerTripped(Exception):
 # client-side with an actionable error that points the model at Snapshot first.
 _POSITIONAL_WINDOWS_TOOLS = frozenset({"Click", "Type", "Scroll", "Move"})
 
+# Loop budget: a task starts with 10 perception-action loops. Each time the
+# budget is exhausted without completing, a reflection checkpoint asks the
+# model whether its approach is fundamentally sound; a YES extends the budget
+# by 10, up to a hard cap of 50 loops.
+_INITIAL_LOOP_LIMIT = 10
+_LOOP_LIMIT_INCREMENT = 10
+_MAX_LOOP_LIMIT = 50
+
 # Matches when the ENTIRE assistant text is a parroted tool call, e.g.
 #   CompleteTask(answer='你好！')
 # The model sometimes writes the call as plain text instead of invoking it
@@ -738,8 +746,31 @@ class AgentOrchestrator:
         # and the UI-change verification do not apply to them.
         self._used_ui_tool = False
 
-        max_loops = 10
-        for loop in range(max_loops):
+        loop = 0
+        loop_limit = _INITIAL_LOOP_LIMIT
+        while True:
+            if loop >= loop_limit:
+                # Budget exhausted: a reflection checkpoint decides whether the
+                # approach is sound enough to earn more loops (up to the cap),
+                # otherwise the task stops here as stuck.
+                if self.state.current_state in {"COMPLETED", "ERROR"}:
+                    break
+                try:
+                    new_limit = await self._maybe_extend_loop_limit(loop_limit)
+                except APIBreakerTripped as exc:
+                    await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
+                    return str(exc)
+                if new_limit > loop_limit:
+                    loop_limit = new_limit
+                    continue
+                await self.state.transition("STUCK", task_id=self.task_id)
+                await self.reflection.record(
+                    task_summary=user_input,
+                    failure_reason="Exceeded maximum loop count",
+                    fix_action="Break task into smaller steps.",
+                )
+                return "Agent reached the loop limit without completing the task."
+            loop += 1
             if self._check_cancelled():
                 await self.state.transition("IDLE", task_id=self.task_id)
                 return "Task cancelled by kill switch."
@@ -880,14 +911,6 @@ class AgentOrchestrator:
                 await self.state.transition("ERROR", task_id=self.task_id)
                 return f"Error during execution: {exc}"
 
-        if self.state.current_state not in {"COMPLETED", "ERROR"}:
-            await self.state.transition("STUCK", task_id=self.task_id)
-            await self.reflection.record(
-                task_summary=user_input,
-                failure_reason="Exceeded maximum loop count",
-                fix_action="Break task into smaller steps.",
-            )
-            return "Agent reached the loop limit without completing the task."
         return "Task finished."
 
     async def _think_and_act(self) -> str:
@@ -1233,3 +1256,50 @@ class AgentOrchestrator:
         content = completion.choices[0].message.content or ""
         self.history.append({"role": "assistant", "content": content})
         return content
+
+    async def _maybe_extend_loop_limit(self, current_limit: int) -> int:
+        """Loop-limit checkpoint: reflect on whether the approach is sound.
+
+        Called when the current loop budget is exhausted without completing
+        the task. A YES extends the budget by ``_LOOP_LIMIT_INCREMENT`` (hard
+        cap ``_MAX_LOOP_LIMIT``); a NO — or a failed reflection — returns the
+        current limit unchanged so the task stops as stuck. At the hard cap no
+        LLM call is made.
+        """
+        if current_limit >= _MAX_LOOP_LIMIT:
+            return current_limit
+        self.history.append({
+            "role": "user",
+            "content": (
+                f"You have used {current_limit} perception-action loops without "
+                "completing the task. Review the trajectory so far: is the "
+                "current approach fundamentally sound and making progress, "
+                "simply needing more steps? Reply YES to continue with more "
+                "loops, or NO if the approach is wrong and the task should "
+                "stop. Reply with a single word: YES or NO."
+            ),
+        })
+        try:
+            completion = await self._llm_chat_with_breaker(self.history)
+        except APIBreakerTripped:
+            raise
+        except Exception as exc:
+            logger.warning("Loop-extension reflection failed: %s", exc)
+            self.history.append(
+                {"role": "assistant", "content": "[reflection failed]"}
+            )
+            return current_limit
+        answer = (completion.choices[0].message.content or "").strip().upper()
+        self.history.append({"role": "assistant", "content": answer})
+        if not answer.startswith("YES"):
+            return current_limit
+        new_limit = min(current_limit + _LOOP_LIMIT_INCREMENT, _MAX_LOOP_LIMIT)
+        self.history.append({
+            "role": "user",
+            "content": (
+                f"Approach confirmed sound. You have up to "
+                f"{new_limit - current_limit} more loops. Continue from where "
+                "you left off."
+            ),
+        })
+        return new_limit

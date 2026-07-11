@@ -1829,3 +1829,92 @@ async def test_system_prompt_guides_snapshot_before_type(
     system_content = agent.history[0]["content"]
     assert "windows__Snapshot" in system_content
     assert "label=<id>" in system_content
+
+
+# ---------------------------------------------------------------------------
+# Loop-limit extension checkpoint
+# ---------------------------------------------------------------------------
+
+
+def _bare_agent(config, eventbus, killswitch, llm):
+    return AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_extend_loop_limit_extends_on_yes(config, eventbus, killswitch):
+    llm = FakeLLM([_message("YES")])
+    agent = _bare_agent(config, eventbus, killswitch, llm)
+    agent.history = [{"role": "user", "content": "do the thing"}]
+
+    new_limit = await agent._maybe_extend_loop_limit(10)
+
+    assert new_limit == 20
+    # History: checkpoint question, the YES answer, then a continuation note.
+    assert agent.history[-2]["content"].upper().startswith("YES")
+    assert "more loops" in agent.history[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_extend_loop_limit_stops_on_no(config, eventbus, killswitch):
+    llm = FakeLLM([_message("NO, the approach is wrong")])
+    agent = _bare_agent(config, eventbus, killswitch, llm)
+    agent.history = [{"role": "user", "content": "do the thing"}]
+
+    assert await agent._maybe_extend_loop_limit(10) == 10
+
+
+@pytest.mark.asyncio
+async def test_extend_loop_limit_caps_at_50(config, eventbus, killswitch):
+    llm = FakeLLM([_message("YES")])
+    agent = _bare_agent(config, eventbus, killswitch, llm)
+    agent.history = [{"role": "user", "content": "do the thing"}]
+
+    # At the hard cap: no LLM call, no extension.
+    assert await agent._maybe_extend_loop_limit(50) == 50
+    assert llm.calls == []
+    # One step below the cap: extension clamps to 50.
+    assert await agent._maybe_extend_loop_limit(40) == 50
+
+
+@pytest.mark.asyncio
+async def test_extend_loop_limit_reflection_failure_stops(
+    config, eventbus, killswitch
+):
+    llm = FakeLLM([RuntimeError("api down")])
+    agent = _bare_agent(config, eventbus, killswitch, llm)
+    agent.history = [{"role": "user", "content": "do the thing"}]
+
+    assert await agent._maybe_extend_loop_limit(10) == 10
+
+
+@pytest.mark.asyncio
+async def test_run_task_extends_limit_then_completes(config, eventbus, killswitch):
+    # Loops 1-10 grind without progress (3 chats each: think, verify, reflect);
+    # the checkpoint at loop 10 says YES (extend to 20); loop 11 grinds; loop 12
+    # verifies YES and produces the final answer. Without the extension the
+    # task would have died as STUCK at loop 10.
+    grind = _message("Working.")
+    llm = FakeLLM(
+        [grind] * 30                # loops 1-10
+        + [_message("YES")]         # checkpoint: extend
+        + [grind] * 3               # loop 11
+        + [_message("Working."), _message("YES"), _message("Done!")],  # loop 12
+        default_chat=grind,
+    )
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 30),
+    )
+
+    result = await agent.run_task("finish eventually")
+
+    assert result == "Done!"
+    assert agent.state.current_state == "COMPLETED"
+    assert len(llm.calls) == 37  # 30 grind + 1 checkpoint + 3 + 3
+    assert any(
+        "Approach confirmed sound" in str(m.get("content", ""))
+        for m in agent.history
+    )
