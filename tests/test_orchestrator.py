@@ -378,6 +378,26 @@ async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
     assert "CompleteTask(answer=" not in system_content
     # The human-handoff tool must be advertised in the system prompt.
     assert "RequestHumanHelp" in system_content
+    # Scratch files must be steered to the cache directory, not the repo root.
+    assert str(config.cache_dir_absolute()) in system_content
+
+
+@pytest.mark.asyncio
+async def test_initialize_creates_cache_dir(monkeypatch, config, eventbus, killswitch):
+    # The cache directory must exist by the time tools run, so scratch files
+    # steered there by the system prompt can actually be written.
+    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.perception.shutdown = lambda: None
+
+    await agent.initialize()
+    try:
+        assert config.cache_dir_absolute().is_dir()
+    finally:
+        await agent.shutdown()
 
 
 @pytest.mark.asyncio

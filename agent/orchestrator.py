@@ -180,9 +180,14 @@ class AgentOrchestrator:
         return False
 
     async def initialize(self) -> None:
+        self.config.cache_dir_absolute().mkdir(parents=True, exist_ok=True)
         await self.llm.initialize()
         await self.mcp.connect_all()
-        register_all(self.llm, self.mcp)
+        register_all(
+            self.llm,
+            self.mcp,
+            code_cwd=str(self.config.cache_dir_absolute()),
+        )
         self._register_desktop_interact()
         self._register_complete_task()
         self._register_human_help()
@@ -579,6 +584,12 @@ class AgentOrchestrator:
             "- windows__Type(text='...', label=<id>)  — Type with no loc/label fails.\n"
             "Example: Snapshot shows [5] Edit 'Text Editor' -> Type(text='hello', label=5).\n"
             "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead.\n\n"
+            "## Working files\n"
+            f"Save every intermediate or scratch file (page snapshots, scraped "
+            f"content, temp JSON/CSV/Markdown, downloaded artifacts) under "
+            f"{self.config.cache_dir_absolute()} — never in the project root or "
+            "the current working directory. Only write outside that directory "
+            "when the user explicitly asks for a file at a specific path.\n\n"
             "## Asking the human for help\n"
             "If a step needs a human — login, scanning a QR code, CAPTCHA, SMS/2FA "
             "codes, OS permission dialogs — call RequestHumanHelp(question, options) "

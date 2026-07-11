@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from agent.tools import CodeRunner, UnsafeCodeError, run_code
@@ -149,3 +151,65 @@ def test_restricted_runner_no_help_escape():
     code = "g = help.__class__.__call__.__globals__\nprint('os' in g)"
     result = runner.run(code)
     assert "True" not in result
+
+
+# ---------------------------------------------------------------------------
+# Working directory (cwd) handling
+# ---------------------------------------------------------------------------
+
+def test_run_passes_configured_cwd_to_subprocess(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    CodeRunner(cwd=str(tmp_path)).run("print('hi')")
+    assert captured["cwd"] == str(tmp_path)
+
+
+def test_run_creates_cwd_when_missing(tmp_path):
+    target = tmp_path / "deep" / "cache"
+    result = CodeRunner(cwd=str(target)).run("print('hi')")
+    assert target.is_dir()
+    assert "hi" in result
+
+
+def test_run_without_cwd_leaves_subprocess_cwd_unset(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    CodeRunner().run("print('hi')")
+    assert captured.get("cwd") is None
+
+
+def test_register_all_wires_code_cwd(tmp_path, monkeypatch):
+    from agent.tools import register_all
+    from tests.fakes import FakeMCP
+
+    class _CaptureLLM:
+        def __init__(self):
+            self.local = {}
+
+        def register_function_tools(self, tools):
+            pass
+
+        def register_local_function(self, name, fn, **kwargs):
+            self.local[name] = fn
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    llm = _CaptureLLM()
+    register_all(llm, FakeMCP(), code_cwd=str(tmp_path))
+    llm.local["CodeRunner"](code="print('hi')", language="python")
+    assert captured["cwd"] == str(tmp_path)

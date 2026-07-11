@@ -163,11 +163,18 @@ class CodeRunner:
         max_code_length: int = 4000,
         allowed_modules: set[str] | None = None,
         disallowed_names: set[str] | None = None,
+        cwd: str | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_code_length = max_code_length
         self.allowed_modules = allowed_modules or ALLOWED_MODULES
         self.disallowed_names = disallowed_names or DISALLOWED_NAMES
+        self.cwd = cwd
+
+    def _ensure_cwd(self) -> None:
+        """Create the configured working directory if it does not exist yet."""
+        if self.cwd is not None:
+            os.makedirs(self.cwd, exist_ok=True)
 
     def run(
         self,
@@ -192,6 +199,7 @@ class CodeRunner:
             return f"[error] {exc}"
 
         script = self._wrap_in_restricted_env(code)
+        self._ensure_cwd()
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", script],
@@ -199,6 +207,7 @@ class CodeRunner:
                 text=True,
                 timeout=self.timeout_seconds,
                 env=env,
+                cwd=self.cwd,
             )
         except subprocess.TimeoutExpired:
             return "[error] Code execution timed out."
@@ -259,6 +268,7 @@ class CodeRunner:
         node = shutil.which("node")
         if not node:
             return "[error] JavaScript execution requires Node.js, which was not found."
+        self._ensure_cwd()
         try:
             proc = subprocess.run(
                 [node, "-e", code],
@@ -266,6 +276,7 @@ class CodeRunner:
                 text=True,
                 timeout=self.timeout_seconds,
                 env=env,
+                cwd=self.cwd,
             )
         except subprocess.TimeoutExpired:
             return "[error] Code execution timed out."
@@ -353,7 +364,8 @@ class RestrictedCodeRunner(CodeRunner):
         return wrapper
 
 
-# Backwards-compatible function used during registration.
+# Backwards-compatible helper; runs with the process cwd (registration uses
+# register_all, which passes the configured cache directory as cwd).
 def run_code(code: str, language: str = "python") -> str:
     return RestrictedCodeRunner().run(code, language=language)
 
@@ -374,12 +386,18 @@ def build_mcp_tools(mcp: "MCPMultiplexer") -> list[dict[str, Any]]:
     return tools
 
 
-def register_all(llm: Any, mcp: "MCPMultiplexer") -> None:
-    """Register MCP tools and local CodeRunner with the LLM client."""
+def register_all(llm: Any, mcp: "MCPMultiplexer", code_cwd: str | None = None) -> None:
+    """Register MCP tools and local CodeRunner with the LLM client.
+
+    ``code_cwd`` is the working directory for CodeRunner subprocesses (the
+    cache directory in production); relative paths written by generated code
+    land there instead of the process cwd.
+    """
     llm.register_function_tools(build_mcp_tools(mcp))
+    runner = RestrictedCodeRunner(cwd=code_cwd)
     llm.register_local_function(
         "CodeRunner",
-        run_code,
+        runner.run,
         schema=CODERUNNER_SCHEMA,
         description="Run a short Python or JavaScript snippet in a local sandbox and return output. Python is fully sandboxed; JavaScript requires Node.js.",
     )
