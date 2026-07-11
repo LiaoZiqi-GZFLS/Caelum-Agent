@@ -83,11 +83,10 @@ Rules:
 - `AgentStateChanged` → update spinner text only: `PLANNING`/`EXECUTING` →
   "Thinking…", `VERIFYING` → "Verifying…", `REFLECT` → "Reflecting…". No
   printed line (too noisy).
-- `LLMResponseReceived`:
-  - if `content` non-empty → print it dim/italic as model narration;
-  - if `tool_calls` present → for each, print a queued `▶ tool(arg-summary)`
-    line (the matching `ToolCallRequested` may arrive right after; both print,
-    requested line is authoritative for args).
+- `LLMResponseReceived`: if `content` non-empty → print it dim/italic as model
+  narration. Tool-call lines come from `ToolCallRequested` / `ToolCallCompleted`
+  (exactly one `▶`/`✓` per tool); `LLMResponseReceived.tool_calls` itself does
+  not print anything.
 - `ToolCallRequested` → print `▶ <server>__<tool>(<short-args>)`; set spinner
   to `Running <tool>…`.
 - `ToolCallCompleted` → print `✓ <tool> — <first line of result>` in green on
@@ -106,7 +105,7 @@ history.
 ## File changes
 
 - **Create `agent/cli_presenter.py`**
-  - `CLIPresenter(console: Console | None = None, *, enabled: bool = True)`
+  - `CLIPresenter(console: Console | None = None)`
     - `attach(eventbus)` / `detach()` — subscribe/unsubscribe the six handlers.
     - `banner()` — print the startup banner.
     - `input(prompt="› ")` → styled input (wraps `Console.input`).
