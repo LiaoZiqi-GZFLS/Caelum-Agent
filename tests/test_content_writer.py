@@ -114,8 +114,54 @@ async def test_draft_llm_failure_returns_error(tmp_path: Path) -> None:
 
 def test_schema_shape() -> None:
     props = DRAFT_CONTENT_SCHEMA["properties"]
-    assert set(props) >= {"task", "persona", "prefill", "max_chars"}
+    assert set(props) >= {"task", "persona", "prefill", "max_chars", "doc_ref"}
     assert DRAFT_CONTENT_SCHEMA["required"] == ["task", "persona"]
+
+
+@pytest.mark.asyncio
+async def test_draft_with_doc_ref_injects_document(tmp_path: Path) -> None:
+    llm = FakeLLM(chat_responses=[_completion("article body")])
+    handler = make_draft_content_handler(
+        llm, tmp_path / "drafts", doc_resolver=lambda ref: "FULL DOC TEXT"
+    )
+
+    await handler(task="write from the doc", persona="writer", doc_ref="doc:abc12345")
+
+    messages = llm.calls[0]
+    # Document arrives as its own system message (Kimi file-chat pattern),
+    # between the persona and the task.
+    assert messages[1]["role"] == "system"
+    assert "FULL DOC TEXT" in messages[1]["content"]
+    assert messages[-1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_draft_doc_ref_without_resolver_is_rejected(tmp_path: Path) -> None:
+    llm = FakeLLM(chat_responses=[_completion("body")])
+    handler = make_draft_content_handler(llm, tmp_path / "drafts")
+
+    result = await handler(task="t", persona="p", doc_ref="doc:abc12345")
+
+    assert result.startswith("[error]")
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_draft_unknown_doc_ref_returns_error(tmp_path: Path) -> None:
+    llm = FakeLLM(chat_responses=[_completion("body")])
+
+    def bad_resolver(ref: str) -> str:
+        raise ValueError(f"Unknown doc_ref '{ref}'")
+
+    handler = make_draft_content_handler(
+        llm, tmp_path / "drafts", doc_resolver=bad_resolver
+    )
+
+    result = await handler(task="t", persona="p", doc_ref="doc:deadbeef")
+
+    assert result.startswith("[error]")
+    assert "Unknown doc_ref" in result
+    assert llm.calls == []
 
 
 class _RecordingLLM:

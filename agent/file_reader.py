@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,30 @@ class FileExtractor:
     def _cache_path(self, path: Path) -> Path:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         return self.cache_dir / f"{digest}.txt"
+
+    def ref_for(self, path: str | Path) -> str:
+        """Return the ``doc:<sha8>`` handle for a document's cached extraction.
+
+        The handle lets other tools (DraftContent) pull the extracted text
+        straight from the local cache without the main context ever seeing it.
+        """
+        digest = hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+        return f"doc:{digest[:8]}"
+
+    def read_by_ref(self, ref: str) -> str:
+        """Resolve a ``doc:<sha8>`` handle back to the cached extracted text."""
+        match = re.fullmatch(r"doc:([0-9a-f]{8})", ref or "")
+        if not match:
+            raise ValueError(
+                f"Invalid doc_ref '{ref}'. Use the ref returned by ReadDocument."
+            )
+        matches = list(self.cache_dir.glob(f"{match.group(1)}*.txt"))
+        if not matches:
+            raise ValueError(
+                f"Unknown doc_ref '{ref}': the document has not been read with "
+                "ReadDocument (or its cache was cleared)."
+            )
+        return matches[0].read_text(encoding="utf-8")
 
     async def extract(self, path: str | Path) -> str:
         """Return the extracted text of a supported document.
@@ -172,7 +197,9 @@ def make_read_document_handler(extractor: FileExtractor):
         end = offset + len(page)
         header = (
             f"[read_document] {Path(path).name}: {total} chars total, "
-            f"showing {offset}-{end}"
+            f"showing {offset}-{end} "
+            f"(ref {extractor.ref_for(path)} — pass to DraftContent as "
+            "doc_ref to write from this document without loading it here)"
         )
         if end < total:
             page += (

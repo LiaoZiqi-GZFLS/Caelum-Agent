@@ -209,6 +209,42 @@ def test_allowed_extensions_are_binary_documents() -> None:
     assert ".py" not in ALLOWED_EXTENSIONS
 
 
+@pytest.mark.asyncio
+async def test_handler_result_includes_doc_ref(tmp_path: Path) -> None:
+    doc = tmp_path / "report.pdf"
+    doc.write_bytes(b"%PDF-1.4 fake bytes")
+    handler = make_read_document_handler(_extractor(tmp_path))
+
+    result = await handler(path=str(doc))
+
+    expected_ref = f"doc:{hashlib.sha256(b'%PDF-1.4 fake bytes').hexdigest()[:8]}"
+    assert expected_ref in result
+    assert "DraftContent" in result  # hints the ref's purpose
+
+
+@pytest.mark.asyncio
+async def test_read_by_ref_round_trip(tmp_path: Path) -> None:
+    doc = tmp_path / "report.pdf"
+    doc.write_bytes(b"bytes")
+    extractor = _extractor(tmp_path)
+    await extractor.extract(doc)
+
+    ref = extractor.ref_for(doc)
+    assert extractor.read_by_ref(ref) == "extracted text"
+
+
+def test_read_by_ref_rejects_unknown_ref(tmp_path: Path) -> None:
+    extractor = _extractor(tmp_path)
+    with pytest.raises(ValueError, match="Unknown doc_ref"):
+        extractor.read_by_ref("doc:deadbeef")
+
+
+def test_read_by_ref_rejects_malformed_ref(tmp_path: Path) -> None:
+    extractor = _extractor(tmp_path)
+    with pytest.raises(ValueError, match="Invalid doc_ref"):
+        extractor.read_by_ref("not-a-ref")
+
+
 class _RecordingLLM:
     def __init__(self) -> None:
         self.registered: dict[str, dict[str, Any]] = {}

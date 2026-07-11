@@ -219,7 +219,9 @@ class AgentOrchestrator:
             self._background_tasks.add(sweep_task)
             sweep_task.add_done_callback(self._background_tasks.discard)
         register_draft_content(
-            self.llm, self.config.cache_dir_absolute() / "drafts"
+            self.llm,
+            self.config.cache_dir_absolute() / "drafts",
+            doc_resolver=extractor.read_by_ref if extractor is not None else None,
         )
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
