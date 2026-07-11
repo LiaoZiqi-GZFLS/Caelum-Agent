@@ -230,3 +230,82 @@ async def test_presenter_active_suppresses_console_log_handler(monkeypatch, tmp_
     await main.main([])
 
     assert captured.get("console") is False
+
+
+# ---------------------------------------------------------------------------
+# spinner stop on unexpected task failure
+# ---------------------------------------------------------------------------
+
+class _SpyPresenter:
+    """Wraps the real CLIPresenter and records stop() calls."""
+
+    def __init__(self, real):
+        self.real = real
+        self.stop_calls = 0
+
+    def attach(self, bus):
+        self.real.attach(bus)
+
+    def detach(self):
+        self.real.detach()
+
+    def banner(self):
+        self.real.banner()
+
+    def input(self):
+        return self.real.input()
+
+    def print_answer(self, text):
+        self.real.print_answer(text)
+
+    def stop(self):
+        self.stop_calls += 1
+        self.real.stop()
+
+
+def _install_spy_presenter(monkeypatch) -> dict:
+    """Make main() build a recording presenter; returns a holder dict."""
+    from agent.cli_presenter import CLIPresenter as _RealPresenter
+
+    holder: dict[str, Any] = {}
+    monkeypatch.setattr(
+        main,
+        "CLIPresenter",
+        lambda: holder.setdefault("spy", _SpyPresenter(_RealPresenter())),
+    )
+    return holder
+
+
+@pytest.mark.asyncio
+async def test_repl_stops_spinner_when_task_raises(monkeypatch, tmp_path):
+    holder = _install_spy_presenter(monkeypatch)
+    agent = _ReplAgent()
+
+    async def boom(task):
+        raise RuntimeError("perception exploded")
+
+    agent.run_task = boom  # type: ignore[assignment]
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+    _feed(monkeypatch, ["boom", "/quit"])
+
+    rc = await main.main([])
+
+    assert rc == 0
+    assert holder["spy"].stop_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_one_shot_stops_spinner_when_task_raises(monkeypatch, tmp_path):
+    holder = _install_spy_presenter(monkeypatch)
+    agent = _ReplAgent()
+
+    async def boom(task):
+        raise RuntimeError("perception exploded")
+
+    agent.run_task = boom  # type: ignore[assignment]
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+
+    rc = await main.main(["--task", "boom"])
+
+    assert rc == 1
+    assert holder["spy"].stop_calls >= 1

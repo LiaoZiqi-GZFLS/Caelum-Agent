@@ -13,6 +13,7 @@ from eventbus.events import (
     LLMResponseReceived,
     ToolCallCompleted,
     ToolCallRequested,
+    UserInputReceived,
 )
 
 
@@ -164,3 +165,17 @@ def test_confirm_non_tty_returns_false_without_prompt(monkeypatch):
 
     monkeypatch.setattr("agent.cli_presenter.Confirm.ask", boom)
     assert presenter.confirm("delete file", {"action": "delete"}) is False
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_running_status():
+    presenter, _ = _make_presenter()
+    bus = EventBus()
+    presenter.attach(bus)
+    await bus.emit(UserInputReceived(text="hi"))
+    assert presenter._status is not None  # spinner is running
+
+    presenter.stop()
+
+    assert presenter._status is None
+    presenter.detach()

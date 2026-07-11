@@ -125,6 +125,10 @@ class CLIPresenter:
         self._stop_status()
         self.console.print(Panel(Markdown(text or ""), title="Caelum", border_style=STYLE_PANEL_BORDER))
 
+    def stop(self) -> None:
+        """Stop the live spinner if one is running (used on unexpected error paths)."""
+        self._stop_status()
+
     def confirm(self, summary: str, action: dict[str, Any]) -> bool:
         # Build the confirm line from styled + plain Text spans so the untrusted
         # ``summary`` is never parsed as rich markup (a ``[/]`` or ``[x]`` in it

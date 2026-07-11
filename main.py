@@ -130,6 +130,8 @@ async def _run_one_shot(agent: AgentOrchestrator, task: str, logger: Any) -> int
             print(result)
     except Exception as exc:
         logger.exception("Task failed: %s", exc)
+        if _presenter is not None:
+            _presenter.stop()
         return 1
     return 0
 
@@ -176,6 +178,8 @@ async def _run_repl(agent: AgentOrchestrator, logger: Any) -> int:
                     print(result)
             except Exception as exc:
                 logger.exception("Task failed: %s", exc)
+                if _presenter is not None:
+                    _presenter.stop()
     finally:
         await agent.shutdown()
 
