@@ -76,7 +76,9 @@ async def test_learn_uses_llm_when_available(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content=f"```json\n{json.dumps(payload)}\n```"
+                    # Partial Mode: the API returns the continuation after the
+                    # prefilled "{", without the leading brace.
+                    content=json.dumps(payload)[1:]
                 )
             )
         ]
@@ -173,6 +175,75 @@ async def test_learn_falls_back_when_llm_fails(
     assert Path(result["path"]).exists()
     content = Path(result["path"]).read_text(encoding="utf-8")
     assert "open-calculator" in content
+
+
+class _PartialRecordingLLM:
+    """Records chat() messages and returns a JSON continuation WITHOUT the
+    leading brace, mimicking Kimi Partial Mode (the API strips prefilled text)."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.messages: list[list[dict[str, Any]]] = []
+        self._payload = payload
+
+    async def chat(
+        self, messages: list[dict[str, Any]], tools: Any | None = None
+    ) -> Any:
+        self.messages.append(messages)
+        body = json.dumps(self._payload, ensure_ascii=False)[1:]  # drop leading '{'
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=body))]
+        )
+
+
+_SKILL_PAYLOAD = {
+    "name": "demo-skill",
+    "description": "A demo skill.",
+    "usage": "run demo",
+    "steps": ["Step one.", "Step two."],
+    "tags": "demo",
+    "version": "v0.1.0",
+}
+
+
+@pytest.mark.asyncio
+async def test_generate_with_llm_uses_partial_mode(
+    memory_store: MemoryStore, tmp_path: Path
+) -> None:
+    """Skill generation prefills the assistant turn with '{' (Kimi Partial
+    Mode) and parses the brace-less continuation the API returns."""
+    llm = _PartialRecordingLLM(_SKILL_PAYLOAD)
+    learner = SkillLearner(
+        skills_dir=tmp_path / "skills", memory=memory_store, llm_client=llm
+    )
+
+    skill = await learner._generate_with_llm("do thing", ["trace step"])
+
+    assert skill["name"] == "learned/demo-skill"
+    assert skill["steps"] == ["Step one.", "Step two."]
+    last = llm.messages[0][-1]
+    assert last["role"] == "assistant"
+    assert last["partial"] is True
+    assert last["content"] == "{"
+
+
+@pytest.mark.asyncio
+async def test_merge_with_llm_uses_partial_mode(
+    memory_store: MemoryStore, tmp_path: Path
+) -> None:
+    """Skill merging uses the same Partial Mode prefill and parsing."""
+    llm = _PartialRecordingLLM({**_SKILL_PAYLOAD, "version": "v0.1.1"})
+    learner = SkillLearner(
+        skills_dir=tmp_path / "skills", memory=memory_store, llm_client=llm
+    )
+    existing = dict(_SKILL_PAYLOAD)
+
+    merged = await learner._merge_with_llm(existing, "do thing", ["trace step"])
+
+    assert merged["version"] == "v0.1.1"
+    last = llm.messages[0][-1]
+    assert last["role"] == "assistant"
+    assert last["partial"] is True
+    assert last["content"] == "{"
 
 
 def test_bump_version() -> None:

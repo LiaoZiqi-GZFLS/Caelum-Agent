@@ -23,6 +23,13 @@ from agent.memory import MemoryStore
 logger = logging.getLogger("caelum.skills")
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 
+# Kimi Partial Mode: appending an assistant message with "partial": True makes
+# the model CONTINUE the prefilled text instead of generating from scratch.
+# Prefilling "{" forces a JSON object body without markdown fences, preambles,
+# or trailing chatter. NOTE: the API response excludes the prefilled text, so
+# it must be concatenated back before parsing.
+_PARTIAL_JSON_PREFILL = "{"
+
 
 class SkillLearner:
     """Generate, merge, and persist SKILL.md skills from successful tasks.
@@ -144,21 +151,25 @@ class SkillLearner:
                 "role": "system",
                 "content": (
                     "You are a skill authoring assistant. Convert a successful "
-                    "task trace into a concise SKILL.md in JSON. Output only JSON."
+                    "task trace into a concise SKILL.md in JSON. The assistant "
+                    "response already begins with '{'; continue the JSON object."
                 ),
             },
             {
                 "role": "user",
                 "content": self._skill_prompt(task, trajectory),
             },
+            {
+                "role": "assistant",
+                "content": _PARTIAL_JSON_PREFILL,
+                "partial": True,
+            },
         ]
         completion = await self.llm_client.chat(messages, tools=None)
-        text = completion.choices[0].message.content or ""
-        # Strip markdown fences if the model wraps the JSON.
-        text = text.strip()
-        if text.startswith("```"):
-            text = "\n".join(text.split("\n")[1:-1]).strip()
-        data = json.loads(text)
+        # Partial Mode: the response is the continuation after the prefilled
+        # "{", so concatenate it back before parsing.
+        body = (completion.choices[0].message.content or "").strip()
+        data = json.loads(_PARTIAL_JSON_PREFILL + body)
         return self._normalize_skill(data)
 
     async def _merge_content(
@@ -187,7 +198,8 @@ class SkillLearner:
                 "content": (
                     "Merge an existing SKILL.md with a new successful task trace. "
                     "Preserve the best steps, remove duplicates, and bump the patch "
-                    "version. Output only JSON matching the skill schema."
+                    "version. The assistant response already begins with '{'; "
+                    "continue the JSON object matching the skill schema."
                 ),
             },
             {
@@ -198,13 +210,17 @@ class SkillLearner:
                     f"New trace:\n" + "\n".join(f"- {s}" for s in trajectory)
                 ),
             },
+            {
+                "role": "assistant",
+                "content": _PARTIAL_JSON_PREFILL,
+                "partial": True,
+            },
         ]
         completion = await self.llm_client.chat(messages, tools=None)
-        text = completion.choices[0].message.content or ""
-        text = text.strip()
-        if text.startswith("```"):
-            text = "\n".join(text.split("\n")[1:-1]).strip()
-        data = json.loads(text)
+        # Partial Mode: the response is the continuation after the prefilled
+        # "{", so concatenate it back before parsing.
+        body = (completion.choices[0].message.content or "").strip()
+        data = json.loads(_PARTIAL_JSON_PREFILL + body)
         return self._normalize_skill(data)
 
     def _fallback_skill(self, task: str, trajectory: list[str]) -> dict[str, Any]:
