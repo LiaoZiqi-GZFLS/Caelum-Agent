@@ -233,6 +233,29 @@ async def test_perceive_without_vision_skips_detector(
 
 
 @pytest.mark.asyncio
+async def test_perceive_runs_ocr_on_full_resolution_image(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OCR must see the original screenshot, not the 800x600 compressed copy.
+
+    Downscaling erases small text; OCR is local CPU work and costs no tokens,
+    so it must run before _compress() thumbnails the image in place.
+    """
+    module = PerceptionModule(config)
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (1920, 1080))
+    )
+    seen_sizes: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        module, "_run_ocr", lambda img: seen_sizes.append(img.size) or ""
+    )
+
+    await module.perceive(instruction="x", with_vision=False)
+
+    assert seen_sizes == [(1920, 1080)]
+
+
+@pytest.mark.asyncio
 async def test_perceive_with_vision_runs_detector(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

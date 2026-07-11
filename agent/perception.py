@@ -79,6 +79,12 @@ class PerceptionModule:
         loop = asyncio.get_event_loop()
         image = await loop.run_in_executor(self._io_executor, self._capture_screenshot)
         orig_w, orig_h = image.size
+
+        # OCR reads the full-resolution screenshot: downscaling to 800x600
+        # erases small text, and OCR is local CPU work that costs no tokens.
+        # This must run before _compress(), which thumbnails the image in place.
+        ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
+
         image_bytes = await loop.run_in_executor(
             self._io_executor, self._compress, image
         )
@@ -89,7 +95,6 @@ class PerceptionModule:
         image_hash = await loop.run_in_executor(
             self._io_executor, self._compute_image_hash, image
         )
-        ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
         ui_tree = await self._fetch_ui_tree()
         if with_vision:
             som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
@@ -248,10 +253,15 @@ class PerceptionModule:
             from rapidocr_onnxruntime import RapidOCR
 
             self._ocr = RapidOCR()
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            image.save(tmp.name, format="JPEG", quality=self.config.screenshot.quality)
+        # Lossless PNG: OCR receives the full-resolution screenshot (it runs
+        # before compression); keep it free of extra JPEG artifacts.
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image.save(tmp.name, format="PNG")
             tmp_path = tmp.name
-        result = self._ocr(tmp_path)
+        try:
+            result = self._ocr(tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
         texts = []
         if result and isinstance(result, (list, tuple)):
             for item in result:
