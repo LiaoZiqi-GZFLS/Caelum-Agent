@@ -64,6 +64,17 @@ async def _print_status(agent: AgentOrchestrator) -> None:
     )
 
 
+def _mcp_server_summary(agent: AgentOrchestrator) -> list[tuple[str, bool, int]]:
+    """(name, connected, tool_count) per MCP server, for the startup status line."""
+    counts: dict[str, int] = {}
+    for tool in agent.mcp.all_tools():
+        counts[tool["server"]] = counts.get(tool["server"], 0) + 1
+    return [
+        (name, bool(client._connected), counts.get(name, 0))
+        for name, client in agent.mcp.clients.items()
+    ]
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Caelum-Agent desktop automation CLI")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
@@ -140,6 +151,7 @@ async def _run_repl(agent: AgentOrchestrator, logger: Any) -> int:
     await agent.initialize()
     if _presenter is not None:
         _presenter.banner()
+        _presenter.mcp_status(_mcp_server_summary(agent))
     logger.info("Caelum-Agent ready. Type a command or /quit.")
 
     loop = asyncio.get_running_loop()
@@ -239,6 +251,8 @@ async def main(argv: list[str] | None = None) -> int:
 
         if args.task:
             await agent.initialize()
+            if _presenter is not None:
+                _presenter.mcp_status(_mcp_server_summary(agent))
             try:
                 return await _run_one_shot(agent, args.task, logger)
             finally:

@@ -199,3 +199,16 @@ def test_confirm_stops_spinner_while_asking(monkeypatch):
     assert seen["status_during_ask"] is None  # spinner suspended while asking
     assert presenter._status is not None  # restored after the answer
     presenter._stop_status()
+
+
+def test_mcp_status_line_marks_connected_and_failed():
+    presenter, buf = _make_presenter()
+    presenter.mcp_status([("playwright", True, 23), ("windows", False, 0)])
+    out = buf.getvalue()
+    assert "MCP" in out
+    assert "playwright" in out
+    assert "23" in out
+    assert "windows" in out
+    assert "failed" in out
+    assert "✓" in out
+    assert "✗" in out

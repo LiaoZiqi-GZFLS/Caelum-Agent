@@ -159,6 +159,22 @@ class CLIPresenter:
             self.console.print("[dim]EOF on stdin; denying.[/]")
             return False
 
+    def mcp_status(self, servers: list[tuple[str, bool, int]]) -> None:
+        """Print a one-line MCP connection summary: ``MCP  ✓ name (n tools)  ✗ name (failed)``."""
+        if not servers:
+            return
+        line = Text("MCP  ")
+        for i, (name, connected, tool_count) in enumerate(servers):
+            if i:
+                line.append("  ")
+            if connected:
+                line.append("✓ ", style=STYLE_OK)
+                line.append(f"{name} ({tool_count} tools)")
+            else:
+                line.append("✗ ", style=STYLE_ERR)
+                line.append(f"{name} (failed)")
+        self.console.print(line)
+
     # -- status helpers -------------------------------------------------------
 
     def _start_status(self, label: str) -> None:

@@ -104,11 +104,14 @@ class _ReplAgent:
         self.consecutive_action_failures = 0
         self.consecutive_api_failures = 0
         self.eventbus = _FakeBus()
-        self.mcp = SimpleNamespace(clients={
-            "playwright": SimpleNamespace(_connected=True),
-            "windows": SimpleNamespace(_connected=False),
-            "filesystem": SimpleNamespace(_connected=True),
-        })
+        self.mcp = SimpleNamespace(
+            clients={
+                "playwright": SimpleNamespace(_connected=True),
+                "windows": SimpleNamespace(_connected=False),
+                "filesystem": SimpleNamespace(_connected=True),
+            },
+            all_tools=lambda: [],
+        )
         self.initialized = False
         self.shutdown_called = False
         self.ran: list[str] = []
@@ -214,6 +217,20 @@ async def test_repl_prints_banner(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.asyncio
+async def test_repl_shows_mcp_status(monkeypatch, tmp_path, capsys):
+    agent = _ReplAgent()
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+    _feed(monkeypatch, ["/quit"])
+
+    await main.main([])
+
+    out = capsys.readouterr().out
+    assert "MCP" in out
+    assert "playwright" in out
+    assert "windows" in out
+
+
+@pytest.mark.asyncio
 async def test_presenter_active_suppresses_console_log_handler(monkeypatch, tmp_path):
     captured: dict[str, Any] = {}
 
@@ -251,6 +268,9 @@ class _SpyPresenter:
 
     def banner(self):
         self.real.banner()
+
+    def mcp_status(self, servers):
+        self.real.mcp_status(servers)
 
     def input(self):
         return self.real.input()
