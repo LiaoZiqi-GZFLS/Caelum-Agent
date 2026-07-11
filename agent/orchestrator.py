@@ -161,6 +161,12 @@ class AgentOrchestrator:
         # sys.stdin.isatty(); piped/one-shot scripted runs get False so the
         # system prompt can steer the model away from human-in-the-loop tools.
         self._interactive: bool = True
+        # Lazy-mode SoM follow-up: _desktop_interact_impl stashes the vision
+        # perception it refreshed here; _think_and_act appends its annotated
+        # screenshot to history right after the tool result so the model can
+        # see the markers it is choosing among (main-loop perceptions carry no
+        # SoM in lazy mode). Cleared after each append and at task start.
+        self._pending_som_followup: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
     def set_human_confirmation_callback(self, callback: Any) -> None:
@@ -296,6 +302,12 @@ class AgentOrchestrator:
             self._last_perception = await self.perception.perceive_with_vision(
                 self.current_instruction
             )
+            # In lazy mode the main-loop perceptions carry no SoM annotations,
+            # so without this the model picks DesktopInteract labels blind.
+            # Stash the fresh vision perception; _think_and_act appends its
+            # annotated screenshot to history right after this tool's result.
+            if self.config.ui_detector.lazy:
+                self._pending_som_followup = self._last_perception
         perception = getattr(self, "_last_perception", None)
         if perception is None:
             return "[error] No perception data available. Run perception first."
@@ -507,6 +519,53 @@ class AgentOrchestrator:
 
         return content
 
+    @staticmethod
+    def _format_som_followup(perception: Any) -> list[dict[str, Any]] | None:
+        """Build the lazy-mode SoM follow-up message for DesktopInteract.
+
+        DesktopInteract refreshes vision perception internally; in lazy mode
+        the main loop never sends the annotated image, so the model would pick
+        labels blind. This message — appended right after the tool result —
+        carries the annotated screenshot plus the label list so subsequent
+        DesktopInteract calls are visually grounded. Returns None when there
+        is nothing worth showing (no annotations or no readable image).
+        """
+        if not perception.som_annotations:
+            return None
+        image_path: Path | None = None
+        for candidate in (
+            perception.annotated_screenshot_path,
+            perception.screenshot_path,
+        ):
+            if candidate is not None and candidate.exists():
+                image_path = candidate
+                break
+        if image_path is None:
+            return None
+        try:
+            b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        except Exception:
+            return None
+        labels = "\n".join(
+            f"  [{a.get('label', '?')}] at ({a.get('center_x', 0):.3f}, "
+            f"{a.get('center_y', 0):.3f})"
+            for a in perception.som_annotations
+        )
+        return [
+            {
+                "type": "text",
+                "text": (
+                    "SoM-annotated screenshot from the DesktopInteract detection "
+                    "pass (numbered red markers = detected candidates):\n"
+                    f"{labels}\n"
+                    "Use these label numbers for subsequent DesktopInteract "
+                    "calls. Each call re-detects, so after the screen changes "
+                    "rely on the latest annotated image."
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
+
     async def _llm_chat_with_breaker(
         self,
         messages: list[dict[str, Any]],
@@ -653,6 +712,7 @@ class AgentOrchestrator:
         ]
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
+        self._pending_som_followup = None
         self.action_traces = []
         # Tracks whether this task has invoked any tool that touches the screen
         # (windows/playwright MCP, or the desktop_interact local tool). Pure
@@ -848,6 +908,16 @@ class AgentOrchestrator:
 
             tool_results = await self._execute_tool_calls(tool_calls)
             self.history.extend(tool_results)
+            # Lazy-mode SoM follow-up: show the model the annotated screenshot
+            # from the DesktopInteract detection pass (stashed by
+            # _desktop_interact_impl), right after the tool result so the
+            # tool_call/tool pairing order is preserved.
+            som_followup = self._pending_som_followup
+            if som_followup is not None:
+                self._pending_som_followup = None
+                som_content = self._format_som_followup(som_followup)
+                if som_content is not None:
+                    self.history.append({"role": "user", "content": som_content})
             if self._pending_completion is not None:
                 # The model called CompleteTask inside this batch: surface its
                 # answer as this round's final message so the tool loop stops and

@@ -1516,6 +1516,125 @@ async def test_desktop_interact_triggers_vision_and_clicks(
     assert click_calls[0][2] == {"loc": [50, 50]}
 
 
+class _DispatchingLLM(FakeLLM):
+    """FakeLLM that routes DesktopInteract calls to the orchestrator's real impl.
+
+    The shared FakeLLM returns canned tool results without invoking local
+    handlers; the SoM follow-up behaviour lives in the real impl, so dispatch.
+    """
+
+    def __init__(
+        self, chat_responses: list[Any], agent_holder: dict[str, Any]
+    ) -> None:
+        super().__init__(chat_responses=chat_responses, tool_names=["DesktopInteract"])
+        self._holder = agent_holder
+
+    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
+        results = []
+        for call in calls:
+            args = json.loads(call.function.arguments)
+            output = await self._holder["agent"]._desktop_interact_impl(**args)
+            results.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": output,
+            })
+        return results
+
+
+def _som_followup_agent(
+    config: Any,
+    eventbus: Any,
+    killswitch: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    annotations: list[dict[str, Any]],
+) -> AgentOrchestrator:
+    """Wire an agent whose LLM dispatches DesktopInteract to the real impl."""
+    spy = _SpyDetector(annotations)
+    perception = _PerceptionModule(config, ui_detector=spy)
+    _patch_perception_capture(perception, monkeypatch)
+
+    holder: dict[str, Any] = {}
+    llm = _DispatchingLLM(
+        [
+            _message(
+                "Clicking.",
+                tool_calls=[_tool_call("DesktopInteract", {"label": 1, "action": "click"})],
+            ),
+            _message("Clicked the OK button."),
+        ],
+        holder,
+    )
+    mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Click", ToolResult(success=True, content="clicked"))
+
+    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch, perception=perception)
+    holder["agent"] = agent
+    agent.ui_detector = spy
+    agent.current_instruction = "click the OK button"
+    agent.history = [{"role": "system", "content": "sys"}]
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_lazy_mode_appends_som_image_after_desktop_interact(
+    config, eventbus, killswitch, monkeypatch
+):
+    """Lazy mode: the SoM-annotated image is appended to history right after
+    the DesktopInteract tool result, so the model sees the markers."""
+    agent = _som_followup_agent(
+        config, eventbus, killswitch, monkeypatch,
+        annotations=[
+            {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
+        ],
+    )
+
+    await agent._think_and_act()
+
+    roles = [m["role"] for m in agent.history]
+    assert roles == ["system", "assistant", "tool", "user", "assistant"]
+    content = agent.history[3]["content"]
+    assert isinstance(content, list)
+    assert any(item.get("type") == "image_url" for item in content)
+    text = next(item["text"] for item in content if item.get("type") == "text")
+    assert "[1]" in text
+
+
+@pytest.mark.asyncio
+async def test_eager_mode_does_not_append_som_followup(
+    config, eventbus, killswitch, monkeypatch
+):
+    """Eager mode already sends the annotated image with every perception, so
+    DesktopInteract must not append a duplicate follow-up message."""
+    config.ui_detector.lazy = False
+    agent = _som_followup_agent(
+        config, eventbus, killswitch, monkeypatch,
+        annotations=[
+            {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
+        ],
+    )
+
+    await agent._think_and_act()
+
+    roles = [m["role"] for m in agent.history]
+    assert roles == ["system", "assistant", "tool", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_no_som_followup_when_detection_empty(
+    config, eventbus, killswitch, monkeypatch
+):
+    """No annotations -> no follow-up image message."""
+    agent = _som_followup_agent(
+        config, eventbus, killswitch, monkeypatch, annotations=[],
+    )
+
+    await agent._think_and_act()
+
+    roles = [m["role"] for m in agent.history]
+    assert roles == ["system", "assistant", "tool", "assistant"]
+
+
 @pytest.mark.asyncio
 async def test_eager_mode_runs_vision_each_loop(
     config, eventbus, killswitch, monkeypatch
