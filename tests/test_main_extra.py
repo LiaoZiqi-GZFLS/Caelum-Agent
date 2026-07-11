@@ -231,6 +231,20 @@ async def test_repl_shows_mcp_status(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.asyncio
+async def test_one_shot_shows_mcp_status(monkeypatch, tmp_path, capsys):
+    agent = _ReplAgent()
+    _wire(monkeypatch, _cfg(tmp_path), agent)
+
+    rc = await main.main(["--task", "hi"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "MCP" in out
+    assert "playwright" in out
+    assert "windows" in out
+
+
+@pytest.mark.asyncio
 async def test_presenter_active_suppresses_console_log_handler(monkeypatch, tmp_path):
     captured: dict[str, Any] = {}
 
