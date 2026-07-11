@@ -76,10 +76,10 @@ async def test_learn_uses_llm_when_available(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    # Partial Mode: the API returns the continuation after the
-                    # prefilled "{", without the leading brace.
-                    content=json.dumps(payload)[1:]
-                )
+                    # JSON Mode: the API returns the complete serialized object.
+                    content=json.dumps(payload)
+                ),
+                finish_reason="stop",
             )
         ]
     )
@@ -177,21 +177,29 @@ async def test_learn_falls_back_when_llm_fails(
     assert "open-calculator" in content
 
 
-class _PartialRecordingLLM:
-    """Records chat() messages and returns a JSON continuation WITHOUT the
-    leading brace, mimicking Kimi Partial Mode (the API strips prefilled text)."""
+class _JsonRecordingLLM:
+    """Records chat() messages/kwargs and returns a full serialized JSON object,
+    as guaranteed by Kimi JSON Mode (response_format={"type": "json_object"})."""
 
     def __init__(self, payload: dict[str, Any]) -> None:
         self.messages: list[list[dict[str, Any]]] = []
+        self.kwargs: list[dict[str, Any]] = []
         self._payload = payload
 
     async def chat(
-        self, messages: list[dict[str, Any]], tools: Any | None = None
+        self, messages: list[dict[str, Any]], tools: Any | None = None, **kwargs: Any
     ) -> Any:
         self.messages.append(messages)
-        body = json.dumps(self._payload, ensure_ascii=False)[1:]  # drop leading '{'
+        self.kwargs.append(kwargs)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=body))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(self._payload, ensure_ascii=False)
+                    ),
+                    finish_reason="stop",
+                )
+            ]
         )
 
 
@@ -205,13 +213,18 @@ _SKILL_PAYLOAD = {
 }
 
 
+def _assert_json_mode(llm: _JsonRecordingLLM) -> None:
+    assert llm.kwargs[0].get("response_format") == {"type": "json_object"}
+    # No Partial Mode prefill: the last message must come from the user.
+    assert llm.messages[0][-1]["role"] == "user"
+
+
 @pytest.mark.asyncio
-async def test_generate_with_llm_uses_partial_mode(
+async def test_generate_with_llm_uses_json_mode(
     memory_store: MemoryStore, tmp_path: Path
 ) -> None:
-    """Skill generation prefills the assistant turn with '{' (Kimi Partial
-    Mode) and parses the brace-less continuation the API returns."""
-    llm = _PartialRecordingLLM(_SKILL_PAYLOAD)
+    """Skill generation requests Kimi JSON Mode and parses the response."""
+    llm = _JsonRecordingLLM(_SKILL_PAYLOAD)
     learner = SkillLearner(
         skills_dir=tmp_path / "skills", memory=memory_store, llm_client=llm
     )
@@ -220,18 +233,15 @@ async def test_generate_with_llm_uses_partial_mode(
 
     assert skill["name"] == "learned/demo-skill"
     assert skill["steps"] == ["Step one.", "Step two."]
-    last = llm.messages[0][-1]
-    assert last["role"] == "assistant"
-    assert last["partial"] is True
-    assert last["content"] == "{"
+    _assert_json_mode(llm)
 
 
 @pytest.mark.asyncio
-async def test_merge_with_llm_uses_partial_mode(
+async def test_merge_with_llm_uses_json_mode(
     memory_store: MemoryStore, tmp_path: Path
 ) -> None:
-    """Skill merging uses the same Partial Mode prefill and parsing."""
-    llm = _PartialRecordingLLM({**_SKILL_PAYLOAD, "version": "v0.1.1"})
+    """Skill merging uses the same JSON Mode request and parsing."""
+    llm = _JsonRecordingLLM({**_SKILL_PAYLOAD, "version": "v0.1.1"})
     learner = SkillLearner(
         skills_dir=tmp_path / "skills", memory=memory_store, llm_client=llm
     )
@@ -240,10 +250,7 @@ async def test_merge_with_llm_uses_partial_mode(
     merged = await learner._merge_with_llm(existing, "do thing", ["trace step"])
 
     assert merged["version"] == "v0.1.1"
-    last = llm.messages[0][-1]
-    assert last["role"] == "assistant"
-    assert last["partial"] is True
-    assert last["content"] == "{"
+    _assert_json_mode(llm)
 
 
 def test_bump_version() -> None:

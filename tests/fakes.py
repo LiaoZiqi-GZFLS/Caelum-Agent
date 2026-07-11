@@ -44,6 +44,7 @@ class FakeLLM:
         # Public recording fields.
         self.calls: list[list[dict[str, Any]]] = []
         self.last_tools: list[Any] = []
+        self.chat_kwargs: list[dict[str, Any]] = []
         # tools holds both constructor-provided names and registered names.
         self.tools: list[str] = list(tool_names or [])
 
@@ -64,10 +65,11 @@ class FakeLLM:
         pass
 
     async def chat(
-        self, messages: list[dict[str, Any]], tools: Any = None
+        self, messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any
     ) -> Any:
         self.calls.append(messages)
         self.last_tools.append(tools)
+        self.chat_kwargs.append(kwargs)
         response: Any
         if self._chat_index < len(self._chat_queue):
             response = self._chat_queue[self._chat_index]

@@ -206,6 +206,26 @@ async def test_chat_includes_reasoning_effort_when_set():
     assert c.client.chat.completions.calls[0]["reasoning_effort"] == "low"
 
 
+@pytest.mark.asyncio
+async def test_chat_passes_response_format_when_set():
+    c = _client()
+    c.client = FakeOpenAI()
+
+    await c.chat(messages=[], response_format={"type": "json_object"})
+    assert c.client.chat.completions.calls[0]["response_format"] == {
+        "type": "json_object"
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_omits_response_format_by_default():
+    c = _client()
+    c.client = FakeOpenAI()
+
+    await c.chat(messages=[])
+    assert "response_format" not in c.client.chat.completions.calls[0]
+
+
 # ---------------------------------------------------------------------------
 # execute_tool_calls
 # ---------------------------------------------------------------------------

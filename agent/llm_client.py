@@ -125,6 +125,7 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = ...,  # type: ignore[assignment]
+        response_format: dict[str, Any] | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "model": self.config.model,
@@ -138,6 +139,10 @@ class LLMClient:
         # tools=None explicitly omits the tools key.
         if self.config.reasoning_effort is not None:
             kwargs["reasoning_effort"] = self.config.reasoning_effort
+        if response_format is not None:
+            # e.g. {"type": "json_object"} — Kimi JSON Mode. Do not combine
+            # with Partial Mode prefills (the API rejects the combination).
+            kwargs["response_format"] = response_format
         return await self.client.chat.completions.create(**kwargs)
 
     async def execute_tool_calls(

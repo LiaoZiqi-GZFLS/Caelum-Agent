@@ -23,12 +23,12 @@ from agent.memory import MemoryStore
 logger = logging.getLogger("caelum.skills")
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 
-# Kimi Partial Mode: appending an assistant message with "partial": True makes
-# the model CONTINUE the prefilled text instead of generating from scratch.
-# Prefilling "{" forces a JSON object body without markdown fences, preambles,
-# or trailing chatter. NOTE: the API response excludes the prefilled text, so
-# it must be concatenated back before parsing.
-_PARTIAL_JSON_PREFILL = "{"
+# Kimi JSON Mode: response_format={"type": "json_object"} makes the API
+# guarantee a syntactically valid JSON object in message.content, so we can
+# json.loads it directly — no markdown fences, no preambles, no Partial Mode
+# prefill hacks. Caveat from the docs: the JSON is still truncated if
+# finish_reason == "length", which json.loads rejects and we fall back on.
+_JSON_MODE = {"type": "json_object"}
 
 
 class SkillLearner:
@@ -151,26 +151,22 @@ class SkillLearner:
                 "role": "system",
                 "content": (
                     "You are a skill authoring assistant. Convert a successful "
-                    "task trace into a concise SKILL.md in JSON. The assistant "
-                    "response already begins with '{'; continue the JSON object."
+                    "task trace into a concise SKILL.md. Respond with a single "
+                    "JSON object, e.g. "
+                    '{"name": "open-notepad", "description": "...", '
+                    '"usage": "...", "steps": ["..."], "tags": "a,b", '
+                    '"version": "v0.1.0"}.'
                 ),
             },
             {
                 "role": "user",
                 "content": self._skill_prompt(task, trajectory),
             },
-            {
-                "role": "assistant",
-                "content": _PARTIAL_JSON_PREFILL,
-                "partial": True,
-            },
         ]
-        completion = await self.llm_client.chat(messages, tools=None)
-        # Partial Mode: the response is the continuation after the prefilled
-        # "{", so concatenate it back before parsing.
-        body = (completion.choices[0].message.content or "").strip()
-        data = json.loads(_PARTIAL_JSON_PREFILL + body)
-        return self._normalize_skill(data)
+        completion = await self.llm_client.chat(
+            messages, tools=None, response_format=_JSON_MODE
+        )
+        return self._normalize_skill(self._parse_json_response(completion))
 
     async def _merge_content(
         self,
@@ -196,10 +192,12 @@ class SkillLearner:
             {
                 "role": "system",
                 "content": (
-                    "Merge an existing SKILL.md with a new successful task trace. "
-                    "Preserve the best steps, remove duplicates, and bump the patch "
-                    "version. The assistant response already begins with '{'; "
-                    "continue the JSON object matching the skill schema."
+                    "Merge an existing SKILL.md with a new successful task "
+                    "trace. Preserve the best steps, remove duplicates, and "
+                    "bump the patch version. Respond with a single JSON object "
+                    "matching the skill schema: "
+                    '{"name": "...", "description": "...", "usage": "...", '
+                    '"steps": ["..."], "tags": "a,b", "version": "vX.Y.Z"}.'
                 ),
             },
             {
@@ -210,18 +208,22 @@ class SkillLearner:
                     f"New trace:\n" + "\n".join(f"- {s}" for s in trajectory)
                 ),
             },
-            {
-                "role": "assistant",
-                "content": _PARTIAL_JSON_PREFILL,
-                "partial": True,
-            },
         ]
-        completion = await self.llm_client.chat(messages, tools=None)
-        # Partial Mode: the response is the continuation after the prefilled
-        # "{", so concatenate it back before parsing.
-        body = (completion.choices[0].message.content or "").strip()
-        data = json.loads(_PARTIAL_JSON_PREFILL + body)
-        return self._normalize_skill(data)
+        completion = await self.llm_client.chat(
+            messages, tools=None, response_format=_JSON_MODE
+        )
+        return self._normalize_skill(self._parse_json_response(completion))
+
+    @staticmethod
+    def _parse_json_response(completion: Any) -> dict[str, Any]:
+        """Parse a JSON Mode completion; warns when the output was truncated."""
+        choice = completion.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            logger.warning(
+                "JSON Mode response truncated (finish_reason=length); "
+                "expect a parse failure and template fallback"
+            )
+        return json.loads((choice.message.content or "").strip())
 
     def _fallback_skill(self, task: str, trajectory: list[str]) -> dict[str, Any]:
         name = self._slugify(task)
