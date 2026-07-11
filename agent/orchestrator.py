@@ -207,9 +207,17 @@ class AgentOrchestrator:
         self._register_desktop_interact()
         self._register_complete_task()
         self._register_human_help()
-        register_read_document(
+        extractor = register_read_document(
             self.llm, self.config.llm, self.config.cache_dir_absolute()
         )
+        # Fire-and-forget quota sweep: the platform keeps uploads forever and
+        # the per-read delete is only best-effort. Only scheduled when the LLM
+        # client shares its real httpx pool (production); fakes have no .http
+        # and unit tests stay hermetic.
+        if extractor is not None and getattr(self.llm, "http", None) is not None:
+            sweep_task = asyncio.create_task(extractor.sweep_remote())
+            self._background_tasks.add(sweep_task)
+            sweep_task.add_done_callback(self._background_tasks.discard)
         register_draft_content(
             self.llm, self.config.cache_dir_absolute() / "drafts"
         )

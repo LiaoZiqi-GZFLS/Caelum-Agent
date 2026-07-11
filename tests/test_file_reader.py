@@ -39,8 +39,11 @@ class _FakeHTTP:
         self.posts: list[dict[str, Any]] = []
         self.gets: list[str] = []
         self.deletes: list[str] = []
+        self.list_payload: dict[str, Any] = {"data": []}
         self.fail_post: Exception | None = None
+        self.fail_get: Exception | None = None
         self.fail_delete: Exception | None = None
+        self.fail_delete_ids: set[str] = set()
 
     async def post(self, url: str, **kwargs: Any) -> _FakeResponse:
         if self.fail_post is not None:
@@ -49,12 +52,18 @@ class _FakeHTTP:
         return _FakeResponse({"id": "file-abc123"})
 
     async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+        if self.fail_get is not None:
+            raise self.fail_get
         self.gets.append(url)
+        if url.endswith("/files"):
+            return _FakeResponse(json_data=self.list_payload)
         return _FakeResponse(text=self.content)
 
     async def delete(self, url: str, **kwargs: Any) -> _FakeResponse:
         if self.fail_delete is not None:
             raise self.fail_delete
+        if any(bad in url for bad in self.fail_delete_ids):
+            raise RuntimeError("delete failed")
         self.deletes.append(url)
         return _FakeResponse({"deleted": True})
 
@@ -214,18 +223,70 @@ def test_register_read_document_registers_tool_when_enabled(tmp_path: Path) -> N
     llm = _RecordingLLM()
     config = LLMConfig(api_key="sk-test", enable_file_extract=True)
 
-    register_read_document(llm, config, tmp_path / "cache")
+    extractor = register_read_document(llm, config, tmp_path / "cache")
 
     assert "ReadDocument" in llm.registered
     schema = llm.registered["ReadDocument"]["schema"]
     assert set(schema["properties"]) >= {"path", "offset", "limit"}
     assert schema["required"] == ["path"]
+    assert isinstance(extractor, FileExtractor)
 
 
 def test_register_read_document_skips_when_disabled(tmp_path: Path) -> None:
     llm = _RecordingLLM()
     config = LLMConfig(api_key="sk-test", enable_file_extract=False)
 
-    register_read_document(llm, config, tmp_path / "cache")
+    extractor = register_read_document(llm, config, tmp_path / "cache")
 
     assert llm.registered == {}
+    assert extractor is None
+
+
+@pytest.mark.asyncio
+async def test_sweep_deletes_file_extract_files_only(tmp_path: Path) -> None:
+    http = _FakeHTTP()
+    http.list_payload = {
+        "data": [
+            {"id": "f1", "purpose": "file-extract"},
+            {"id": "f2", "purpose": "image"},
+            {"id": "f3", "purpose": "file-extract"},
+        ]
+    }
+    extractor = _extractor(tmp_path, http)
+
+    deleted = await extractor.sweep_remote()
+
+    assert deleted == 2
+    assert http.deletes == [
+        "https://api.moonshot.cn/v1/files/f1",
+        "https://api.moonshot.cn/v1/files/f3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sweep_tolerates_individual_delete_failures(tmp_path: Path) -> None:
+    http = _FakeHTTP()
+    http.list_payload = {
+        "data": [
+            {"id": "f1", "purpose": "file-extract"},
+            {"id": "f2", "purpose": "file-extract"},
+        ]
+    }
+    http.fail_delete_ids = {"f1"}
+    extractor = _extractor(tmp_path, http)
+
+    deleted = await extractor.sweep_remote()
+
+    assert deleted == 1  # f2 still deleted despite f1 failing
+
+
+@pytest.mark.asyncio
+async def test_sweep_list_failure_returns_zero(tmp_path: Path) -> None:
+    http = _FakeHTTP()
+    http.fail_get = RuntimeError("network down")
+    extractor = _extractor(tmp_path, http)
+
+    deleted = await extractor.sweep_remote()  # must not raise
+
+    assert deleted == 0
+    assert http.deletes == []

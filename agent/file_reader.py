@@ -94,6 +94,42 @@ class FileExtractor:
         cache.write_text(text, encoding="utf-8")
         return text
 
+    async def sweep_remote(self) -> int:
+        """Delete all leftover file-extract uploads on the account.
+
+        The platform keeps uploaded files indefinitely against the 1000-file /
+        10GB quota, and our per-read delete is only best-effort — so leaked
+        files accumulate forever. file-extract uploads are throwaway by design
+        (the extracted text is cached locally by sha256), so deleting every
+        one of them is safe. Returns the number of files deleted; never raises.
+        """
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            resp = await self.http.get(f"{self.base_url}/files", headers=headers)
+            resp.raise_for_status()
+            files = resp.json().get("data", [])
+        except Exception as exc:
+            logger.warning("File sweep: listing remote files failed: %s", exc)
+            return 0
+        deleted = 0
+        for entry in files:
+            if entry.get("purpose") != "file-extract":
+                continue
+            try:
+                await self.http.delete(
+                    f"{self.base_url}/files/{entry['id']}", headers=headers
+                )
+                deleted += 1
+            except Exception as exc:
+                logger.warning(
+                    "File sweep: failed to delete %s: %s", entry.get("id"), exc
+                )
+        if deleted:
+            logger.info(
+                "File sweep: deleted %d leftover file-extract upload(s)", deleted
+            )
+        return deleted
+
     async def _upload_and_extract(self, path: Path) -> str:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         with path.open("rb") as fh:
@@ -170,10 +206,16 @@ READ_DOCUMENT_SCHEMA = {
 }
 
 
-def register_read_document(llm: Any, config: LLMConfig, cache_dir: Path | str) -> None:
-    """Register the ReadDocument local function tool, if enabled in config."""
+def register_read_document(
+    llm: Any, config: LLMConfig, cache_dir: Path | str
+) -> FileExtractor | None:
+    """Register the ReadDocument local function tool, if enabled in config.
+
+    Returns the FileExtractor so the caller can schedule a remote sweep; None
+    when the feature is disabled.
+    """
     if not config.enable_file_extract:
-        return
+        return None
     # Reuse the LLM client's httpx pool when available (production); the tool
     # tests inject their own extractor so this path only wires wiring.
     http = getattr(llm, "http", None)
@@ -195,3 +237,4 @@ def register_read_document(llm: Any, config: LLMConfig, cache_dir: Path | str) -
             "with the suggested offset to continue."
         ),
     )
+    return extractor
