@@ -212,3 +212,31 @@ def test_mcp_status_line_marks_connected_and_failed():
     assert "failed" in out
     assert "✓" in out
     assert "✗" in out
+
+
+def test_ask_choice_non_tty_returns_none(monkeypatch):
+    presenter, _ = _make_presenter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def boom(*a, **kw):
+        raise AssertionError("menu must not run on a non-TTY")
+
+    monkeypatch.setattr("agent.choice_menu.ask_choice", boom)
+    assert presenter.ask_choice("q", ["a", "b"]) is None
+
+
+def test_ask_choice_suspends_spinner(monkeypatch):
+    presenter, _ = _make_presenter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    seen = {}
+
+    def fake_menu(question, options, console):
+        seen["status_during_menu"] = presenter._status
+        return "是，已完成登录"
+
+    monkeypatch.setattr("agent.choice_menu.ask_choice", fake_menu)
+    presenter._start_status("Thinking…")
+    assert presenter.ask_choice("q", ["a", "b"]) == "是，已完成登录"
+    assert seen["status_during_menu"] is None  # spinner suspended while asking
+    assert presenter._status is not None  # restored afterwards
+    presenter._stop_status()

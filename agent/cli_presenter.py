@@ -23,6 +23,7 @@ from rich.prompt import Confirm
 from rich.status import Status
 from rich.text import Text
 
+from agent import choice_menu
 from eventbus import EventBus
 from eventbus.events import (
     AgentStateChanged,
@@ -174,6 +175,26 @@ class CLIPresenter:
                 line.append("✗ ", style=STYLE_ERR)
                 line.append(f"{name} (failed)")
         self.console.print(line)
+
+    def ask_choice(self, question: str, options: list[str]) -> str | None:
+        """Ask the human a multiple-choice question via the raw console menu.
+
+        Returns the chosen/typed text, or None on cancel / non-TTY. Suspends
+        the spinner exactly like confirm() so the menu owns the terminal.
+        """
+        self.console.print()  # separate the menu from tool output
+        if not sys.stdin.isatty():
+            self.console.print(
+                "[dim]Non-interactive: cannot ask the human; skipping.[/]"
+            )
+            return None
+        was_running = self._status is not None
+        self._stop_status()
+        try:
+            return choice_menu.ask_choice(question, options, self.console)
+        finally:
+            if was_running:
+                self._start_status("Thinking…")
 
     # -- status helpers -------------------------------------------------------
 

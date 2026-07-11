@@ -119,6 +119,9 @@ class _ReplAgent:
     def set_human_confirmation_callback(self, cb) -> None:
         self.cb = cb
 
+    def set_human_question_callback(self, cb) -> None:
+        self.help_cb = cb
+
     async def initialize(self) -> None:
         self.initialized = True
 
@@ -359,3 +362,39 @@ async def test_presenter_cleared_when_agent_construction_fails(monkeypatch, tmp_
         await main.main([])
 
     assert main._presenter is None
+
+
+# ---------------------------------------------------------------------------
+# ask_human_interactive
+# ---------------------------------------------------------------------------
+
+def test_ask_human_interactive_non_tty_returns_none(monkeypatch):
+    monkeypatch.setattr(main, "_presenter", None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert main.ask_human_interactive("q", ["a", "b"]) is None
+
+
+def test_ask_human_interactive_delegates_to_presenter(monkeypatch):
+    seen = {}
+
+    def fake_ask_choice(q, o):
+        seen["call"] = (q, o)
+        return "是"
+
+    monkeypatch.setattr(main, "_presenter", SimpleNamespace(ask_choice=fake_ask_choice))
+    assert main.ask_human_interactive("q", ["a", "b"]) == "是"
+    assert seen["call"] == ("q", ["a", "b"])
+
+
+def test_ask_human_interactive_legacy_number_choice(monkeypatch, capsys):
+    monkeypatch.setattr(main, "_presenter", None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "2")
+    assert main.ask_human_interactive("q", ["a", "b"]) == "b"
+
+
+def test_ask_human_interactive_legacy_free_text(monkeypatch, capsys):
+    monkeypatch.setattr(main, "_presenter", None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "帮我点跳过")
+    assert main.ask_human_interactive("q", ["a", "b"]) == "帮我点跳过"

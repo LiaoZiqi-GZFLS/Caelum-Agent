@@ -132,6 +132,34 @@ def confirm_interactive(summary: str, action: dict[str, Any]) -> bool:
     return answer in {"y", "yes"}
 
 
+def ask_human_interactive(question: str, options: list[str]) -> str | None:
+    """Human-question callback for RequestHumanHelp.
+
+    Delegates to the presenter's up/down menu when one is installed;
+    otherwise falls back to a numbered input() prompt. In a non-TTY it
+    prints a warning and returns None (treated as "no answer").
+    """
+    if _presenter is not None:
+        return _presenter.ask_choice(question, options)
+    print(f"\n[human help] {question}")
+    if not sys.stdin.isatty():
+        print(
+            "[warning] Non-interactive mode: cannot ask the human; "
+            "treating the question as unanswered."
+        )
+        return None
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}. {opt}")
+    print(f"  {len(options) + 1}. type something")
+    try:
+        answer = input("Choose a number or type a reply: ").strip()
+    except EOFError:
+        return None
+    if answer.isdigit() and 1 <= int(answer) <= len(options):
+        return options[int(answer) - 1]
+    return answer or None
+
+
 async def _run_one_shot(agent: AgentOrchestrator, task: str, logger: Any) -> int:
     try:
         result = await agent.run_task(task)
@@ -234,6 +262,7 @@ async def main(argv: list[str] | None = None) -> int:
         kill_switch = KillSwitch(eventbus)
         agent = AgentOrchestrator(config, eventbus, llm, mcp, kill_switch)
         agent.set_human_confirmation_callback(confirm_interactive)
+        agent.set_human_question_callback(ask_human_interactive)
 
         if args.yes_destructive:
             agent.security.auto_approve = True
