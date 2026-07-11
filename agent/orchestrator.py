@@ -15,6 +15,7 @@ import httpx
 import openai
 
 from agent.config import Config
+from agent.file_reader import register_read_document
 from agent.kill_switch import KillSwitch
 from agent.kimi_memory import KimiMemoryClient
 from agent.llm_client import LLMClient
@@ -205,6 +206,9 @@ class AgentOrchestrator:
         self._register_desktop_interact()
         self._register_complete_task()
         self._register_human_help()
+        register_read_document(
+            self.llm, self.config.llm, self.config.cache_dir_absolute()
+        )
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
 

@@ -22,6 +22,9 @@ class LLMConfig(BaseModel):
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     enable_builtin_tools: bool = True
     builtin_tools: list[str] = Field(default_factory=list)
+    # Register the ReadDocument tool (Kimi Files API file-extract) for binary
+    # documents (PDF/DOCX/PPTX/EPUB/XLSX). Disable to keep documents local-only.
+    enable_file_extract: bool = True
 
     @field_validator("model")
     @classmethod

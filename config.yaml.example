@@ -12,6 +12,12 @@ llm:
   # reasoning_effort: minimal
   # Set to true to include Kimi's built-in Formula tools.
   enable_builtin_tools: true
+  # Register the ReadDocument tool: uploads binary documents (PDF/DOCX/PPTX/
+  # EPUB/XLSX) to the Kimi Files API for text extraction. The file content
+  # leaves the machine (same trust level as screenshots sent to Kimi);
+  # extracted text is cached locally by file hash. Set to false to keep
+  # documents local-only.
+  enable_file_extract: true
   # Which Formula tools to register. Comment out tools you do not want.
   # NOTE: Formula URIs use hyphens (e.g. code-runner, web-search); the registered
   #       tool name uses underscores (code_runner, web_search). The local
