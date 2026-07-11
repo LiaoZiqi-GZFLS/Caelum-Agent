@@ -26,6 +26,7 @@ from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.skills import SkillLearner
 from agent.state_machine import AgentStateMachine
+from agent.task_list import TaskList, register_task_list
 from agent.tools import (
     COMPLETE_TASK_SCHEMA,
     DESKTOP_INTERACT_SCHEMA,
@@ -132,6 +133,10 @@ class AgentOrchestrator:
             similarity_threshold=config.skills.similarity_threshold,
         )
         self.history: list[dict[str, Any]] = []
+        # Model-managed task list (UpdateTaskList tool); re-injected into the
+        # history every loop so long-task plans stay salient. Cleared at the
+        # start of each run_task and self-clears when all items complete.
+        self.task_list = TaskList()
         self.task_id: str | None = None
         self.current_instruction: str = ""
         self.last_action_summary: str = ""
@@ -215,6 +220,7 @@ class AgentOrchestrator:
         self._register_desktop_interact()
         self._register_complete_task()
         self._register_human_help()
+        register_task_list(self.llm, self.task_list)
         extractor = register_read_document(
             self.llm, self.config.llm, self.config.cache_dir_absolute()
         )
@@ -739,6 +745,7 @@ class AgentOrchestrator:
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
         self._pending_som_followup = None
+        self.task_list.clear()
         self.action_traces = []
         # Tracks whether this task has invoked any tool that touches the screen
         # (windows/playwright MCP, or the desktop_interact local tool). Pure
@@ -798,6 +805,13 @@ class AgentOrchestrator:
                 "role": "user",
                 "content": self._format_perception(perception),
             })
+            # Keep the model-managed task list salient: re-inject a compact
+            # render every loop so the plan isn't buried under tool results.
+            if self.task_list.items:
+                self.history.append({
+                    "role": "user",
+                    "content": self.task_list.render(),
+                })
 
             # Check for total rejection by verifier (all candidates blocked).
             if perception.blocked_count > 0 and not perception.som_annotations:

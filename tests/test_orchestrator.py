@@ -1918,3 +1918,91 @@ async def test_run_task_extends_limit_then_completes(config, eventbus, killswitc
         "Approach confirmed sound" in str(m.get("content", ""))
         for m in agent.history
     )
+
+
+# ---------------------------------------------------------------------------
+# Task list injection
+# ---------------------------------------------------------------------------
+
+
+class _TaskListLLM(FakeLLM):
+    """FakeLLM that routes UpdateTaskList calls to the real registered handler."""
+
+    def __init__(self, chat_responses: list[Any]) -> None:
+        super().__init__(chat_responses)
+        self._handlers: dict[str, Any] = {}
+
+    def register_local_function(self, name: str, fn: Any, **kwargs: Any) -> None:
+        super().register_local_function(name, fn, **kwargs)
+        self._handlers[name] = fn
+
+    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
+        import json as _json
+
+        results = []
+        for call in calls:
+            handler = self._handlers.get(call.function.name)
+            if handler is None:
+                results.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": "{}"}
+                )
+                continue
+            args = _json.loads(call.function.arguments)
+            results.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": handler(**args),
+            })
+        return results
+
+
+@pytest.mark.asyncio
+async def test_run_task_injects_task_list_each_loop(config, eventbus, killswitch):
+    from agent.task_list import register_task_list
+
+    llm = _TaskListLLM([
+        _message("planning", tool_calls=[_tool_call("UpdateTaskList", {"tasks": [
+            {"content": "step one", "status": "in_progress"},
+            {"content": "step two", "status": "pending"},
+        ]})]),
+        _message("working."),       # inner think loop ends round 1
+        _message("NO"),             # round 1 verify fails
+        _message("reflection"),     # round 1 reflect
+        _message("done."),          # round 2 think, no tools
+        _message("YES"),            # round 2 verify passes
+        _message("final answer."),  # final answer -> COMPLETED
+    ])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 6),
+    )
+    register_task_list(llm, agent.task_list)
+
+    result = await agent.run_task("two step task")
+
+    assert result == "final answer."
+    # The list created in round 1 was injected as a user message visible to
+    # the model in round 2.
+    injections = [
+        m for m in agent.history
+        if m.get("role") == "user" and "Task list:" in str(m.get("content", ""))
+    ]
+    assert injections, "task list was never injected into the history"
+    assert "step two" in injections[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_starts_with_cleared_task_list(config, eventbus, killswitch):
+    llm = FakeLLM([_message("done."), _message("YES"), _message("finished.")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 3),
+    )
+    agent.task_list.update([{"content": "stale", "status": "pending"}])
+
+    await agent.run_task("fresh task")
+
+    # The stale entry must not leak into the new task's injections.
+    assert all(
+        "stale" not in str(m.get("content", "")) for m in agent.history
+    )
