@@ -385,6 +385,82 @@ async def test_system_prompt_guides_complete_task(config, eventbus, killswitch):
 
 
 @pytest.mark.asyncio
+async def test_system_prompt_escalation_rule_and_selfwindow_policy(config, eventbus, killswitch):
+    # Two behavioral gaps prompted this: the model treated PreviewPoints as a
+    # forbidden "last resort" and kept retrying failed clicks, and it never hid
+    # its own console even when the console covered the target. The system
+    # prompt must now state both policies explicitly.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    llm = _CompletingLLM(
+        agent,
+        [_message("hi", tool_calls=[_tool_call("CompleteTask", {"answer": "hi"})])],
+    )
+    _wire_complete_task(agent, llm)
+
+    await agent.run_task("hi")
+
+    system_content = agent.history[0]["content"]
+    # Failure-escalation rule: two failed attempts -> switch locator strategy.
+    assert "ESCALATE ON FAILURE" in system_content
+    assert "fails twice in a row" in system_content
+    # PreviewPoints is a normal step in the chain, not a forbidden last resort.
+    assert "LAST RESORT" not in system_content
+    # SelfWindow policy: hide the console proactively before desktop work.
+    assert "SelfWindow(action='hide')" in system_content
+    assert "cover target apps" in system_content
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_encourages_web_search_when_unsure(config, eventbus, killswitch):
+    # When the model knows too little about the target (unfamiliar app/site,
+    # a named button it cannot find, an unclear repeated failure) the prompt
+    # must push it to search the web BEFORE blind trial-and-error. With the
+    # web_search Formula tool registered, the prompt names it directly.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    llm = _CompletingLLM(
+        agent,
+        [_message("hi", tool_calls=[_tool_call("CompleteTask", {"answer": "hi"})])],
+    )
+    _wire_complete_task(agent, llm)
+    llm.tools.append("web_search")
+
+    await agent.run_task("hi")
+
+    system_content = agent.history[0]["content"]
+    assert "call web_search" in system_content
+    assert "blind trial-and-error" in system_content
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_search_fallback_without_web_search_tool(config, eventbus, killswitch):
+    # Without the Formula web_search tool the prompt must still push a web
+    # search, via Playwright on a search engine — never leave the model with
+    # only blind trial-and-error.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    llm = _CompletingLLM(
+        agent,
+        [_message("hi", tool_calls=[_tool_call("CompleteTask", {"answer": "hi"})])],
+    )
+    _wire_complete_task(agent, llm)
+
+    await agent.run_task("hi")
+
+    system_content = agent.history[0]["content"]
+    assert "call web_search" not in system_content
+    assert "blind trial-and-error" in system_content
+    assert "search engine" in system_content
+
+
+@pytest.mark.asyncio
 async def test_system_prompt_non_interactive_forbids_human_help(config, eventbus, killswitch):
     # Piped/scripted runs must tell the model up front that no human can
     # answer, so it skips RequestHumanHelp instead of burning a round-trip.
@@ -1911,6 +1987,116 @@ async def test_run_task_no_nudge_when_task_list_exists(config, eventbus, killswi
         and "UpdateTaskList" in str(m.get("content", ""))
     ]
     assert nudges == []
+
+
+# ---------------------------------------------------------------------------
+# Failure-escalation nudge (two failed UI actions -> change locator strategy)
+# ---------------------------------------------------------------------------
+
+_ESCALATION_PHRASE = "Do NOT retry the same call"
+
+
+def _click_fail_script(fail_rounds: int = 2):
+    """LLM script: failing windows__Click rounds, then a successful query that
+    verifies and ends the task. Each failing round consumes THREE chats —
+    _think_and_act re-chats after tool execution, then _verify short-circuits
+    on _round_tool_failed and _reflect() chats once."""
+    script = []
+    for _ in range(fail_rounds):
+        script.append(
+            _message("Click.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})])
+        )
+        script.append(_message("No further action."))  # post-tool follow-up chat
+        script.append(_message("Reflecting on the miss."))  # _reflect chat
+    script += [
+        _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        _message("Listed."),  # post-tool follow-up chat
+        _message("YES"),  # _verify chat
+        _message("Found a.txt."),  # _final_answer chat
+    ]
+    return script
+
+
+def _click_fail_mcp() -> FakeMCP:
+    mcp = FakeMCP([
+        {"server": "windows", "name": "Click", "description": "", "schema": {}},
+        {"server": "filesystem", "name": "list_directory", "description": "", "schema": {}},
+    ])
+    mcp.set_result("windows", "Click", ToolResult(success=False, content="[error] missed"))
+    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
+    return mcp
+
+
+@pytest.mark.asyncio
+async def test_run_task_escalation_hint_after_two_ui_failures(config, eventbus, killswitch):
+    # After the 2nd consecutive UI-tool failure the next perception must carry
+    # an escalation hint pushing the model toward NearbyLabels/ZoomRegion/
+    # PreviewPoints instead of retrying the same failing call.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(_click_fail_script(2), default_chat=_message("Working.")),
+        _click_fail_mcp(), killswitch,
+        perception=FakePerception([_blank_perception()] * 12),
+    )
+    config.kill_switch.action_failure_threshold = 5  # survive past 2 failures
+    config.kill_switch.same_ui_loop_threshold = 99  # not what this test exercises
+
+    await agent.run_task("click the button")
+
+    hints = [
+        m for m in agent.history
+        if m.get("role") == "user" and _ESCALATION_PHRASE in str(m.get("content", ""))
+    ]
+    assert len(hints) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_task_no_escalation_hint_after_single_failure(config, eventbus, killswitch):
+    # One failure then a success: no hint — the model only needs pushing after
+    # a repeated failure.
+    script = [
+        _message("Click.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})]),
+        _message("No further action."),  # post-tool follow-up chat
+        _message("Reflecting on the miss."),  # _reflect chat
+        _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        _message("Listed."),  # post-tool follow-up chat
+        _message("YES"),
+        _message("Found a.txt."),
+    ]
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(script, default_chat=_message("Working.")),
+        _click_fail_mcp(), killswitch,
+        perception=FakePerception([_blank_perception()] * 8),
+    )
+    config.kill_switch.same_ui_loop_threshold = 99
+
+    await agent.run_task("click the button")
+
+    hints = [
+        m for m in agent.history
+        if m.get("role") == "user" and _ESCALATION_PHRASE in str(m.get("content", ""))
+    ]
+    assert hints == []
+
+
+@pytest.mark.asyncio
+async def test_run_task_escalation_hint_once_per_streak(config, eventbus, killswitch):
+    # Four consecutive failures: the hint fires once per failure streak, not on
+    # every round — nagging the same text burns tokens without adding signal.
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(_click_fail_script(4), default_chat=_message("Working.")),
+        _click_fail_mcp(), killswitch,
+        perception=FakePerception([_blank_perception()] * 16),
+    )
+    config.kill_switch.action_failure_threshold = 5
+    config.kill_switch.same_ui_loop_threshold = 99
+
+    await agent.run_task("click the button")
+
+    hints = [
+        m for m in agent.history
+        if m.get("role") == "user" and _ESCALATION_PHRASE in str(m.get("content", ""))
+    ]
+    assert len(hints) == 1
 
 
 # ---------------------------------------------------------------------------

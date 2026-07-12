@@ -99,6 +99,21 @@ _MAX_LOOP_LIMIT = 50
 # matters more as the context grows.
 _TASK_LIST_NUDGE_LOOP = 5
 
+# After this many consecutive UI-tool failures, the next perception carries a
+# one-time escalation hint: change locator strategy instead of retrying the
+# same failing call. Fires once per failure streak (a success rearms it).
+_FAILURE_ESCALATION_THRESHOLD = 2
+_FAILURE_ESCALATION_NOTICE = (
+    "Two actions in a row have FAILED. Do NOT retry the same call — change how "
+    "you locate the target NOW: NearbyLabels(label=N or loc=[x, y]) to "
+    "triangulate from the nearest markers, "
+    "ZoomRegion(size='small'|'medium'|'large', label=N or loc=[x, y]) to "
+    "re-perceive the area at full resolution, or "
+    "PreviewPoints(points=[[x, y], ...]) to draw your coordinate guesses as "
+    "numbered markers, adjust until one sits on the target, then click with "
+    "windows__Click(loc=[x, y])."
+)
+
 # Argument keys whose values must never reach the audit log in clear text
 # (e.g. a password typed via windows/Type).
 _SENSITIVE_ARG_KEYS = frozenset(
@@ -183,6 +198,11 @@ class AgentOrchestrator:
         self._task_list_nudged = False
         # Loop-extension confirmation, merged into the next perception message.
         self._pending_loop_notice: str | None = None
+        # Failure-escalation hint: merged into the next perception message once
+        # two consecutive UI-tool actions fail; fires once per failure streak
+        # (the flag rearms when any action succeeds).
+        self._pending_failure_notice: str | None = None
+        self._failure_nudge_active = False
         self.task_id: str | None = None
         self.current_instruction: str = ""
         self.last_action_summary: str = ""
@@ -1090,6 +1110,7 @@ class AgentOrchestrator:
         self._cancel_event.clear()
         self.consecutive_action_failures = 0
         self.consecutive_api_failures = 0
+        self._failure_nudge_active = False
         self._last_batch_signature = None
         self._last_batch_all_succeeded = False
         # Ensure a fresh operational state for each new task.
@@ -1123,6 +1144,25 @@ class AgentOrchestrator:
                 "what the user must do manually.\n\n"
             )
 
+        if "web_search" in self.llm.tool_names():
+            search_how = (
+                "call web_search with a specific query (app or site name plus "
+                "what you need)"
+            )
+        else:
+            search_how = (
+                "open a search engine with playwright__browser_navigate (e.g. "
+                "https://www.bing.com) and look it up"
+            )
+        search_section = (
+            "## When you don't know enough about the target\n"
+            "If the task involves an app, website, or workflow you are unsure "
+            "about — you do not recognize the app, you cannot find a button or "
+            "menu the user named, or a step keeps failing for an unclear reason "
+            "— search the web BEFORE more blind trial-and-error: "
+            f"{search_how}. A quick search is cheaper than five failed guesses.\n\n"
+        )
+
         system_content = (
             "You are Caelum-Agent, a Windows desktop automation assistant. "
             "Use the provided tools to interact with the browser and desktop. "
@@ -1141,10 +1181,13 @@ class AgentOrchestrator:
             "that area at original resolution with fresh markers. "
             "NearbyLabels(label=N or loc=[x, y]) lists the closest markers to a point so you "
             "can pick the nearest one.\n"
-            "- LAST RESORT — when neither UIA labels nor DesktopInteract markers locate the target: "
+            "- When no marker covers your target: "
             "PreviewPoints(points=[[x, y], ...]) draws your coordinate guesses as numbered markers "
             "on the screenshot and shows them back; adjust until a marker sits on the target, then "
-            "click with windows__Click(loc=[x, y]).\n\n"
+            "click with windows__Click(loc=[x, y]).\n"
+            "- ESCALATE ON FAILURE: if locating or clicking a target fails twice in a row, do NOT "
+            "retry the same call — move one step down this chain (NearbyLabels -> ZoomRegion -> "
+            "PreviewPoints) instead.\n\n"
             "## Working with desktop (Windows-MCP) tools\n"
             "Before clicking or typing in a desktop app you MUST call windows__Snapshot first to "
             "get the target element's [id], then pass it as `label`:\n"
@@ -1159,6 +1202,13 @@ class AgentOrchestrator:
             "annotated screenshot's numbered markers work on any app — pick the marker on your "
             "target with DesktopInteract(label=N). If you cannot see inside the app at all (empty "
             "tree AND no clear screenshot), call CaptureWindow(title) to view it directly.\n\n"
+            "## Your own console window\n"
+            "Your CLI console is itself a window on the desktop: it can cover target apps, "
+            "clutter screenshots, and pollute the UI tree. At the START of any "
+            "desktop-operation task — and whenever a screenshot shows it in the way — "
+            "call SelfWindow(action='hide'). Hiding is always safe: the window "
+            "auto-restores when the task ends or human help is requested.\n\n"
+            + search_section +
             "## Working files\n"
             f"Save every intermediate or scratch file (page snapshots, scraped "
             f"content, temp JSON/CSV/Markdown, downloaded artifacts) under "
@@ -1211,6 +1261,7 @@ class AgentOrchestrator:
         self.task_list.clear()
         self._task_list_nudged = False
         self._pending_loop_notice = None
+        self._pending_failure_notice = None
         self.action_traces = []
         # Tracks whether this task has invoked any tool that touches the screen
         # (windows/playwright MCP, or the desktop_interact local tool). Pure
@@ -1276,6 +1327,11 @@ class AgentOrchestrator:
                     {"type": "text", "text": self._pending_loop_notice}
                 )
                 self._pending_loop_notice = None
+            if self._pending_failure_notice is not None:
+                perception_content.append(
+                    {"type": "text", "text": self._pending_failure_notice}
+                )
+                self._pending_failure_notice = None
             # Keep the model-managed task list salient: re-inject a compact
             # render every loop so the plan isn't buried under tool results.
             if self.task_list.items:
@@ -1380,7 +1436,7 @@ class AgentOrchestrator:
                 await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
                 return str(exc)
             except Exception as exc:
-                self.consecutive_action_failures += 1
+                self._register_action_failure()
                 await self.reflection.record(
                     task_summary=user_input,
                     failure_reason=str(exc),
@@ -1498,6 +1554,21 @@ class AgentOrchestrator:
             sig.append((name, json.dumps(args, sort_keys=True, ensure_ascii=False)))
         return tuple(sig)
 
+    def _register_action_failure(self) -> None:
+        """Count one failed action; after two consecutive UI failures, queue a
+        one-time escalation hint that rides the next perception message. The
+        hint pushes the model to change locator strategy (NearbyLabels ->
+        ZoomRegion -> PreviewPoints) instead of retrying the same failing
+        call; any successful action rearms it for the next streak."""
+        self.consecutive_action_failures += 1
+        if (
+            self._used_ui_tool
+            and not self._failure_nudge_active
+            and self.consecutive_action_failures >= _FAILURE_ESCALATION_THRESHOLD
+        ):
+            self._failure_nudge_active = True
+            self._pending_failure_notice = _FAILURE_ESCALATION_NOTICE
+
     async def _execute_tool_calls(self, tool_calls: list[Any]) -> list[dict[str, Any]]:
         sig = self._batch_signature(tool_calls)
         if sig and sig == self._last_batch_signature and self._last_batch_all_succeeded:
@@ -1547,7 +1618,7 @@ class AgentOrchestrator:
                         {"server": "local", "tool": name, "args": args},
                     )
                     if not approval.allowed:
-                        self.consecutive_action_failures += 1
+                        self._register_action_failure()
                         self._round_tool_failed = True
                         results.append({
                             "role": "tool",
@@ -1590,7 +1661,7 @@ class AgentOrchestrator:
 
             server, tool_name = self._resolve_mcp_tool(name)
             if not server:
-                self.consecutive_action_failures += 1
+                self._register_action_failure()
                 results.append({
                     "role": "tool",
                     "tool_call_id": call.id,
@@ -1606,7 +1677,7 @@ class AgentOrchestrator:
                 and tool_name in _POSITIONAL_WINDOWS_TOOLS
                 and not (args.get("loc") or args.get("label") is not None)
             ):
-                self.consecutive_action_failures += 1
+                self._register_action_failure()
                 self._round_tool_failed = True
                 results.append({
                     "role": "tool",
@@ -1684,10 +1755,11 @@ class AgentOrchestrator:
             self.last_action_summary = f"{server}/{tool_name}: {content[:200]}"
             self.action_traces.append(self.last_action_summary)
             if not success:
-                self.consecutive_action_failures += 1
+                self._register_action_failure()
                 self._round_tool_failed = True
             else:
                 self.consecutive_action_failures = 0
+                self._failure_nudge_active = False
             results.append({
                 "role": "tool",
                 "tool_call_id": call.id,
