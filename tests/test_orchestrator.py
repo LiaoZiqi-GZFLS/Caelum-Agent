@@ -2336,3 +2336,29 @@ async def test_local_tool_calls_emit_presenter_events(config, eventbus, killswit
     completed = [e for e in events if isinstance(e, ToolCallCompleted)]
     assert any(e.server == "local" and e.tool_name == "ViewMedia" for e in requested)
     assert any(e.server == "local" and e.tool_name == "ViewMedia" for e in completed)
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_prefers_desktop_interact_when_uia_fails(
+    config, eventbus, killswitch
+):
+    """The system prompt must steer the model to DesktopInteract when the UIA
+    tree is missing/inaccurate (Qt/Electron/custom-drawn apps, stale labels)."""
+    llm = FakeLLM([_message("hi"), _message("YES"), _message("done.")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.run_task("click something")
+
+    system = agent.history[0]["content"]
+    # Explicit fallback triggers from UIA failure to vision interaction.
+    assert "Qt" in system or "Electron" in system
+    lowered = system.lower()
+    assert "snapshot" in lowered
+    assert "desktopinteract" in lowered
+    # The preference must be stated as a decision rule, not a bare mention:
+    # DesktopInteract guidance must appear AFTER (i.e. as the fallback for)
+    # the Snapshot guidance.
+    assert system.rfind("DesktopInteract") > system.find("windows__Snapshot")

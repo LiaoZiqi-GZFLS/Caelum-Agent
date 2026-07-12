@@ -489,10 +489,14 @@ class AgentOrchestrator:
             self._desktop_interact_impl,
             schema=DESKTOP_INTERACT_SCHEMA,
             description=(
-                "Interact with a UI element identified by a SoM (Set-of-Mark) label number. "
-                "The screenshot shows numbered red circles on detected elements. "
-                "Use the label number to click, double-click, right-click, type text, or scroll. "
-                "For 'type' action, provide the 'text' parameter."
+                "Interact with a UI element identified by a SoM (Set-of-Mark) label number "
+                "from the annotated screenshot (numbered red circles on detected elements). "
+                "This is VISION-based: it works on ANY app, including ones whose UIA tree is "
+                "missing, empty, or inaccurate (Qt apps like WeChat/QQ, Electron apps, games, "
+                "custom-drawn controls). PREFER this over windows__Click/Type whenever a SoM "
+                "marker is visible on your target, and fall back to it when windows__Snapshot "
+                "shows no usable element or label-based clicks land wrong. "
+                "Actions: click, double_click, right_click, type (needs text=), scroll_down/up."
             ),
         )
 
@@ -797,7 +801,14 @@ class AgentOrchestrator:
             "- windows__Click(label=<id>)  — never call Click with no loc/label.\n"
             "- windows__Type(text='...', label=<id>)  — Type with no loc/label fails.\n"
             "Example: Snapshot shows [5] Edit 'Text Editor' -> Type(text='hello', label=5).\n"
-            "Use DesktopInteract(label=N, ...) when you can see a SoM marker instead.\n\n"
+            "WHEN UIA FAILS, SWITCH TO VISION: windows__Snapshot relies on the app's UIA tree, "
+            "which is often missing, empty, or inaccurate for Qt apps (WeChat/QQ), Electron apps, "
+            "and custom-drawn controls. If Snapshot shows no element matching your target, its "
+            "labels look wrong (clicking a label hits the wrong element), or a label expires "
+            "('out of range') after re-snapshotting, STOP fighting UIA and use "
+            "DesktopInteract(label=N, ...) with the SoM marker on your target instead — it is "
+            "vision-based and works on any app. If you cannot see inside the app at all (empty "
+            "tree AND no clear screenshot), call CaptureWindow(title) to view it directly.\n\n"
             "## Working files\n"
             f"Save every intermediate or scratch file (page snapshots, scraped "
             f"content, temp JSON/CSV/Markdown, downloaded artifacts) under "
