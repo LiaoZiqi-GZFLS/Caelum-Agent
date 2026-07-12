@@ -117,3 +117,45 @@ def test_skills_sync_and_search(memory_store, tmp_path: Path):
     results = memory_store.search_skills("click element", top_k=1)
     assert len(results) == 1
     assert results[0]["name"] == "click"
+
+
+def test_skill_embedding_function_pinned_to_cpu(tmp_path: Path, monkeypatch):
+    """The ChromaDB skill collection must embed on CPUExecutionProvider.
+
+    After setup.py swaps onnxruntime for onnxruntime-directml, ChromaDB's
+    default provider list puts DmlExecutionProvider first, and two
+    concurrent DirectML sessions (this embedding model + RapidOCR's) crash
+    onnxruntime natively with an access violation (0xc0000005; reproduced by
+    scripts/repro_dml_crash.py --dml-embedding). The all-MiniLM-L6-v2 model
+    is tiny, so CPU embedding costs nothing.
+    """
+    captured: dict[str, Any] = {}
+
+    class FakeCollection:
+        def upsert(self, **kwargs: Any) -> None: ...
+        def query(self, **kwargs: Any) -> dict[str, list]:
+            return {"ids": [[]], "documents": [[]]}
+
+    class FakePersistentClient:
+        def __init__(self, path: str) -> None: ...
+        def get_or_create_collection(self, name, embedding_function=None, **kwargs):
+            captured["name"] = name
+            captured["embedding_function"] = embedding_function
+            return FakeCollection()
+
+    import chromadb
+
+    monkeypatch.setattr(chromadb, "PersistentClient", FakePersistentClient)
+
+    MemoryStore(
+        db_path=tmp_path / "memory.db",
+        skills_dir=tmp_path / "skills",
+        vector_dir=tmp_path / "chroma",
+    )
+
+    ef = captured.get("embedding_function")
+    assert ef is not None, "skill collection must pin an embedding function"
+    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+    assert isinstance(ef, ONNXMiniLM_L6_V2)
+    assert getattr(ef, "_preferred_providers", None) == ["CPUExecutionProvider"]

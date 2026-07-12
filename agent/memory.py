@@ -66,9 +66,22 @@ class MemoryStore:
         # chromadb (~1s import + ONNX embedding model on first query) is
         # imported lazily so test collection and memory-free tasks stay cheap.
         from chromadb import PersistentClient
+        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
         self.chroma = PersistentClient(path=str(self.vector_dir))
-        self.skill_collection = self.chroma.get_or_create_collection("skills")
+        # Pin embeddings to CPUExecutionProvider: after setup.py swaps
+        # onnxruntime for onnxruntime-directml, ChromaDB's default provider
+        # list puts DmlExecutionProvider first, and two concurrent DirectML
+        # sessions (this embedding model + RapidOCR's during perception)
+        # crash onnxruntime natively with an access violation (0xc0000005).
+        # Reproduced by scripts/repro_dml_crash.py --dml-embedding. The
+        # all-MiniLM-L6-v2 model is tiny, so CPU embedding costs ~nothing.
+        self.skill_collection = self.chroma.get_or_create_collection(
+            "skills",
+            embedding_function=ONNXMiniLM_L6_V2(
+                preferred_providers=["CPUExecutionProvider"]
+            ),
+        )
         self.sync_skills()
 
     def _now(self) -> str:
