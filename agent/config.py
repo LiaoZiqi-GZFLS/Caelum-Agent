@@ -74,6 +74,21 @@ class UIDetectorConfig(BaseModel):
     verifier: dict[str, Any] = Field(default_factory=lambda: {"enabled": True})
 
 
+class YoloConfig(BaseModel):
+    # OmniParser icon_detect YOLOv8 for SoM annotation when the UIA tree is
+    # unavailable (WeChat/Qt/Electron) — the GUI-Actor replacement.
+    enabled: bool = True
+    model_path: str = "./models/omniparser/icon_detect/model.pt"
+    # Inference device; automatically falls back to cpu once if a cuda
+    # predict call raises.
+    device: str = "cuda:0"
+    conf: float = 0.25
+    imgsz: int = 1280
+    # Run YOLO on any perception frame whose UI tree is empty but OCR found
+    # text, so the model gets clickable SoM markers without asking.
+    auto_compensate: bool = True
+
+
 class ScreenshotConfig(BaseModel):
     backend: Literal["mss", "PIL"] = "mss"
     # The model-facing screenshot uses the same inverse-DPI normalization as
@@ -144,6 +159,7 @@ class Config(BaseModel):
     llm: LLMConfig
     mcp_servers: MCPConfig = Field(default_factory=MCPConfig)
     ui_detector: UIDetectorConfig = Field(default_factory=UIDetectorConfig)
+    yolo: YoloConfig = Field(default_factory=YoloConfig)
     screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
