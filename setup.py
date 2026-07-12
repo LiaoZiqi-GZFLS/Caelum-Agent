@@ -10,6 +10,9 @@ It will:
 3. Install Python dependencies from requirements.txt.
    - windows-mcp 0.8.2 declares requires-python >=3.13, but it runs fine on 3.12.
      The installer therefore uses --ignore-requires-python for that package.
+   - Afterwards, an idempotent patch fixes windows-mcp's upstream tree_node
+     UnboundLocalError in the installed tree/service.py (skipped automatically
+     if the layout is already fixed or unrecognized).
 4. Copy config.yaml.example -> config.yaml if missing and prompt for your Kimi API key.
 5. Validate config.yaml (parseable and contains a real API key).
 6. Create data/ directory and a minimal SQLite schema.
@@ -254,6 +257,129 @@ def create_data_dir() -> None:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# windows-mcp tree_node patch
+# ---------------------------------------------------------------------------
+# windows-mcp 0.8.2 has an upstream bug in tree/service.py: `tree_node` is only
+# assigned inside `if name:`, but the semantic-node block that dereferences it
+# is a *sibling* of that branch, so any nameless interactive element with a
+# semantic parent raises `UnboundLocalError: cannot access local variable
+# 'tree_node'` on every Snapshot (the window's subtree is dropped and the
+# server's stderr fills with tracebacks). The fix nests the semantic block
+# under `if name:`. We patch the installed copy idempotently after dependency
+# installation; see docs/windows_mcp/upstream-tree-node-issue.md.
+
+_TREE_APPEND_LINE = "interactive_nodes.append(tree_node)"
+_TREE_SEMANTIC_IF = "if current_semantic_node is not None:"
+
+
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def analyze_tree_service(source: str) -> str:
+    """Classify windows-mcp tree/service.py source: "buggy" | "fixed" | "unknown"."""
+    lines = source.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != _TREE_APPEND_LINE:
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j >= len(lines) or not lines[j].strip().startswith(_TREE_SEMANTIC_IF):
+            continue
+        if _indent_width(lines[j]) < _indent_width(line):
+            return "buggy"  # sibling `if`: tree_node may be unbound
+        return "fixed"  # nested under `if name:` (or deeper)
+    return "unknown"
+
+
+def fix_tree_service(source: str) -> str:
+    """Nest the semantic-node block under `if name:`. Raises ValueError if the
+    source is not in the known buggy layout (never guess at third-party code)."""
+    if analyze_tree_service(source) != "buggy":
+        raise ValueError("source is not in the known buggy tree_node layout")
+    lines = source.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() != _TREE_APPEND_LINE:
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if not lines[j].strip().startswith(_TREE_SEMANTIC_IF):
+            continue
+        if _indent_width(lines[j]) >= _indent_width(line):
+            continue
+        delta = _indent_width(line) - _indent_width(lines[j])
+        base = _indent_width(lines[j])
+        # Re-indent the semantic `if` line and its body (everything more
+        # indented than it, blank lines included untouched) one level deeper.
+        lines[j] = " " * delta + lines[j]
+        for k in range(j + 1, len(lines)):
+            body = lines[k]
+            if body.strip() and _indent_width(body) <= base:
+                break
+            if body.strip():
+                lines[k] = " " * delta + body
+        break
+    return "".join(lines)
+
+
+def patch_windows_mcp_tree(service_path: Path) -> str:
+    """Patch one tree/service.py file. Returns a status string:
+    "patched" | "already_fixed" | "unknown_layout"."""
+    source = service_path.read_text(encoding="utf-8")
+    status = analyze_tree_service(source)
+    if status == "fixed":
+        return "already_fixed"
+    if status == "unknown":
+        return "unknown_layout"
+    service_path.write_text(fix_tree_service(source), encoding="utf-8")
+    return "patched"
+
+
+def locate_windows_mcp_tree() -> Path | None:
+    """Find the installed windows_mcp/tree/service.py (venv first, then the
+    current interpreter's site-packages). None when windows-mcp is absent."""
+    candidates: list[Path] = []
+    if platform.system() == "Windows":
+        candidates.append(
+            VENV_DIR / "Lib" / "site-packages" / "windows_mcp" / "tree" / "service.py"
+        )
+    else:
+        candidates.append(
+            VENV_DIR
+            / "lib"
+            / f"python{REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]}"
+            / "site-packages"
+            / "windows_mcp"
+            / "tree"
+            / "service.py"
+        )
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("windows_mcp")
+        if spec is not None and spec.origin:
+            candidates.append(Path(spec.origin).parent / "tree" / "service.py")
+    except ImportError:
+        pass
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def patch_windows_mcp(locate=None) -> str:
+    """Patch the installed windows-mcp. Returns a status string:
+    "patched" | "already_fixed" | "unknown_layout" | "not_installed"."""
+    finder = locate or locate_windows_mcp_tree
+    service_path = finder()
+    if service_path is None:
+        return "not_installed"
+    return patch_windows_mcp_tree(service_path)
+
+
 def install_playwright_browser() -> None:
     log("Checking Playwright Chromium...")
     try:
@@ -404,6 +530,17 @@ def main() -> int:
     try:
         create_venv(uv_path)
         install_python_deps(uv_path)
+
+        patch_status = patch_windows_mcp()
+        if patch_status == "patched":
+            log("Patched windows-mcp tree/service.py (upstream tree_node "
+                "UnboundLocalError; see docs/windows_mcp/upstream-tree-node-issue.md).")
+        elif patch_status == "already_fixed":
+            log("windows-mcp tree_node patch: already applied (or fixed upstream).")
+        elif patch_status == "unknown_layout":
+            log("WARNING: windows-mcp tree/service.py has an unexpected layout; "
+                "skipped the tree_node patch (upstream may have changed).")
+
         copy_config()
 
         # Configure API key: command-line arg > interactive prompt > leave placeholder.

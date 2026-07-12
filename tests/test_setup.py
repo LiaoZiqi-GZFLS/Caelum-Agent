@@ -125,3 +125,90 @@ def test_prompt_for_api_key_returns_none_when_not_tty(monkeypatch: Any) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
     assert setup.prompt_for_api_key() is None
+
+
+# ---------------------------------------------------------------------------
+# windows-mcp tree_node patch (upstream UnboundLocalError fix)
+# ---------------------------------------------------------------------------
+
+# Mirrors the buggy layout in windows-mcp 0.8.2 tree/service.py: the semantic
+# block sits as a *sibling* of `if name:` although it dereferences tree_node.
+BUGGY_TREE_SERVICE = """\
+                                if name:
+                                    tree_node=TreeElementNode(**{
+                                        'name':name,
+                                    })
+                                    interactive_nodes.append(tree_node)
+                                if current_semantic_node is not None:
+                                    current_semantic_node.add_child(SemanticNode(
+                                        control_type=tree_node.control_type,
+                                        metadata=dict(tree_node.metadata),
+                                    ))
+                                    semantic_added = True
+
+                    # Informative Check
+"""
+
+FIXED_TREE_SERVICE = """\
+                                if name:
+                                    tree_node=TreeElementNode(**{
+                                        'name':name,
+                                    })
+                                    interactive_nodes.append(tree_node)
+                                    if current_semantic_node is not None:
+                                        current_semantic_node.add_child(SemanticNode(
+                                            control_type=tree_node.control_type,
+                                            metadata=dict(tree_node.metadata),
+                                        ))
+                                        semantic_added = True
+
+                    # Informative Check
+"""
+
+
+def test_analyze_tree_service_detects_buggy() -> None:
+    assert setup.analyze_tree_service(BUGGY_TREE_SERVICE) == "buggy"
+
+
+def test_analyze_tree_service_detects_fixed() -> None:
+    assert setup.analyze_tree_service(FIXED_TREE_SERVICE) == "fixed"
+
+
+def test_analyze_tree_service_unknown_layout() -> None:
+    assert setup.analyze_tree_service("def unrelated():\n    return 1\n") == "unknown"
+
+
+def test_fix_tree_service_indents_semantic_block() -> None:
+    fixed = setup.fix_tree_service(BUGGY_TREE_SERVICE)
+
+    assert fixed == FIXED_TREE_SERVICE
+    assert setup.analyze_tree_service(fixed) == "fixed"
+
+
+def test_fix_tree_service_raises_on_unknown_layout() -> None:
+    with pytest.raises(ValueError):
+        setup.fix_tree_service("def unrelated():\n    return 1\n")
+
+
+def test_patch_windows_mcp_tree_patches_then_idempotent(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    service.write_text(BUGGY_TREE_SERVICE, encoding="utf-8")
+
+    assert setup.patch_windows_mcp_tree(service) == "patched"
+    assert service.read_text(encoding="utf-8") == FIXED_TREE_SERVICE
+    # Second run: already fixed, content untouched.
+    assert setup.patch_windows_mcp_tree(service) == "already_fixed"
+    assert service.read_text(encoding="utf-8") == FIXED_TREE_SERVICE
+
+
+def test_patch_windows_mcp_tree_unknown_layout_untouched(tmp_path: Path) -> None:
+    service = tmp_path / "service.py"
+    original = "def unrelated():\n    return 1\n"
+    service.write_text(original, encoding="utf-8")
+
+    assert setup.patch_windows_mcp_tree(service) == "unknown_layout"
+    assert service.read_text(encoding="utf-8") == original
+
+
+def test_patch_windows_mcp_not_installed() -> None:
+    assert setup.patch_windows_mcp(locate=lambda: None) == "not_installed"

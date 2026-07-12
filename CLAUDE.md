@@ -304,6 +304,7 @@ Each connection reconnects with exponential backoff on disconnect.
 - Use `Snapshot` when you need element `label` IDs for `Click`/`Type`/`Scroll`/`Move`. Use `Screenshot` for a fast visual-only capture.
 - `Snapshot` supports `use_ui_tree`, `use_vision`, `use_dom`, and `use_annotation`. Browser DOM mode (`use_dom=True`) filters browser chrome and works in Chrome, Edge, and Firefox.
 - For safety, consider excluding `PowerShell` and `Registry` via `--exclude-tools "PowerShell,Registry"` unless the task explicitly requires them.
+- windows-mcp 0.8.2 has an upstream bug (`UnboundLocalError: tree_node` in `tree/service.py` when an interactive element has an empty name) that drops a window's subtree and floods stderr. `setup.py` applies an idempotent patch to the installed file after dependency installation (skipped if already fixed or the layout changed); label-expiry and stale-snapshot defenses live in `agent/tools.py` / `agent/orchestrator.py`. Root-cause writeup: `docs/windows_mcp/upstream-tree-node-issue.md`.
 
 ### Concurrency model
 
