@@ -270,26 +270,95 @@ def _record_ocr_input_size(module: PerceptionModule) -> list[tuple[int, int]]:
     return seen
 
 
-def test_run_ocr_downscales_beyond_1080p(config: Config) -> None:
-    """Screens larger than 1080p are capped at 1080p for OCR: text gets no
-    sharper beyond that, while inference time grows with pixel count."""
+def test_run_ocr_uses_original_at_100_percent(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 100% Windows scaling the original screenshot goes to OCR untouched:
+    downscaling to 1080p only erases text that is already at native size."""
     module = PerceptionModule(config)
     seen = _record_ocr_input_size(module)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
 
     module._run_ocr(Image.new("RGB", (2560, 1440)))
+
+    assert seen == [(2560, 1440)]
+
+
+def test_run_ocr_inverse_scales_at_125_percent(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 125% scaling, OCR input is normalized by the inverse factor (0.8x):
+    physically enlarged text is brought back to its 100% size."""
+    module = PerceptionModule(config)
+    seen = _record_ocr_input_size(module)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
+
+    module._run_ocr(Image.new("RGB", (2560, 1440)))
+
+    assert seen == [(2048, 1152)]
+
+
+def test_run_ocr_never_shrinks_below_1080p_cap(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse-scale result is floored at the old 1080p cap: extreme
+    scaling (or a small virtualized capture) never gets a smaller image
+    than plain 1080p capping would have produced."""
+    module = PerceptionModule(config)
+    seen = _record_ocr_input_size(module)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 3.0)
+
+    module._run_ocr(Image.new("RGB", (3840, 2160)))
 
     assert seen == [(1920, 1080)]
 
 
-def test_run_ocr_keeps_native_resolution_within_1080p(config: Config) -> None:
-    """Screens at or below 1080p pass through at native resolution."""
+def test_run_ocr_keeps_native_resolution_within_1080p(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Screens at or below 1080p pass through at native resolution (never
+    upscaled), at any scaling factor."""
     module = PerceptionModule(config)
     seen = _record_ocr_input_size(module)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
 
     module._run_ocr(Image.new("RGB", (1920, 1080)))
     module._run_ocr(Image.new("RGB", (1366, 768)))
 
     assert seen == [(1920, 1080), (1366, 768)]
+
+
+def test_ocr_resize_ratio_formula() -> None:
+    from agent.perception import _ocr_resize_ratio
+
+    # 100%: original image, no resize.
+    assert _ocr_resize_ratio((2560, 1440), 1.0) == 1.0
+    # 125%: inverse factor 0.8.
+    assert _ocr_resize_ratio((2560, 1440), 1.25) == pytest.approx(0.8)
+    # 150% on 4K: 0.667 wins over the 0.5 cap.
+    assert _ocr_resize_ratio((3840, 2160), 1.5) == pytest.approx(2 / 3, rel=1e-3)
+    # 300% on 4K: floored at the 1080p cap (0.5).
+    assert _ocr_resize_ratio((3840, 2160), 3.0) == pytest.approx(0.5)
+    # Small images are never upscaled, at any scale.
+    assert _ocr_resize_ratio((1280, 720), 1.25) == 1.0
+    assert _ocr_resize_ratio((1280, 720), 2.0) == 1.0
+    # Scale below 100% (shouldn't happen) is treated as 100%.
+    assert _ocr_resize_ratio((2560, 1440), 0.9) == 1.0
+
+
+def test_display_scale_falls_back_to_1_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+
+    from agent.perception import _display_scale
+
+    def _boom(*args, **kwargs):
+        raise OSError("no display")
+
+    monkeypatch.setattr(ctypes.windll.user32, "MonitorFromPoint", _boom)
+
+    assert _display_scale() == 1.0
 
 
 @pytest.mark.asyncio

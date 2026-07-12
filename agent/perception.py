@@ -35,10 +35,49 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("caelum.perception")
 
-# OCR input is capped at 1080p: beyond that, on-screen text gets no sharper
-# while RapidOCR inference time and the temp PNG grow with pixel count.
-# thumbnail() never upscales, so smaller screens pass through untouched.
+# OCR input floor: inverse-DPI normalization (below) never shrinks the image
+# beyond this 1080p box — at 125%+ scaling text stays at least as large as
+# plain capping would leave it. Smaller screens always pass through untouched.
 _OCR_MAX_SIZE = (1920, 1080)
+
+
+def _display_scale() -> float:
+    """Windows display scaling of the primary monitor (1.0 = 100%).
+
+    Uses ``shcore.GetScaleFactorForMonitor``, which reports the monitor's
+    configured scale regardless of this process's DPI awareness (we run
+    DPI-unaware, so user32 queries would be virtualized to 96). Falls back
+    to 1.0 off-Windows or on any API failure.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        MONITOR_DEFAULTTOPRIMARY = 1
+        hmon = ctypes.windll.user32.MonitorFromPoint(
+            wintypes.POINT(0, 0), MONITOR_DEFAULTTOPRIMARY
+        )
+        scale = ctypes.c_int()
+        ctypes.windll.shcore.GetScaleFactorForMonitor(hmon, ctypes.byref(scale))
+        if scale.value >= 100:
+            return scale.value / 100.0
+    except Exception:
+        pass
+    return 1.0
+
+
+def _ocr_resize_ratio(size: tuple[int, int], scale: float) -> float:
+    """Uniform resize ratio for OCR input.
+
+    Inverse-DPI normalization: at 125% Windows scaling text is physically
+    1.25x larger than at 100%, outside RapidOCR's comfort zone, so the image
+    is scaled back by 1/scale. Floored at the 1080p-cap ratio so the result
+    is never smaller than plain capping would produce; never upscales.
+    """
+    w, h = size
+    capped = min(1.0, _OCR_MAX_SIZE[0] / w, _OCR_MAX_SIZE[1] / h)
+    ratio = max(1.0 / max(scale, 1.0), capped)
+    return min(1.0, ratio)
 
 
 @dataclass
@@ -94,10 +133,10 @@ class PerceptionModule:
         image = await loop.run_in_executor(self._io_executor, self._capture_screenshot)
         orig_w, orig_h = image.size
 
-        # OCR reads the screenshot before the LLM-bound compression (capped at
-        # 1080p inside _run_ocr): the 1280x720 copy would erase small text,
-        # and OCR is local CPU work that costs no tokens. This must run before
-        # _compress(), which thumbnails the image in place.
+        # OCR reads the screenshot before the LLM-bound compression (inverse-
+        # DPI normalized inside _run_ocr): the 1280x720 copy would erase small
+        # text, and OCR is local CPU work that costs no tokens. This must run
+        # before _compress(), which thumbnails the image in place.
         ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
 
         image_bytes = await loop.run_in_executor(
@@ -291,11 +330,20 @@ class PerceptionModule:
             from rapidocr_onnxruntime import RapidOCR
 
             self._ocr = RapidOCR()
+        # Inverse-DPI normalization with a 1080p floor: Windows display
+        # scaling enlarges text physically (125%+), which hurts RapidOCR, so
+        # the image is scaled back by 1/scale — but never below what plain
+        # 1080p capping would give. At 100% the original passes through.
+        ratio = _ocr_resize_ratio(image.size, _display_scale())
+        if ratio < 1.0:
+            w, h = image.size
+            ocr_image = image.resize(
+                (round(w * ratio), round(h * ratio)), Image.Resampling.LANCZOS
+            )
+        else:
+            ocr_image = image
         # Lossless PNG: OCR receives the screenshot before the LLM-bound
-        # compression; keep it free of extra JPEG artifacts. Cap at 1080p —
-        # larger screens gain no text sharpness but cost inference time.
-        ocr_image = image.copy()
-        ocr_image.thumbnail(_OCR_MAX_SIZE)
+        # compression; keep it free of extra JPEG artifacts.
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             ocr_image.save(tmp.name, format="PNG")
             tmp_path = tmp.name

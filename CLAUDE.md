@@ -284,6 +284,8 @@ Screenshot
     └──▶ GUI-Actor-3B element detection → SoM annotation ──┘
 ```
 
+OCR input is **inverse-DPI normalized**: `_run_ocr` reads the Windows display scale of the primary monitor (`shcore.GetScaleFactorForMonitor`, works despite our DPI-unaware process) and resizes the screenshot by 1/scale so text sits at its 100% size for RapidOCR — at 100% the original image is used untouched. The result is floored at the old 1080p cap (`_OCR_MAX_SIZE`), so extreme scaling never yields a smaller image than plain capping would.
+
 Vision (GUI-Actor SoM) is lazy by default — it runs only for `DesktopInteract`. As an automatic compensation (`ui_detector.auto_compensate`, default true), `perceive()` also runs one vision pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself.
 
 GUI-Actor runs in **instruction-conditioned pointing mode**, not full-screen detection: one inference returns top-k (default 3, `ui_detector.topk`) candidate points for the given query; the verifier crops 224×224 around each, re-scores with the same model (pass ≥0.55 / reject ≤0.25 / uncertain), and rejects are dropped from the annotations. The query is the `DesktopInteract(target=...)` description when provided, else the whole task instruction (auto-compensation fallback).
