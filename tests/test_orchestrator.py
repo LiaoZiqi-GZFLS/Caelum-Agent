@@ -2644,6 +2644,184 @@ def test_desktop_interact_schema_is_label_only():
     assert DESKTOP_INTERACT_SCHEMA["required"] == ["label"]
 
 
+# ---------------------------------------------------------------------------
+# ZoomRegion (region zoom with full re-perception)
+# ---------------------------------------------------------------------------
+
+
+def _region_perception_stub(record: dict[str, Any], tmp_path: Path) -> Any:
+    from PIL import Image as _Image
+
+    clean = tmp_path / "region_clean.jpg"
+    annotated = tmp_path / "region_annotated.jpg"
+    _Image.new("RGB", (60, 60), "white").save(clean, "JPEG")
+    _Image.new("RGB", (60, 60), "red").save(annotated, "JPEG")
+
+    async def perceive_region(center_x: int, center_y: int, size: int) -> Perception:
+        record["args"] = (center_x, center_y, size)
+        return Perception(
+            screenshot_path=clean,
+            description="region view",
+            ocr_text="",
+            ui_tree={},
+            som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+            screen_width=480,
+            screen_height=480,
+            screenshot_width=480,
+            screenshot_height=480,
+            image_origin_x=100,
+            image_origin_y=200,
+            annotated_screenshot_path=annotated,
+        )
+
+    return perceive_region
+
+
+def _full_perception() -> Perception:
+    return Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="full",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[
+            {"label": 3, "center_x": 0.5, "center_y": 0.4},
+            {"label": 7, "center_x": 0.1, "center_y": 0.1},
+        ],
+        screen_width=1000,
+        screen_height=1000,
+        screenshot_width=1000,
+        screenshot_height=1000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_centers_on_label(config, eventbus, killswitch, tmp_path, monkeypatch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _full_perception()
+    record: dict[str, Any] = {}
+    monkeypatch.setattr(agent.perception, "perceive_region", _region_perception_stub(record, tmp_path))
+
+    result = await agent._zoom_region_impl(size="small", label=3)
+
+    assert result.startswith("[ok]")
+    assert record["args"] == (500, 400, 480)  # 0.5*1000, 0.4*1000, small=480
+    assert agent._last_perception.image_origin_x == 100  # replaced by region
+    assert agent._pending_region is not None
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_centers_on_loc(config, eventbus, killswitch, tmp_path, monkeypatch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    p = _full_perception()
+    p.screen_width, p.screen_height = 2000, 1000
+    p.screenshot_width, p.screenshot_height = 1000, 500
+    agent._last_perception = p
+    record: dict[str, Any] = {}
+    monkeypatch.setattr(agent.perception, "perceive_region", _region_perception_stub(record, tmp_path))
+
+    result = await agent._zoom_region_impl(size="large", loc=[500, 250])
+
+    assert result.startswith("[ok]")
+    assert record["args"] == (1000, 500, 1680)  # 500*2, 250*2, large=1680
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_requires_exactly_one_center(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _full_perception()
+
+    both = await agent._zoom_region_impl(size="small", label=3, loc=[1, 2])
+    neither = await agent._zoom_region_impl(size="small")
+
+    assert both.startswith("[error]")
+    assert neither.startswith("[error]")
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_rejects_unknown_size(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _full_perception()
+
+    result = await agent._zoom_region_impl(size="huge", label=3)
+
+    assert result.startswith("[error]")
+    assert "huge" in result
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_rejects_unknown_label(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _full_perception()
+
+    result = await agent._zoom_region_impl(size="small", label=99)
+
+    assert result.startswith("[error]")
+    assert "99" in result
+    assert "3" in result  # available labels listed
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_followup_carries_both_images(
+    config, eventbus, killswitch, tmp_path, monkeypatch
+):
+    """After a ZoomRegion tool call, _think_and_act appends the region's
+    clean + annotated images as the post-tool user message."""
+
+    class _ZoomDispatchingLLM(FakeLLM):
+        def __init__(self, chat_responses, holder):
+            super().__init__(chat_responses=chat_responses, tool_names=["ZoomRegion"])
+            self._holder = holder
+
+        async def execute_tool_calls(self, calls):
+            results = []
+            for call in calls:
+                args = json.loads(call.function.arguments)
+                output = await self._holder["agent"]._zoom_region_impl(**args)
+                results.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": output,
+                })
+            return results
+
+    holder: dict[str, Any] = {}
+    llm = _ZoomDispatchingLLM(
+        [
+            _message(
+                "Zooming.",
+                tool_calls=[_tool_call("ZoomRegion", {"size": "small", "label": 3})],
+            ),
+            _message("Done zooming."),
+        ],
+        holder,
+    )
+    agent = AgentOrchestrator(config, eventbus, llm, FakeMCP(), killswitch)
+    holder["agent"] = agent
+    agent._last_perception = _full_perception()
+    record: dict[str, Any] = {}
+    monkeypatch.setattr(agent.perception, "perceive_region", _region_perception_stub(record, tmp_path))
+    agent.history = [{"role": "system", "content": "sys"}]
+
+    await agent._think_and_act()
+
+    roles = [m["role"] for m in agent.history]
+    assert roles == ["system", "assistant", "tool", "user", "assistant"]
+    content = agent.history[3]["content"]
+    images = [part for part in content if part.get("type") == "image_url"]
+    assert len(images) == 2
+    texts = [part.get("text", "") for part in content if part.get("type") == "text"]
+    assert any("ZoomRegion" in t for t in texts)
+    assert agent._pending_region is None  # cleared after append
+
+
+@pytest.mark.asyncio
+async def test_zoom_region_tool_registered(config, eventbus, killswitch):
+    llm = FakeLLM()
+    agent = AgentOrchestrator(config, eventbus, llm, FakeMCP(), killswitch)
+    agent._register_zoom_region()
+    assert "ZoomRegion" in llm.tool_names()
+
+
 @pytest.mark.asyncio
 async def test_preview_points_draws_and_stashes_followup(config, eventbus, killswitch, tmp_path):
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)

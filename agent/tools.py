@@ -47,6 +47,39 @@ DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
 }
 
 
+ZOOM_REGION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "integer",
+            "description": (
+                "Marker number from the current annotated screenshot to "
+                "center the region on."
+            ),
+        },
+        "loc": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {"type": "number"},
+            "description": (
+                "Region center [x, y] in the CURRENT screenshot's coordinate "
+                "space. Give exactly one of label or loc."
+            ),
+        },
+        "size": {
+            "type": "string",
+            "enum": ["small", "medium", "large"],
+            "description": (
+                "Region side length in native pixels: small=480, medium=960, "
+                "large=1680. Pick the smallest tier that covers your target."
+            ),
+        },
+    },
+    "required": ["size"],
+}
+
+
 UPGRADE_VISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},

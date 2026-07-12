@@ -63,8 +63,10 @@ class YoloDetector:
   （方形，越界自动平移回屏幕内），由模型按需要自选
 - 用 **mss 截全屏原图后裁剪**——不走 windows-mcp `Screenshot`/`Snapshot`，
   避免作废模型手上可能仍要使用的 UIA label
-- 区域全套感知：YOLO 必跑（无论 UIA 是否可用）+ OCR（区域图）
-  + UIA 树复用最近一次感知结果、按 bbox 与区域相交过滤（不重新 Snapshot）
+- 区域全套感知：YOLO 必跑（无论 UIA 是否可用）+ OCR（区域图）。
+  UIA 树不参与区域视图——感知层只保存树的摘要串（无 bbox，无法按区域
+  过滤），而重新 Snapshot 会作废 UIA label；全屏树摘要本就在此前轮次的
+  上下文里，区域描述引导模型结合使用
 - 返回区域双图（原图 + 标注图）+ 文字描述；区域感知覆盖 `_last_perception`
 - **坐标换算自动化**：`Perception` 增加 `image_origin_x/y`（原图像素，全屏为 0,0），
   `_rescale_loc_args` 与 DesktopInteract 的 label→坐标换算统一为
@@ -160,5 +162,5 @@ UIA label (windows__Snapshot/Click)
   更新不在本次范围，另行处理；CLAUDE.md 本次更新
 - 坐标契约不变：模型给当前可见图坐标系，orchestrator `_rescale_loc_args`
   换算屏幕像素（ZoomRegion 引入 origin 偏移后换算规则不变，仅多一项偏移）
-- ZoomRegion 的 UIA 过滤基于最近一次感知的树，区域感知不刷新 UIA label
-  空间（模型手上的 Snapshot label 仍然有效）
+- ZoomRegion 的 UIA 处理：区域视图不带 UIA（摘要串无 bbox 不可过滤；
+  不重新 Snapshot 以保护 UIA label 空间），全屏树摘要在上下文里复用

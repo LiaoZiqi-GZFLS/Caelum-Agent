@@ -26,7 +26,7 @@ from agent.media import parse_media_refs, register_view_media
 from agent.kimi_memory import KimiMemoryClient
 from agent.llm_client import LLMClient
 from agent.memory import MemoryStore
-from agent.perception import PerceptionModule
+from agent.perception import ZOOM_REGION_SIZES, PerceptionModule
 from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.self_window import register_self_window
@@ -40,6 +40,7 @@ from agent.tools import (
     PREVIEW_POINTS_SCHEMA,
     REQUEST_HUMAN_HELP_SCHEMA,
     UPGRADE_VISION_SCHEMA,
+    ZOOM_REGION_SCHEMA,
     register_all,
 )
 from agent.window_capture import register_capture_window
@@ -219,6 +220,10 @@ class AgentOrchestrator:
         # the tool result so the model can verify/adjust its coordinate guess
         # before clicking. Cleared after each append and at task start.
         self._pending_preview: tuple[Path, list[tuple[float, float]]] | None = None
+        # ZoomRegion: the tool stashes the region Perception here;
+        # _think_and_act appends its clean + annotated images right after the
+        # tool result. Cleared after each append and at task start.
+        self._pending_region: Any | None = None
         # ViewMedia uploads: the tool result carries a "[media_ref] kind ms://"
         # marker; _execute_tool_calls lifts it here and _think_and_act appends
         # a real image_url/video_url content part after the tool results so the
@@ -275,6 +280,7 @@ class AgentOrchestrator:
         )
         self._register_desktop_interact()
         self._register_preview_points()
+        self._register_zoom_region()
         self._register_upgrade_vision()
         self._register_complete_task()
         self._register_human_help()
@@ -494,6 +500,100 @@ class AgentOrchestrator:
         if result.success:
             return f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
         return f"[error] {result.content}"
+
+    async def _zoom_region_impl(
+        self,
+        size: str,
+        label: int | None = None,
+        loc: list | None = None,
+    ) -> str:
+        """Handler for ZoomRegion: re-perceive a region at original resolution.
+
+        Resolves the region center from a YOLO marker label or raw
+        coordinates (current screenshot space) into native screen pixels,
+        then asks perception for a full region view (OCR + YOLO boxes on a
+        native crop). The region view replaces _last_perception — its origin
+        offset makes DesktopInteract/PreviewPoints coordinates convert
+        automatically — and is stashed so _think_and_act attaches its clean +
+        annotated images right after this tool result.
+        """
+        perception = getattr(self, "_last_perception", None)
+        if perception is None:
+            return "[error] No perception data available. Run perception first."
+        if (label is None) == (loc is None):
+            return (
+                "[error] ZoomRegion needs exactly one center: label=<marker "
+                "number> or loc=[x, y] (current screenshot space)."
+            )
+        px = ZOOM_REGION_SIZES.get(size)
+        if px is None:
+            return (
+                f"[error] Unknown size {size!r}; choose one of "
+                f"{sorted(ZOOM_REGION_SIZES)}."
+            )
+
+        sw = perception.screen_width or 0
+        sh = perception.screen_height or 0
+        ox = getattr(perception, "image_origin_x", 0) or 0
+        oy = getattr(perception, "image_origin_y", 0) or 0
+        if label is not None:
+            match = next(
+                (a for a in perception.som_annotations if a.get("label") == label),
+                None,
+            )
+            if match is None:
+                available = [a.get("label") for a in perception.som_annotations]
+                return (
+                    f"[error] SoM label {label} not found. Available labels: "
+                    f"{available}"
+                )
+            center_x = int(round(ox + match.get("center_x", 0) * sw))
+            center_y = int(round(oy + match.get("center_y", 0) * sh))
+        else:
+            if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
+                return "[error] loc must be [x, y] in the current screenshot's coordinate space."
+            cw = perception.screenshot_width or 0
+            ch = perception.screenshot_height or 0
+            if not (sw and sh and cw and ch):
+                return (
+                    "[error] Current perception lacks dimensions; cannot map "
+                    "loc to the screen."
+                )
+            center_x = int(round(ox + float(loc[0]) * sw / cw))
+            center_y = int(round(oy + float(loc[1]) * sh / ch))
+
+        region = await self.perception.perceive_region(center_x, center_y, px)
+        self._last_perception = region
+        self._pending_region = region
+        return (
+            f"[ok] Zoomed {size} region ({px}px) around screen ({center_x}, "
+            f"{center_y}) attached below: clean image + YOLO-annotated copy. "
+            "Labels and loc coordinates now refer to the region image; "
+            "DesktopInteract(label=N) and PreviewPoints convert to screen "
+            "pixels automatically. The next perception round returns to the "
+            "full screen."
+        )
+
+    def _register_zoom_region(self) -> None:
+        """Register the ZoomRegion local function tool with the LLM."""
+        self.llm.register_local_function(
+            "ZoomRegion",
+            self._zoom_region_impl,
+            schema=ZOOM_REGION_SCHEMA,
+            description=(
+                "Zoom into a screen region at ORIGINAL resolution for a closer "
+                "look: crops a square around label=<marker number> or "
+                "loc=[x, y] (current screenshot space) and runs full "
+                "perception on it (OCR + YOLO boxes), attaching clean + "
+                "annotated images. size: small=480, medium=960, large=1680 "
+                "native px — pick the smallest tier covering your target. Use "
+                "when text is too small to read or no marker covers your "
+                "target. After zooming, DesktopInteract(label=...) and loc "
+                "coordinates refer to the region image (conversion is "
+                "automatic); the next perception round returns to the full "
+                "screen."
+            ),
+        )
 
     async def _upgrade_vision_impl(self) -> str:
         """Handler for UpgradeVision: switch screenshots to the original image.
@@ -929,6 +1029,9 @@ class AgentOrchestrator:
             "double_click, right_click, type (needs text=), scroll_down/up.\n"
             "- For browser elements with refs (like e12), use playwright__browser_click(target='e12') instead.\n"
             "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n"
+            "- If text is too small to read or no marker covers your target: "
+            "ZoomRegion(size='small'|'medium'|'large', label=N or loc=[x, y]) re-perceives "
+            "that area at original resolution with fresh markers.\n"
             "- LAST RESORT — when neither UIA labels nor DesktopInteract markers locate the target: "
             "PreviewPoints(points=[[x, y], ...]) draws your coordinate guesses as numbered markers "
             "on the screenshot and shows them back; adjust until a marker sits on the target, then "
@@ -992,6 +1095,7 @@ class AgentOrchestrator:
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
         self._pending_preview = None
+        self._pending_region = None
         self._pending_media_parts = []
         self._upgrade_requested = False
         self.perception.original_resolution = False
@@ -1261,6 +1365,16 @@ class AgentOrchestrator:
                     "type": "text",
                     "text": "[UpgradeVision] The perception above was captured "
                             "at the original resolution.",
+                })
+            region = self._pending_region
+            if region is not None:
+                self._pending_region = None
+                followup_parts.extend(self._format_perception(region))
+                followup_parts.append({
+                    "type": "text",
+                    "text": "[ZoomRegion] The region view above (clean + "
+                            "annotated) was captured at the original "
+                            "resolution; labels and coordinates refer to it.",
                 })
             preview = self._pending_preview
             if preview is not None:

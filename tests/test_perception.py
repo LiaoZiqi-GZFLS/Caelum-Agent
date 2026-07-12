@@ -410,6 +410,96 @@ async def test_perceive_survives_detector_failure(
     assert result.annotated_screenshot_path is None
 
 
+# ---------------------------------------------------------------------------
+# perceive_region (ZoomRegion backend)
+# ---------------------------------------------------------------------------
+
+
+def _patch_region_capture(
+    module: PerceptionModule,
+    monkeypatch: pytest.MonkeyPatch,
+    size: tuple[int, int] = (2560, 1440),
+    ocr_text: str = "区域文本",
+) -> None:
+    monkeypatch.setattr(
+        module, "_capture_fullscreen", lambda: Image.new("RGB", size)
+    )
+    monkeypatch.setattr(module, "_run_ocr", lambda img: ocr_text)
+
+
+@pytest.mark.asyncio
+async def test_perceive_region_crops_and_sets_origin(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = _SpyDetector([{"label": 1, "center_x": 0.5, "center_y": 0.5}])
+    module = PerceptionModule(config, detector=spy)
+    _patch_region_capture(module, monkeypatch)
+    seen_ocr: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        module, "_run_ocr", lambda img: seen_ocr.append(img.size) or "text"
+    )
+
+    p = await module.perceive_region(1280, 720, 480)
+
+    assert (p.screen_width, p.screen_height) == (480, 480)
+    assert (p.screenshot_width, p.screenshot_height) == (480, 480)
+    assert (p.image_origin_x, p.image_origin_y) == (1040, 480)
+    assert seen_ocr == [(480, 480)]  # OCR ran on the crop
+    assert spy.calls == 1
+    assert spy.seen_sizes == [(480, 480)]  # YOLO ran on the crop
+    assert len(p.som_annotations) == 1
+    assert p.screenshot_path.exists()
+    assert p.annotated_screenshot_path is not None
+    assert p.annotated_screenshot_path.exists()
+    assert "1040" in p.description and "480" in p.description
+
+
+@pytest.mark.asyncio
+async def test_perceive_region_clamps_box_at_screen_edges(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = PerceptionModule(config)
+    _patch_region_capture(module, monkeypatch)
+
+    top_left = await module.perceive_region(10, 10, 480)
+    assert (top_left.image_origin_x, top_left.image_origin_y) == (0, 0)
+
+    bottom_right = await module.perceive_region(2559, 1439, 480)
+    assert (bottom_right.image_origin_x, bottom_right.image_origin_y) == (
+        2080,
+        960,
+    )
+
+
+@pytest.mark.asyncio
+async def test_perceive_region_without_detector_still_works(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = PerceptionModule(config, detector=None)
+    _patch_region_capture(module, monkeypatch)
+
+    p = await module.perceive_region(1280, 720, 480)
+
+    assert p.som_annotations == []
+    assert p.annotated_screenshot_path is None
+    assert p.screenshot_path.exists()
+    assert p.ocr_text == "区域文本"
+
+
+@pytest.mark.asyncio
+async def test_perceive_region_small_screen_clamps_to_full(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Region larger than the screen degrades to the whole screen."""
+    module = PerceptionModule(config)
+    _patch_region_capture(module, monkeypatch, size=(400, 300))
+
+    p = await module.perceive_region(200, 150, 480)
+
+    assert (p.image_origin_x, p.image_origin_y) == (0, 0)
+    assert (p.screen_width, p.screen_height) == (400, 300)
+
+
 def test_compress_matches_ocr_at_100_percent(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

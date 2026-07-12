@@ -41,6 +41,10 @@ logger = logging.getLogger("caelum.perception")
 # plain capping would leave it. Smaller screens always pass through untouched.
 _OCR_MAX_SIZE = (1920, 1080)
 
+# ZoomRegion size tiers: native-pixel side length of the square crop. The
+# model picks the tier; the crop is clamped to the screen bounds.
+ZOOM_REGION_SIZES = {"small": 480, "medium": 960, "large": 1680}
+
 
 def _display_scale() -> float:
     """Windows display scaling of the primary monitor (1.0 = 100%).
@@ -224,6 +228,113 @@ class PerceptionModule:
             annotated_screenshot_path=annotated_screenshot_path,
         )
 
+    async def perceive_region(
+        self, center_x: int, center_y: int, size: int
+    ) -> Perception:
+        """Capture a native-resolution square region and run full perception.
+
+        The region is cropped from a fresh full-screen capture (mss — never
+        windows-mcp Screenshot/Snapshot, which would invalidate the model's
+        UIA labels), clamped to the screen bounds, and shown at ORIGINAL
+        resolution: OCR and YOLO run on the crop, and the returned
+        Perception carries the crop's native origin so the orchestrator can
+        translate region-image coordinates back to screen pixels
+        (screen = origin + image_coord).
+
+        YOLO runs unconditionally here (subject to availability): the whole
+        point of zooming is getting markers on a hard-to-read area, whatever
+        the UIA tree looks like. The region's ui_tree is left empty — the
+        full-screen tree from earlier rounds still applies.
+        """
+        cache_dir = self.config.cache_dir_absolute()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        screenshot_path = cache_dir / f"region_{timestamp}.jpg"
+
+        loop = asyncio.get_event_loop()
+        full = await loop.run_in_executor(
+            self._io_executor, self._capture_fullscreen
+        )
+        fw, fh = full.size
+        half = size // 2
+        # Clamp: shift the box back inside the screen at edges.
+        x1 = min(max(center_x - half, 0), max(fw - size, 0))
+        y1 = min(max(center_y - half, 0), max(fh - size, 0))
+        x2 = min(x1 + size, fw)
+        y2 = min(y1 + size, fh)
+        crop = full.crop((x1, y1, x2, y2))
+        crop_w, crop_h = crop.size
+
+        ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, crop)
+        await loop.run_in_executor(
+            self._io_executor,
+            lambda: crop.save(
+                screenshot_path, "JPEG", quality=self.config.screenshot.quality
+            ),
+        )
+
+        som_annotations = await self._run_yolo(crop)
+        som_annotations = [
+            a
+            for a in som_annotations
+            if isinstance(a, dict) and "center_x" in a and "center_y" in a
+        ]
+
+        annotated_screenshot_path: Path | None = None
+        if som_annotations and self.detector is not None:
+            annotated_image = await loop.run_in_executor(
+                self._io_executor,
+                self._generate_annotated,
+                screenshot_path,
+                som_annotations,
+            )
+            annotated_screenshot_path = cache_dir / f"region_{timestamp}_annotated.jpg"
+            await loop.run_in_executor(
+                self._io_executor,
+                annotated_image.save,
+                annotated_screenshot_path,
+                "JPEG",
+            )
+
+        description = self._build_region_description(
+            ocr_text, som_annotations, (x1, y1), (crop_w, crop_h)
+        )
+        return Perception(
+            screenshot_path=screenshot_path,
+            description=description,
+            ocr_text=ocr_text,
+            ui_tree={},
+            som_annotations=som_annotations,
+            screen_width=crop_w,
+            screen_height=crop_h,
+            screenshot_width=crop_w,
+            screenshot_height=crop_h,
+            image_origin_x=x1,
+            image_origin_y=y1,
+            annotated_screenshot_path=annotated_screenshot_path,
+        )
+
+    @staticmethod
+    def _build_region_description(
+        ocr_text: str,
+        som_annotations: list[dict[str, Any]],
+        origin: tuple[int, int],
+        size: tuple[int, int],
+    ) -> str:
+        parts = [
+            f"Zoomed region view: native pixels ({origin[0]},{origin[1]}) to "
+            f"({origin[0] + size[0]},{origin[1] + size[1]}), shown at original "
+            f"resolution ({size[0]}x{size[1]}).",
+            "When a tool needs coordinates (loc), give them in THIS region "
+            "image's coordinate space — conversion to screen pixels is "
+            "handled automatically.",
+        ]
+        if ocr_text:
+            parts.append(f"Region OCR text:\n{ocr_text}")
+        if som_annotations:
+            parts.append(f"Detected elements: {len(som_annotations)}")
+        return "\n\n".join(parts)
+
     @staticmethod
     def _generate_annotated(
         screenshot_path: Path,
@@ -236,21 +347,27 @@ class PerceptionModule:
         return visualize_som(compressed, som_annotations)
 
     def _capture_screenshot(self) -> Image.Image:
+        image = self._capture_fullscreen()
+        if self.config.screenshot.crop_to_active_window:
+            image = self._crop_to_active_window(image)
+        return image
+
+    def _capture_fullscreen(self) -> Image.Image:
+        """Full-screen capture, bypassing crop_to_active_window.
+
+        ZoomRegion needs absolute screen coordinates, which the active-window
+        crop would break.
+        """
         if self.config.screenshot.backend == "mss":
             import mss
 
             with mss.MSS() as sct:
                 monitor = sct.monitors[0]
                 raw = sct.grab(monitor)
-                image = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-        else:
-            from PIL import ImageGrab
+                return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        from PIL import ImageGrab
 
-            image = ImageGrab.grab()
-
-        if self.config.screenshot.crop_to_active_window:
-            image = self._crop_to_active_window(image)
-        return image
+        return ImageGrab.grab()
 
     def _crop_to_active_window(self, image: Image.Image) -> Image.Image:
         try:
