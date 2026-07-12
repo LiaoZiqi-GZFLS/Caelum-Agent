@@ -2301,3 +2301,38 @@ async def test_stale_label_error_gets_recovery_hint(config, eventbus, killswitch
     hint_msg = next(m for m in tool_msgs if "967" in m["content"])
     assert "windows__Snapshot" in hint_msg["content"]
     assert "invalidat" in hint_msg["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_local_tool_calls_emit_presenter_events(config, eventbus, killswitch):
+    """Local (non-MCP) tools must emit ToolCallRequested/Completed so the
+    terminal shows what the agent is doing (e.g. DesktopInteract inference)."""
+    from eventbus.events import ToolCallCompleted, ToolCallRequested
+
+    events: list[Any] = []
+    eventbus.subscribe("ToolCallRequested", lambda e: events.append(e))
+    eventbus.subscribe("ToolCallCompleted", lambda e: events.append(e))
+
+    llm = FakeLLM(
+        [
+            _message("Detecting.", tool_calls=[_tool_call("ViewMedia", {"path": "x.png"}, call_id="c9")]),
+            _message("done looking"),
+            _message("YES"),
+            _message("finished."),
+        ],
+        tool_responses=[
+            [{"role": "tool", "tool_call_id": "c9", "content": "[media_ref] image ms://zz"}],
+        ],
+        tool_names=["ViewMedia"],
+    )
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.run_task("look at x")
+
+    requested = [e for e in events if isinstance(e, ToolCallRequested)]
+    completed = [e for e in events if isinstance(e, ToolCallCompleted)]
+    assert any(e.server == "local" and e.tool_name == "ViewMedia" for e in requested)
+    assert any(e.server == "local" and e.tool_name == "ViewMedia" for e in completed)

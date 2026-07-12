@@ -1170,6 +1170,12 @@ class AgentOrchestrator:
             args = json.loads(call.function.arguments)
             if name in llm_tools:
                 # Built-in Formula or local function tool handled by LLM client.
+                await self.eventbus.emit(
+                    ToolCallRequested(
+                        server="local", tool_name=name, arguments=args,
+                        task_id=self.task_id,
+                    )
+                )
                 local_level = _LOCAL_TOOL_SECURITY.get(name)
                 if local_level is not None:
                     approval = self.security.check(
@@ -1185,10 +1191,29 @@ class AgentOrchestrator:
                             "content": f"[blocked] {approval.reason}",
                         })
                         succeeded.append(False)
+                        await self.eventbus.emit(
+                            ToolCallCompleted(
+                                server="local",
+                                tool_name=name,
+                                result=f"[blocked] {approval.reason}",
+                                success=False,
+                                task_id=self.task_id,
+                            )
+                        )
                         continue
                 outputs = await self.llm.execute_tool_calls([call])
                 results.extend(outputs)
                 succeeded.extend([True] * len(outputs))
+                local_content = "".join(str(o.get("content", "")) for o in outputs)
+                await self.eventbus.emit(
+                    ToolCallCompleted(
+                        server="local",
+                        tool_name=name,
+                        result=local_content,
+                        success=not local_content.startswith("[error]"),
+                        task_id=self.task_id,
+                    )
+                )
                 # ViewMedia results carry "[media_ref] kind ms://url" markers;
                 # lift them into real media parts injected after this batch.
                 for output in outputs:
