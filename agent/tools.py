@@ -164,12 +164,17 @@ class CodeRunner:
         allowed_modules: set[str] | None = None,
         disallowed_names: set[str] | None = None,
         cwd: str | None = None,
+        allow_javascript: bool = False,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_code_length = max_code_length
         self.allowed_modules = allowed_modules or ALLOWED_MODULES
         self.disallowed_names = disallowed_names or DISALLOWED_NAMES
         self.cwd = cwd
+        # JavaScript runs via `node -e` with NO sandbox (no AST validation, no
+        # import restriction, full environment). It is therefore gated behind
+        # the user's explicit --yes/--yes-all auto-approve opt-in.
+        self.allow_javascript = allow_javascript
 
     def _ensure_cwd(self) -> None:
         """Create the configured working directory if it does not exist yet."""
@@ -185,6 +190,13 @@ class CodeRunner:
         """Run code in a sandbox and return stdout/stderr."""
         language = language.lower()
         if language == "javascript":
+            if not self.allow_javascript:
+                return (
+                    "[error] JavaScript execution runs WITHOUT sandbox "
+                    "restrictions and is only available when the agent was "
+                    "started with --yes or --yes-all. Use Python instead, or "
+                    "restart with --yes."
+                )
             return self._run_javascript(code, env=env)
         if language != "python":
             return f"[error] Language {language} is not supported."
@@ -386,18 +398,29 @@ def build_mcp_tools(mcp: "MCPMultiplexer") -> list[dict[str, Any]]:
     return tools
 
 
-def register_all(llm: Any, mcp: "MCPMultiplexer", code_cwd: str | None = None) -> None:
+def register_all(
+    llm: Any,
+    mcp: "MCPMultiplexer",
+    code_cwd: str | None = None,
+    allow_javascript: bool = False,
+) -> None:
     """Register MCP tools and local CodeRunner with the LLM client.
 
     ``code_cwd`` is the working directory for CodeRunner subprocesses (the
     cache directory in production); relative paths written by generated code
-    land there instead of the process cwd.
+    land there instead of the process cwd. ``allow_javascript`` should reflect
+    the user's --yes/--yes-all opt-in: unsandboxed Node execution is only
+    enabled then.
     """
     llm.register_function_tools(build_mcp_tools(mcp))
-    runner = RestrictedCodeRunner(cwd=code_cwd)
+    runner = RestrictedCodeRunner(cwd=code_cwd, allow_javascript=allow_javascript)
     llm.register_local_function(
         "CodeRunner",
         runner.run,
         schema=CODERUNNER_SCHEMA,
-        description="Run a short Python or JavaScript snippet in a local sandbox and return output. Python is fully sandboxed; JavaScript requires Node.js.",
+        description=(
+            "Run a short Python or JavaScript snippet in a local sandbox and "
+            "return output. Python is fully sandboxed; JavaScript requires "
+            "Node.js and is only available in --yes/--yes-all mode."
+        ),
     )

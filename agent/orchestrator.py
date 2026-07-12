@@ -223,6 +223,9 @@ class AgentOrchestrator:
             self.llm,
             self.mcp,
             code_cwd=str(self.config.cache_dir_absolute()),
+            # Unsandboxed JavaScript is only offered when the user opted into
+            # auto-approval (--yes / --yes-all both set auto_approve).
+            allow_javascript=self.security.auto_approve,
         )
         self._register_desktop_interact()
         self._register_complete_task()

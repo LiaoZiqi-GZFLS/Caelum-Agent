@@ -6,7 +6,14 @@ import subprocess
 
 import pytest
 
-from agent.tools import CodeRunner, UnsafeCodeError, run_code
+from agent.tools import (
+    CodeRunner,
+    RestrictedCodeRunner,
+    UnsafeCodeError,
+    register_all,
+    run_code,
+)
+from tests.fakes import FakeMCP
 
 
 @pytest.fixture
@@ -89,7 +96,8 @@ def test_restricted_builtins_at_runtime(runner):
     assert "[stderr]" in result or result.startswith("[error]")
 
 
-def test_javascript_returns_error_without_node(runner, monkeypatch):
+def test_javascript_returns_error_without_node(monkeypatch):
+    runner = CodeRunner(allow_javascript=True)
     monkeypatch.setattr("shutil.which", lambda _: None)
     result = runner.run("console.log(1)", language="javascript")
     assert result.startswith("[error]")
@@ -213,3 +221,57 @@ def test_register_all_wires_code_cwd(tmp_path, monkeypatch):
     register_all(llm, FakeMCP(), code_cwd=str(tmp_path))
     llm.local["CodeRunner"](code="print('hi')", language="python")
     assert captured["cwd"] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# JavaScript gating (--yes / --yes-all only)
+# ---------------------------------------------------------------------------
+
+
+def test_javascript_blocked_by_default():
+    runner = RestrictedCodeRunner()
+    result = runner.run("console.log(1)", language="javascript")
+    assert result.startswith("[error]")
+    assert "--yes" in result
+
+
+def test_javascript_blocked_error_mentions_interactive():
+    runner = RestrictedCodeRunner(allow_javascript=False)
+    result = runner.run("console.log(1)", language="javascript")
+    assert "interactive" in result.lower() or "--yes" in result
+
+
+def test_javascript_gate_passes_when_allowed(tmp_path):
+    # With the gate open, execution proceeds to the Node lookup. On machines
+    # without Node this returns the not-found error; either way it must NOT be
+    # the gating error.
+    runner = RestrictedCodeRunner(cwd=str(tmp_path), allow_javascript=True)
+    result = runner.run("console.log('hi')", language="javascript")
+    assert "--yes" not in result
+    assert "requires Node.js" in result or "hi" in result
+
+
+def test_python_unaffected_by_javascript_gate(tmp_path):
+    runner = RestrictedCodeRunner(cwd=str(tmp_path))
+    result = runner.run("print(2 + 2)", language="python")
+    assert "4" in result
+
+
+def test_register_all_wires_javascript_gate():
+    class _LLM:
+        def __init__(self):
+            self.local = {}
+
+        def register_function_tools(self, tools):
+            pass
+
+        def register_local_function(self, name, handler, schema, description):
+            self.local[name] = handler
+
+    llm = _LLM()
+    register_all(llm, FakeMCP(), allow_javascript=True)
+    assert llm.local["CodeRunner"].__self__.allow_javascript is True
+
+    llm2 = _LLM()
+    register_all(llm2, FakeMCP())
+    assert llm2.local["CodeRunner"].__self__.allow_javascript is False
