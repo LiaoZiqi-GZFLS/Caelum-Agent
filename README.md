@@ -13,7 +13,7 @@ Caelum-Agent is a personal Windows CLI desktop-operation agent. Give it natural-
 ## Features
 
 - **ReAct loop:** Perceive → Think → Act → Verify, with optional reflection on failure.
-- **Multimodal perception:** screenshot + OCR + accessibility tree + GUI-Actor-3B SoM annotations.
+- **Multimodal perception:** screenshot + OCR + accessibility tree + YOLO (OmniParser) SoM annotations.
 - **Browser automation:** via Playwright MCP and accessibility-tree-first interactions.
 - **Desktop automation:** via Windows-MCP and UIA/A11y-first interactions, falling back to coordinate/image methods.
 - **Kimi K2.6 brain:** OpenAI-compatible API with Formula tools and local function tools.
@@ -29,7 +29,7 @@ Caelum-Agent is a personal Windows CLI desktop-operation agent. Give it natural-
 ## Requirements
 
 - Windows 10/11
-- Python **3.12** (GUI-Actor-3B requires `<3.13`; `windows-mcp` requires `>=3.12`)
+- Python **3.12** (`windows-mcp` requires `>=3.12`)
 - Node.js with `npx` (for Playwright and filesystem MCP servers)
 - Kimi API key from [Moonshot AI](https://platform.moonshot.cn/)
 
@@ -70,7 +70,7 @@ Key sections:
 
 - `llm`: Kimi API key, model, optional `reasoning_effort`, and built-in Formula tools.
 - `mcp_servers`: commands and arguments for Playwright, Windows, and filesystem MCP servers.
-- `ui_detector`: GUI-Actor-3B model path, device, dtype, and verifier settings.
+- `yolo`: OmniParser YOLO model path, device, confidence, image size, and auto-compensation.
 - `screenshot`: resolution, compression, and cropping strategy.
 - `security`: auto-execute, confirm, and destructive-operation approval levels.
 - `kill_switch`: API/action failure thresholds and same-UI-loop threshold.
@@ -182,7 +182,7 @@ python spikes/e2e_single_task.py "open notepad"
 │   └── logging_config.py      # Structured logging
 ├── eventbus/                  # Asyncio EventBus
 ├── mcp_client/                # Multi-server stdio MCP client
-├── ui_detector/               # GUI-Actor-3B + verifier
+├── ui_detector/               # OmniParser YOLO + SoM visualization
 ├── skills/                    # SKILL.md skill library
 ├── tests/                     # pytest unit + smoke tests
 └── spikes/                    # Spike/experiment scripts
@@ -206,22 +206,21 @@ Screenshot
     ├── RapidOCR text recognition
     ├── UIA/A11y control tree ──┐
     │                              ├── Structured environment description → Kimi
-    └── GUI-Actor-3B element detection → SoM annotation ──┘
+    └── YOLO icon detection (UIA-less screens) → SoM annotation ──┘
 ```
 
 ### Concurrency
 
 - Main loop: asyncio
-- Visual inference thread pool: max 2 workers (GUI-Actor-3B)
-- IO thread pool: max 8 workers (screenshots, file IO, MCP I/O)
+- IO thread pool: max 8 workers (screenshots, OCR, YOLO detection, file IO, MCP I/O)
 - Kimi API calls: asyncio-native via httpx
 
 ---
 
 ## Important Constraints
 
-- **Python 3.12 only** for the virtual environment. Do not use 3.13+ for the environment that loads GUI-Actor-3B.
-- **GUI-Actor-3B must run via Transformers native inference.** It cannot be loaded through Ollama, GGUF, vLLM, or llama.cpp.
+- **Python 3.12 only** for the virtual environment (`windows-mcp` requires `>=3.12`).
+- **The only local model is the OmniParser YOLOv8 icon detector**, loaded via ultralytics (no Ollama/GGUF/vLLM). Fetch its weights (~40MB) with `python setup.py --download-weights`.
 - **`moonshot/code-runner:latest` (hyphen) is the correct URI.** Formula URIs use hyphens (e.g. `web-search`, `code-runner`); registered tool names use underscores (`web_search`, `code_runner`). Code execution uses the local `RestrictedCodeRunner` sandbox by default; the Formula `code-runner` can be enabled as an alternative.
 - **Browser automation uses accessibility tree first**, not pure vision.
 - **Desktop automation uses UIA/A11y first**, falling back to coordinate/image methods only when needed.

@@ -10,7 +10,7 @@ A minimal implementation skeleton exists and is covered by unit tests. Key files
 - `agent/` — Core modules: config, LLM client, orchestrator, state machine, perception, security, kill switch, tools, memory, reflection, skills (AutoSkill learning).
 - `eventbus/` — Asyncio EventBus and event dataclasses.
 - `mcp_client/` — Multi-server stdio MCP client.
-- `ui_detector/` — GUI-Actor-3B model wrapper and verifier.
+- `ui_detector/` — OmniParser YOLO icon detection and SoM visualization.
 - `skills/` — `SKILL.md` skill library.
 - `tests/` — pytest unit tests.
 - `agent/snapshot_parser.py` — Parse Windows-MCP / Playwright accessibility snapshots into `UIElement` trees.
@@ -38,7 +38,7 @@ The v8 design doc specifies the following stack:
 | Browser control | Playwright MCP (`npx -y @playwright/mcp@latest`) |
 | Desktop control | Windows-MCP (`windows-mcp serve`, official CursorTouch package) |
 | Filesystem control | `@modelcontextprotocol/server-filesystem` (`npx -y ... <allowed-dir>`) |
-| UI detection | GUI-Actor-3B + Verifier (Microsoft, NeurIPS'25) via Transformers native inference |
+| UI detection | OmniParser `icon_detect` YOLOv8 (ultralytics) + SoM annotation |
 | OCR | RapidOCR (ONNXRuntime, DirectML GPU with CPU fallback) |
 | Screenshots | mss + Pillow compression/cropping |
 | Local memory | Kimi memory tool + local SQLite backup |
@@ -48,9 +48,7 @@ The v8 design doc specifies the following stack:
 | MCP multiplexing | `mcp` Python SDK `stdio_client`, 3 concurrent stdio connections in one asyncio loop |
 | Kill switch | pynput global keyboard listener + asyncio task cancellation |
 
-Important environment constraint: GUI-Actor-3B requires Python `>=3.10,<3.13` per its `pyproject.toml`, and `windows-mcp` v0.8.2 requires Python `>=3.12`. Use **Python 3.12** for the project virtual environment so both constraints are satisfied. Do not use Python 3.13+ for the environment that loads the model.
-
-Important model constraint: GUI-Actor-3B uses a custom architecture (`Qwen2_5_VLForConditionalGenerationWithPointer`) and cannot be loaded through Ollama, GGUF, vLLM, or llama.cpp. It must be run via Transformers native inference.
+Important environment constraint: `windows-mcp` v0.8.2 requires Python `>=3.12`. Use **Python 3.12** for the project virtual environment.
 
 ## Project structure
 
@@ -90,11 +88,10 @@ desktop-agent/
 │   ├── self_window.py         # Own console window hide/show (SelfWindow)
 │   ├── focus_guard.py         # Foreground focus watchdog (FocusGuard)
 │   └── cli_presenter.py       # CLI output presenter
-├── ui_detector/               # GUI-Actor-3B model, verifier, SoM
+├── ui_detector/               # OmniParser YOLO detection + SoM visualization
 │   ├── __init__.py
-│   ├── detector.py
-│   ├── verifier.py
-│   └── gui_actor/             # GUI-Actor source (local patched copy)
+│   ├── yolo_detector.py       # YoloDetector: ultralytics icon_detect wrapper
+│   └── visualizer.py          # visualize_som: numbered boxes on screenshots
 ├── mcp_client/                # MCP multi-server stdio client
 │   ├── __init__.py
 ├── eventbus/                  # Asyncio EventBus and event definitions
@@ -131,7 +128,7 @@ Key sections in `config.yaml`:
   - `moonshot/code-runner:latest` (hyphen) is the correct URI and is available; the registered tool name is `code_runner` (underscore). The local `RestrictedCodeRunner` remains the default code execution backend; enable the Formula `code-runner` as an alternative if you prefer Kimi-side execution.
   - `enable_file_extract` / `enable_media_upload`: toggle the ReadDocument / ViewMedia tools (both default true).
 - `mcp_servers`: commands and arguments for Playwright, Windows, and filesystem MCP servers.
-- `ui_detector`: GUI-Actor-3B model path, device, dtype, verifier settings.
+- `yolo`: OmniParser YOLO model path, device, confidence, image size, auto-compensation.
 - `screenshot`: resolution, compression, and cropping strategy.
 - `security`: auto-execute, confirm, and destructive-operation approval levels.
 
@@ -142,9 +139,11 @@ Beyond MCP tools, the orchestrator registers these local tools on the LLM client
 | Tool | Module | Purpose |
 |------|--------|---------|
 | `CodeRunner` | `tools.py` | Sandboxed local Python; JavaScript only with `--yes`/`--yes-all` |
-| `DesktopInteract` | `orchestrator.py` | Vision-based interaction for any app: preferred call is `target=<short visual description>` — the LLM-written query is handed to GUI-Actor pointing (top-k candidates), the verifier re-ranks, and the best candidate executes immediately; ties (same verdict, scores within `AMBIGUITY_SCORE_MARGIN=0.1`) return `[ambiguous]` + annotated screenshot for `label=` disambiguation |
+| `DesktopInteract` | `orchestrator.py` | Vision-based interaction for any app: pass `label=<marker number>` from the SoM-annotated screenshot (numbered red boxes drawn from YOLO detections); clicks/types at that marker's center, resolved against the LAST perception — no fresh detection per click. Only valid when the perception shows an annotated image; use NearbyLabels/ZoomRegion/PreviewPoints when no marker fits |
 | `PreviewPoints` | `orchestrator.py` + `preview_points.py` | Last-resort locator: 1-3 guessed coordinates (screenshot space) drawn as numbered markers on a clean screenshot copy and shown back to the model, which adjusts then clicks via `windows__Click(loc=...)`; replace semantics per call |
 | `UpgradeVision` | `orchestrator.py` + `perception.py` | Switch screenshots to the ORIGINAL (full native) resolution for the rest of the task when the model can't read small text; injects a fresh full-res perception immediately; reset per task |
+| `ZoomRegion` | `orchestrator.py` + `perception.py` | Re-perceive a native-resolution crop centered on a `label` or `loc` (sizes small/medium/large ≈ 480/960/1680 native px): fresh OCR + YOLO + dual images for that region. Coordinates auto-translated via the region origin (screen = origin + coord × area / image), so DesktopInteract/loc keep working; the next perception round resets to full screen |
+| `NearbyLabels` | `orchestrator.py` | Pure-geometry helper: list the k nearest SoM annotations to a given label or loc (screenshot-space distance, nearest first), so the model can triangulate a point near a known marker without another detection pass |
 | `CompleteTask` | `orchestrator.py` | Model-decided fast path: finish without verification |
 | `RequestHumanHelp` | `orchestrator.py` + `choice_menu.py` | Interactive TTY question with selectable options |
 | `UpdateTaskList` | `task_list.py` | Model-managed pending/in_progress/completed task list; self-clears when done |
@@ -200,14 +199,14 @@ python setup.py
 ```
 
 The setup script is intended to:
-1. Check Python 3.12 (GUI-Actor requires Python `<3.13`; `windows-mcp` requires `>=3.12`)
+1. Check Python 3.12 (`windows-mcp` requires `>=3.12`)
 2. Create `.venv/` (prefer `uv`, fall back to stdlib `venv`)
 3. `pip install -r requirements.txt` (with `--ignore-requires-python` for `windows-mcp`)
 4. Copy `config.yaml.example` to `config.yaml` if missing
 5. Create `data/` and SQLite schema
-6. Optionally download GUI-Actor-3B weights (`--download-weights --weights-source github|huggingface`)
+6. Optionally download the OmniParser YOLO weights (`--download-weights`)
 7. Install Playwright Chromium (`npx playwright install chromium`)
-8. Run smoke tests (Kimi API, all MCP servers, GUI-Actor load)
+8. Run smoke tests (Kimi API, all MCP servers, YOLO load + one inference)
 
 For Playwright Chromium download behind the Chinese firewall:
 
@@ -216,19 +215,13 @@ $env:PLAYWRIGHT_DOWNLOAD_HOST = "https://npmmirror.com/mirrors/playwright"
 python setup.py
 ```
 
-To download weights from the GitHub Release mirror (recommended for China):
+To download the YOLO vision weights from the GitHub Release mirror (recommended for China):
 
 ```powershell
-python setup.py --download-weights --weights-source github
+python setup.py --download-weights
 ```
 
-To download weights from HuggingFace via `hf-mirror.com`:
-
-```powershell
-python setup.py --download-weights --weights-source huggingface
-```
-
-The GitHub Release mirror is maintained at `LiaoZiqi-GZFLS/GUI-Actor-3B-Weights`. Weights are split into 1.9GB volumes because GitHub limits single release assets to 2GB.
+The mirror is maintained at `LiaoZiqi-GZFLS/omniparser-weights` (release asset `icon_detect.zip`, ~40MB). The download is idempotent (skipped when a plausible `model.pt` already exists) and best-effort (a failure only disables vision SoM; UIA automation still works).
 
 ### Running the agent
 
@@ -254,11 +247,13 @@ system prompt then tells the model either that a human is at the keyboard (so
 must not call `RequestHumanHelp` and should finish with manual instructions
 when blocked).
 
-### GUI-Actor-3B weight download
+### YOLO vision weights
 
 ```powershell
-huggingface-cli download microsoft/GUI-Actor-3B-Qwen2.5-VL --local-dir ./models/gui-actor-3b
+python setup.py --download-weights
 ```
+
+Downloads `icon_detect.zip` from the `LiaoZiqi-GZFLS/omniparser-weights` GitHub Release into `models/omniparser/icon_detect/` (`model.pt` + `model.yaml` + `train_args.yaml`). The zip layout (nested folder or root-level files) is detected automatically.
 
 ## Core architecture
 
@@ -281,18 +276,20 @@ Screenshot
     ├──▶ RapidOCR text recognition
     ├──▶ UIA/A11y control tree ──┐
     │                              ├──▶ Structured environment description → Kimi
-    └──▶ GUI-Actor-3B element detection → SoM annotation ──┘
+    └──▶ YOLO icon detection (UIA-less screens) → SoM annotation ──┘
 ```
 
 OCR input is **inverse-DPI normalized**: `_run_ocr` reads the Windows display scale of the primary monitor (`shcore.GetScaleFactorForMonitor`, works despite our DPI-unaware process) and resizes the screenshot by 1/scale so text sits at its 100% size for RapidOCR — at 100% the original image is used untouched. The result is floored at the 1080p box (`_OCR_MAX_SIZE`), so extreme scaling never yields a smaller image than plain capping would. **The model-facing screenshot uses the same normalization** (`_compress` calls the same `_ocr_resize_ratio`; there are no size config knobs) — `UpgradeVision` flips `original_resolution` and sends the full original image instead. OCR runs on the **GPU via DirectML** when `ocr.use_dml` is on (default) and `onnxruntime-directml` is installed — `setup.py` swaps it in post-install on Windows (rapidocr-onnxruntime's dependency always lands the CPU build first); rapidocr falls back to CPU with a warning when the DML provider is missing. Measured ~5.5x faster warm (4.3s → 0.8s on a 2560×1440 screenshot, RTX 4090 Laptop); spike: `scripts/spike_ocr_dml.py`.
 
 **ChromaDB embeddings must stay on CPU.** After the onnxruntime-directml swap, ChromaDB's default provider list puts `DmlExecutionProvider` first too — and two concurrent DirectML sessions (RapidOCR during perception + ChromaDB ONNX embedding during background skill learning) break the DML device: either a native access violation in `onnxruntime_pybind11_state.pyd` (0xc0000005, observed crashing the agent mid-task) or `DXGI_ERROR_DEVICE_HUNG` (887A0006). `MemoryStore` therefore pins the skill collection to `ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])` (`agent/memory.py`) — the model is tiny, so CPU costs nothing. Repro/verification: `scripts/repro_dml_crash.py --dml-embedding` (crashes, old behavior) vs. default (survives 120s, fixed).
 
-Vision (GUI-Actor SoM) is lazy by default — it runs only for `DesktopInteract`. As an automatic compensation (`ui_detector.auto_compensate`, default true), `perceive()` also runs one vision pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself.
+Vision (YOLO SoM) runs as automatic compensation (`yolo.auto_compensate`, default true): `perceive()` runs one detection pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself. `ZoomRegion` always runs YOLO on its crop.
 
-GUI-Actor runs in **instruction-conditioned pointing mode**, not full-screen detection: one inference returns top-k (default 3, `ui_detector.topk`) candidate points for the given query; the verifier crops 224×224 around each, re-scores with the same model (pass ≥0.55 / reject ≤0.25 / uncertain), and rejects are dropped from the annotations. The query is the `DesktopInteract(target=...)` description when provided, else the whole task instruction (auto-compensation fallback).
+YOLO (OmniParser `icon_detect` YOLOv8, ~40MB, ultralytics) runs full-frame icon detection on the compressed screenshot: the model loads lazily on the first detection (~200ms) and measures ~50ms/frame on GPU with an automatic one-time CPU fallback. Each detection becomes a numbered annotation (`{label, center_x, center_y, bbox, score}`, normalized) drawn by `visualize_som` as a red box with its number; when annotations exist the model receives **dual images** — the clean screenshot first, the annotated copy second. `DesktopInteract(label=N)` resolves the label against the LAST perception's annotations (no fresh detection per click).
 
-Coordinate contract: the model only ever sees the **compressed** screenshot (inverse-DPI normalized, same as OCR input; the ORIGINAL image after `UpgradeVision`) and is told by the perception description to give `loc` coordinates in that image's space. The orchestrator rescales them to native screen pixels at execution time (`_rescale_loc_args`, using `Perception.screen_width/height` vs `screenshot_width/height`) — the model never does scaling math. Skipped when `screenshot.crop_to_active_window` is on (image is then window-relative).
+Coordinate contract: the model only ever sees the **compressed** screenshot (inverse-DPI normalized, same as OCR input; the ORIGINAL image after `UpgradeVision`) and is told by the perception description to give `loc` coordinates in that image's space. The orchestrator rescales them to native screen pixels at execution time (`_rescale_loc_args`: `screen = image_origin + loc * screen_size / screenshot_size`, where `image_origin` is (0,0) for full-screen views and the crop's top-left corner for ZoomRegion views) — the model never does scaling math. Skipped when `screenshot.crop_to_active_window` is on (image is then window-relative).
+
+Locator degradation chain (cheapest/most reliable first): UIA label (`windows__Snapshot` + `Click`) → YOLO SoM + `DesktopInteract(label=N)` → `NearbyLabels` triangulation → `ZoomRegion` re-perception → `UpgradeVision`/`CaptureWindow` → `PreviewPoints` coordinate guessing.
 
 ### MCP server concurrency
 
@@ -318,7 +315,7 @@ Each connection reconnects with exponential backoff on disconnect.
 
 - The official package exposes 19 tools: `Snapshot`, `Screenshot`, `Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `Wait`, `WaitFor`, `App`, `PowerShell`, `FileSystem`, `Process`, `Scrape`, `Clipboard`, `Notification`, `Registry`, `MultiSelect`, `MultiEdit`.
 - Use `Snapshot` when you need element `label` IDs for `Click`/`Type`/`Scroll`/`Move`. Use `Screenshot` for a fast visual-only capture.
-- `Snapshot` supports `use_ui_tree`, `use_vision`, `use_dom`, and `use_annotation`. Browser DOM mode (`use_dom=True`) filters browser chrome and works in Chrome, Edge, and Firefox. Note: `use_vision=True` only embeds the screenshot image (cursor highlight, optional grid) in the response — windows-mcp 0.8.2 has **no** vision-based element detection (no OmniParser); vision grounding is our own GUI-Actor/SoM path.
+- `Snapshot` supports `use_ui_tree`, `use_vision`, `use_dom`, and `use_annotation`. Browser DOM mode (`use_dom=True`) filters browser chrome and works in Chrome, Edge, and Firefox. Note: `use_vision=True` only embeds the screenshot image (cursor highlight, optional grid) in the response — windows-mcp 0.8.2 has **no** vision-based element detection (no OmniParser); vision grounding is our own YOLO/SoM path.
 - For safety, consider excluding `PowerShell` and `Registry` via `--exclude-tools "PowerShell,Registry"` unless the task explicitly requires them.
 - windows-mcp 0.8.2 has an upstream bug (`UnboundLocalError: tree_node` in `tree/service.py` when an interactive element has an empty name) that drops a window's subtree and floods stderr. `setup.py` applies an idempotent patch to the installed file after dependency installation (skipped if already fixed or the layout changed); label-expiry and stale-snapshot defenses live in `agent/tools.py` / `agent/orchestrator.py` — labels are rebuilt by every Snapshot (and perception re-snapshots every round), so on a "Label N out of range" failure the orchestrator auto-fetches a fresh Snapshot and appends it (truncated to 6KB) to the error, letting the model retry with current labels in the same round. Root-cause writeup: `docs/windows_mcp/upstream-tree-node-issue.md`.
 - Subprocess stderr from the windows server goes through `_UpstreamNoiseFilter` (`mcp_client/__init__.py`), installed as the client's `errlog` via a real OS pipe (the MCP SDK passes `errlog` to `Popen(stderr=...)`, which requires `fileno()`). It drops tree_node noise lines (traceback-aware, chained blocks judged independently) and whole fastmcp tool-error records (`Error calling tool` / `Invalid arguments for tool` header + indented rich traceback) — those errors are already returned as tool results, so the stderr copy is pure noise. A periodic summary (`caelum.mcp` INFO, ≤1/60s) reports what was suppressed; everything else passes through unmodified.
@@ -326,8 +323,7 @@ Each connection reconnects with exponential backoff on disconnect.
 ### Concurrency model
 
 - Main loop: asyncio
-- Visual inference thread pool: max 2 workers (GUI-Actor-3B)
-- IO thread pool: max 8 workers (screenshots, file IO, MCP I/O)
+- IO thread pool: max 8 workers (screenshots, OCR, YOLO detection, file IO, MCP I/O)
 - Kimi API calls: asyncio-native via httpx
 
 ### State machine
@@ -365,7 +361,7 @@ The user-editable config is `config.yaml` (gitignored). `config.py` validates it
 
 ## Important design decisions
 
-- No Ollama: the only local model is GUI-Actor-3B, loaded directly via Transformers.
+- No Ollama: the only local model is the OmniParser YOLOv8 icon detector, loaded via ultralytics.
 - Browser automation uses the accessibility tree first (Playwright MCP), not pure vision.
 - Desktop automation uses UIA/A11y first (Windows-MCP), falling back to coordinate/image methods only when needed.
 - Kimi's built-in tools (`web-search`, `memory`, `rethink`, `fetch`, `excel`, `convert`, `date`, `base64`, `quickjs`, `random-choice`, `mew`) replace local implementations for search, memory, reflection, fetch, Excel/CSV analysis, and light code execution.
