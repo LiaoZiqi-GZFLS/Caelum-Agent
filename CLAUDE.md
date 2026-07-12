@@ -145,7 +145,7 @@ Beyond MCP tools, the orchestrator registers these local tools on the LLM client
 | `UpdateTaskList` | `task_list.py` | Model-managed pending/in_progress/completed task list; self-clears when done |
 | `ReadDocument` | `file_reader.py` | Binary docs (PDF/DOCX/PPTX/EPUB/XLSX) via Kimi Files API `file-extract`, paginated, sha256-cached; returns a `doc:<sha8>` ref |
 | `DraftContent` | `content_writer.py` | Writer subagent for long-form content (persona + Partial Mode prefill), writes `data/cache/drafts/*.md`; accepts a `doc_ref` to write from a document without loading it into main context |
-| `ViewMedia` | `media.py` | Local images/videos uploaded with `purpose=image`/`video` and rendered natively via `ms://` refs. Images >4K downscaled to 3840x2160; videos re-encoded to 15fps/1080p (requires **ffmpeg** on PATH); source files >300MB rejected up front, 100MB cap after compression |
+| `ViewMedia` | `media.py` | Local images/videos uploaded with `purpose=image`/`video` and rendered natively via `ms://` refs. Images >4K downscaled to 3840x2160; videos re-encoded to 15fps/1080p (ffmpeg from PATH, falling back to the bundled `imageio-ffmpeg` binary); source files >300MB rejected up front, 100MB cap after compression |
 
 Kimi Files API notes: uploaded files are kept by the platform **indefinitely** (no TTL; 1000-file/10GB quota). `file-extract` uploads are deleted right after extraction (best-effort) and cached locally by sha256; `image`/`video` uploads must outlive the task that references them. All three purposes are swept at startup **and** after each task ends (fire-and-forget, never raises).
 

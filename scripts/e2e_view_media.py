@@ -1,7 +1,6 @@
 """End-to-end test of ViewMedia against the real Kimi API (not committed)."""
 
 import asyncio
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +9,7 @@ from openai import OpenAI
 from PIL import Image, ImageDraw
 
 from agent.config import load_config
-from agent.media import MediaUploader
+from agent.media import MediaUploader, _find_ffmpeg
 
 WORK = Path("data/cache/media_e2e")
 
@@ -60,10 +59,12 @@ async def main() -> int:
     assert ok_img, f"image understanding failed: {answer}"
 
     # --- 2. video upload (only if ffmpeg available) ---------------------
-    if shutil.which("ffmpeg"):
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg:
+        print(f"[video] using ffmpeg: {ffmpeg}")
         raw_video = WORK / "e2e_raw.mp4"
         subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i",
+            [ffmpeg, "-y", "-f", "lavfi", "-i",
              "color=c=orange:s=640x480:d=2",
              "-c:v", "libx264", "-pix_fmt", "yuv420p", str(raw_video)],
             check=True, capture_output=True,

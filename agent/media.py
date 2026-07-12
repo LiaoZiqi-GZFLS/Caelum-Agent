@@ -55,13 +55,28 @@ def parse_media_refs(text: str) -> list[tuple[str, str]]:
     return [(m.group(1), m.group(2)) for m in MEDIA_REF_RE.finditer(text or "")]
 
 
+def _find_ffmpeg() -> str | None:
+    """Locate an ffmpeg executable: PATH first, then the imageio-ffmpeg bundle."""
+    found = shutil.which("ffmpeg")
+    if found is not None:
+        return found
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return None
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 async def _ffmpeg_compress_video(src: Path, dst: Path) -> Path:
     """Re-encode a video to 15fps / <=1080p H.264 + AAC for upload."""
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = _find_ffmpeg()
     if ffmpeg is None:
         raise RuntimeError(
             "ffmpeg not found: video upload requires ffmpeg for 15fps/1080p "
-            "compression. Install ffmpeg and ensure it is on PATH."
+            "compression. Install ffmpeg on PATH or `pip install imageio-ffmpeg`."
         )
     dst.parent.mkdir(parents=True, exist_ok=True)
     proc = await asyncio.create_subprocess_exec(

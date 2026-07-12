@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -213,10 +214,42 @@ async def test_ffmpeg_compressor_requires_ffmpeg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(media_mod.shutil, "which", lambda name: None)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)  # import fails
     with pytest.raises(RuntimeError, match="ffmpeg"):
         await media_mod._ffmpeg_compress_video(
             tmp_path / "in.mp4", tmp_path / "out.mp4"
         )
+
+
+@pytest.mark.asyncio
+async def test_ffmpeg_compressor_falls_back_to_bundled_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ffmpeg on PATH but imageio-ffmpeg installed -> use its binary."""
+    import types
+
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def fake_exec(*args: str, **kwargs: Any) -> _FakeProc:
+        captured.append(list(args))
+        return _FakeProc()
+
+    fake_module = types.SimpleNamespace(
+        get_ffmpeg_exe=lambda: "/bundled/imageio-ffmpeg"
+    )
+    monkeypatch.setattr(media_mod.shutil, "which", lambda name: None)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", fake_module)
+    monkeypatch.setattr(media_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    await media_mod._ffmpeg_compress_video(tmp_path / "in.mp4", tmp_path / "out.mp4")
+
+    assert captured[0][0] == "/bundled/imageio-ffmpeg"
 
 
 def test_ffmpeg_command_targets_15fps_1080p(monkeypatch: pytest.MonkeyPatch) -> None:

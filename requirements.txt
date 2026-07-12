@@ -2,6 +2,7 @@ accelerate==1.14.0
 chromadb==1.5.9
 huggingface-hub==0.36.2
 httpx==0.28.1
+imageio-ffmpeg==0.6.0
 mcp==1.28.1
 mss==10.2.0
 openai==2.44.0
