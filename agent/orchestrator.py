@@ -31,6 +31,7 @@ from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.self_window import register_self_window
 from agent.skills import SkillLearner
+from agent.snapshot_parser import unwrap_windows_snapshot
 from agent.state_machine import AgentStateMachine
 from agent.task_list import TaskList, register_task_list
 from agent.tools import (
@@ -1550,10 +1551,30 @@ class AgentOrchestrator:
                 if not success and _STALE_LABEL_RE.search(content):
                     content += (
                         "\n[hint] Labels are invalidated whenever a new "
-                        "Snapshot/Screenshot is taken. Call windows__Snapshot "
-                        "now to get fresh labels, then retry this action with "
-                        "the new label."
+                        "Snapshot/Screenshot is taken (perception re-snapshots "
+                        "every round). Retry this action with a CURRENT label "
+                        "— a fresh windows__Snapshot follows if available."
                     )
+                    # Auto-refresh: spare the model a round trip by fetching
+                    # fresh labels immediately after a stale-label failure.
+                    try:
+                        snap = await self.mcp.call("windows", "Snapshot", {})
+                        if snap.success and snap.content:
+                            fresh = unwrap_windows_snapshot(snap.content)
+                            if len(fresh) > 6000:
+                                fresh = (
+                                    fresh[:6000]
+                                    + "\n... (truncated — call windows__Snapshot "
+                                    "for the full tree if your target is not listed)"
+                                )
+                            content += (
+                                "\n[fresh snapshot — these labels are valid now]\n"
+                                + fresh
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Auto-refresh Snapshot after stale label failed: %s", exc
+                        )
             await self.eventbus.emit(
                 ToolCallCompleted(
                     server=server,

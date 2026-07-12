@@ -2309,6 +2309,48 @@ async def test_stale_label_error_gets_recovery_hint(config, eventbus, killswitch
 
 
 @pytest.mark.asyncio
+async def test_stale_label_error_appends_fresh_snapshot(config, eventbus, killswitch):
+    """On a stale-label error, the agent auto-fetches a fresh Snapshot and
+    appends it to the error so the model can retry with valid labels in the
+    SAME round instead of spending a round trip on windows__Snapshot.
+
+    Perception calls windows__Snapshot every round, which rebuilds
+    windows-mcp's label space — model-held labels from earlier rounds go
+    stale even without any UI change."""
+    llm = FakeLLM([
+        _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"label": 2445})]),
+        _message("retrying"),
+        _message("YES"),
+        _message("done."),
+    ])
+    mcp = FakeMCP([
+        {"server": "windows", "name": "Click", "description": "", "schema": {}},
+        {"server": "windows", "name": "Snapshot", "description": "", "schema": {}},
+    ])
+    mcp.set_result("windows", "Click", ToolResult(
+        success=False,
+        content="Error calling tool 'Click': Failed to find element with label 2445: "
+                "Label 2445 out of range",
+    ))
+    mcp.set_result("windows", "Snapshot", ToolResult(
+        success=True,
+        content='["UI Tree:\\ndesktop\\n├── [3] 按钮 \\"确定\\"  [action: click]"]',
+    ))
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.set_human_confirmation_callback(lambda summary, action: True)
+
+    await agent.run_task("click something")
+
+    tool_msgs = [m for m in agent.history if m["role"] == "tool"]
+    err_msg = next(m for m in tool_msgs if "2445" in m["content"])
+    assert "[fresh snapshot" in err_msg["content"]
+    assert "[3]" in err_msg["content"], "fresh snapshot labels must be included"
+
+
+@pytest.mark.asyncio
 async def test_local_tool_calls_emit_presenter_events(config, eventbus, killswitch):
     """Local (non-MCP) tools must emit ToolCallRequested/Completed so the
     terminal shows what the agent is doing (e.g. DesktopInteract inference)."""
