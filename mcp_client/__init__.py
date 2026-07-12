@@ -41,6 +41,10 @@ _NOISE_PATTERNS = [
     re.compile(r"getting nodes for handle", re.IGNORECASE),
     re.compile(r"Task failed completely for handle", re.IGNORECASE),
     re.compile(r"UI services may be loading", re.IGNORECASE),
+    # Orphaned continuation of the multi-line "Error in processing window"
+    # warning when it arrives at column 0: UIAException renders as
+    # "UIA_E_... (-2147...)" — useless without its (suppressed) header.
+    re.compile(r"^Error: (UIA_|RPC_|RO_|CO_|EVENT_)", re.IGNORECASE),
 ]
 
 # Python traceback framing: a block starts at this header, its frames are
@@ -83,7 +87,10 @@ class _UpstreamNoiseFilter:
     fastmcp tool-error records (``Error calling tool`` / ``Invalid arguments
     for tool`` header + indented rich traceback) are dropped unconditionally:
     the error is already delivered as the tool result and shown by the
-    presenter, so the stderr copy is pure noise.
+    presenter, so the stderr copy is pure noise. Any suppressed header also
+    swallows its indented continuation lines (rich pads multi-line records),
+    and orphaned ``Error: UIA_E_... (-2147...)`` tails are matched directly
+    for the case where the continuation arrives unindented.
     """
 
     SUMMARY_INTERVAL = 60.0  # seconds between "suppressed N lines" summaries
@@ -104,8 +111,9 @@ class _UpstreamNoiseFilter:
         # line in it matched a noise pattern.
         self._tb_buffer: list[str] | None = None
         self._tb_noise = False
-        # Inside a fastmcp tool-error record (header seen, indented body
-        # being swallowed); counts lines so a runaway record self-terminates.
+        # Swallowing the indented continuation of a suppressed log record
+        # (rich pads multi-line records); counts lines so a runaway record
+        # self-terminates. 0 = not swallowing.
         self._record_lines = 0
         # OS pipe backing fileno(); created lazily so unit tests (which drive
         # write()/flush() directly) pay no cost and spawn no thread.
@@ -166,15 +174,19 @@ class _UpstreamNoiseFilter:
                 self._resolve_traceback()
             return
         if self._record_lines:
-            # Inside a fastmcp tool-error record: swallow the indented body.
-            # Blank lines count as body (rich pads with them); the first
-            # non-indented line ends the record and is processed normally.
+            # Swallowing a suppressed record's body: rich indents the
+            # continuation lines of a multi-line log record, so they belong
+            # to the header we just dropped. Blank lines count as body; the
+            # first non-indented line ends the record and is processed
+            # normally.
             self._record_lines += 1
             deindented = bool(line) and line[0] not in " \t"
             if deindented or self._record_lines >= _MAX_RECORD_LINES:
                 self._record_lines = 0
                 if deindented:
                     self._process_line(line)
+                return
+            self._suppressed += 1
             return
         if line.startswith(_TB_HEADER):
             self._tb_buffer = [line]
@@ -186,6 +198,7 @@ class _UpstreamNoiseFilter:
             return
         if self._is_noise(line):
             self._suppressed += 1
+            self._record_lines = 1  # swallow any indented continuation too
         else:
             self._downstream.write(line + "\n")
 

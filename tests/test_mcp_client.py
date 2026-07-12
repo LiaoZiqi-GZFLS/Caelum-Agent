@@ -339,6 +339,51 @@ def test_upstream_noise_filter_tool_error_summary(caplog):
     assert filt._suppressed_records == 0
 
 
+def test_noise_line_swallows_indented_continuation():
+    """windows-mcp's 'Error in processing window' warning spans TWO lines
+    (header + 'Error: UIA_E_...' continuation, indented by rich). When the
+    header is suppressed as noise, the continuation must go with it instead
+    of leaking as an orphaned error line."""
+    filt, downstream = _make_filter()
+    filt.write(
+        "[07/13/26 02:58:20] WARNING  Error in processing window 'X' "
+        "(handle 123), retry attempt 1/3\n"
+    )
+    filt.write(
+        "                    Error: UIA_E_ELEMENTNOTAVAILABLE (-2147220991)\n"
+    )
+    filt.write("real line\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "real line\n"
+    assert filt._suppressed == 2
+
+
+def test_uia_error_tail_line_suppressed_standalone():
+    """Belt and braces: if the UIA error tail arrives NOT indented (column
+    0), it is still recognized as the orphaned continuation of the upstream
+    warning and dropped."""
+    filt, downstream = _make_filter()
+    filt.write("Error: UIA_E_ELEMENTNOTAVAILABLE (-2147220991)\n")
+    filt.write("real line\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "real line\n"
+    assert filt._suppressed == 1
+
+
+def test_noise_line_does_not_swallow_next_record():
+    """Swallow mode ends at the first non-indented line, which is then
+    processed normally: a real error following a noise line passes."""
+    filt, downstream = _make_filter()
+    filt.write("Error in tree_traversal: tree_node\n")
+    filt.write("ValueError: real problem\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "ValueError: real problem\n"
+    assert filt._suppressed == 1
+
+
 def test_upstream_noise_filter_fileno_created_lazily():
     filt, _ = _make_filter()
     try:
