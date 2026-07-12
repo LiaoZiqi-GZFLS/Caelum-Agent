@@ -46,8 +46,13 @@ def _win32_list_windows() -> list[tuple[int, str]]:
     return results
 
 
-def _win32_capture_window(hwnd: int, out: Path) -> None:
-    """Render a window into a PNG via PrintWindow(PW_RENDERFULLCONTENT)."""
+def _win32_capture_window(hwnd: int, out: Path) -> tuple[int, int, int, int]:
+    """Render a window into a PNG via PrintWindow(PW_RENDERFULLCONTENT).
+
+    Returns the window's screen rect ``(left, top, width, height)`` — the
+    captured bitmap is a 1:1 rendering of exactly that rect, so image pixel
+    ``(ix, iy)`` maps to screen ``(left + ix, top + iy)``.
+    """
     from PIL import Image
 
     user32 = ctypes.windll.user32
@@ -99,6 +104,7 @@ def _win32_capture_window(hwnd: int, out: Path) -> None:
         gdi32.DeleteObject(bmp)
         gdi32.DeleteDC(mem_dc)
         user32.ReleaseDC(hwnd, hwnd_dc)
+    return (rect.left, rect.top, w, h)
 
 
 class WindowCapturer:
@@ -112,7 +118,7 @@ class WindowCapturer:
         self,
         out_dir: Path | str,
         list_windows: Callable[[], list[tuple[int, str]]] | None = None,
-        capture: Callable[[int, Path], None] | None = None,
+        capture: Callable[[int, Path], tuple[int, int, int, int] | None] | None = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self._list_windows = list_windows or _win32_list_windows
@@ -133,8 +139,13 @@ class WindowCapturer:
     def available_titles(self) -> list[str]:
         return [full for _, full in self._list_windows()]
 
-    def capture_by_title(self, title: str) -> tuple[str, Path]:
-        """Capture the best-matching window; raise ValueError if not found."""
+    def capture_by_title(self, title: str) -> tuple[str, Path, tuple[int, int, int, int] | None]:
+        """Capture the best-matching window; raise ValueError if not found.
+
+        Returns ``(full_title, image_path, window_rect)`` where window_rect is
+        ``(left, top, width, height)`` in screen space (None when the capture
+        backend does not report it).
+        """
         match = self.find(title)
         if match is None:
             titles = ", ".join(self.available_titles()[:20]) or "(none)"
@@ -144,24 +155,51 @@ class WindowCapturer:
         hwnd, full = match
         digest = hashlib.sha256(f"{hwnd}|{full}".encode("utf-8")).hexdigest()[:8]
         out = self.out_dir / f"win-{digest}.png"
-        self._capture(hwnd, out)
-        return full, out
+        rect = self._capture(hwnd, out)
+        return full, out, rect
 
 
-def make_capture_window_handler(capturer: WindowCapturer, uploader: Any):
-    """Build the async CaptureWindow tool handler."""
+def make_capture_window_handler(
+    capturer: WindowCapturer,
+    uploader: Any,
+    on_capture: Callable[[tuple[int, int, int, int], tuple[int, int]], None] | None = None,
+):
+    """Build the async CaptureWindow tool handler.
+
+    ``on_capture(window_rect, image_size)`` (when provided and the capture
+    reports a rect) lets the caller record the coordinate view so model-given
+    loc values in the image's pixel space can be translated back to screen
+    coordinates at click time.
+    """
 
     async def capture_window(title: str) -> str:
         try:
-            full_title, path = capturer.capture_by_title(title)
+            full_title, path, rect = capturer.capture_by_title(title)
             _, url = await uploader.upload(path)
         except Exception as exc:
             return f"[error] {exc}"
-        return (
+        message = (
             f"[media_ref] image {url}\n"
             f"Window '{full_title}' captured via PrintWindow and attached; "
             "you can now see its contents directly."
         )
+        if rect is not None:
+            from PIL import Image
+
+            try:
+                with Image.open(path) as img:
+                    image_size = img.size
+            except Exception:
+                image_size = (rect[2], rect[3])
+            if on_capture is not None:
+                on_capture(rect, image_size)
+            message += (
+                f"\nThe window sits at screen rect (left={rect[0]}, top={rect[1]}, "
+                f"size={rect[2]}x{rect[3]}); the image is a 1:1 rendering of it. "
+                "Give loc coordinates in THIS image's pixel space — they are "
+                "translated to screen coordinates automatically at click time."
+            )
+        return message
 
     return capture_window
 
@@ -182,7 +220,11 @@ CAPTURE_WINDOW_SCHEMA = {
 
 
 def register_capture_window(
-    llm: Any, config: Any, cache_dir: Path | str, uploader: Any | None
+    llm: Any,
+    config: Any,
+    cache_dir: Path | str,
+    uploader: Any | None,
+    on_capture: Callable[[tuple[int, int, int, int], tuple[int, int]], None] | None = None,
 ) -> WindowCapturer | None:
     """Register the CaptureWindow tool; needs a MediaUploader for display."""
     if uploader is None or not getattr(config, "enable_media_upload", True):
@@ -190,7 +232,7 @@ def register_capture_window(
     capturer = WindowCapturer(Path(cache_dir) / "captures")
     llm.register_local_function(
         "CaptureWindow",
-        make_capture_window_handler(capturer, uploader),
+        make_capture_window_handler(capturer, uploader, on_capture=on_capture),
         schema=CAPTURE_WINDOW_SCHEMA,
         description=(
             "Capture a specific window by title using PrintWindow and SEE its "

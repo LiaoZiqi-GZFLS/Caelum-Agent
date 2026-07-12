@@ -2479,6 +2479,80 @@ async def test_windows_loc_passes_through_without_dimensions(config, eventbus, k
 
 
 # ---------------------------------------------------------------------------
+# CaptureWindow view: loc coordinates after CaptureWindow map through the
+# window's own screen rect, not the last full-screen perception.
+# ---------------------------------------------------------------------------
+
+def _agent_with_capture_view(config, eventbus, killswitch, view):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent._capture_view = view
+    return agent
+
+
+def test_capture_view_rescales_loc_with_window_origin(config, eventbus, killswitch):
+    # 1:1 capture: image space == window rect; only the origin translates.
+    agent = _agent_with_capture_view(
+        config, eventbus, killswitch,
+        {"ox": 500, "oy": 300, "w": 600, "h": 400, "iw": 600, "ih": 400},
+    )
+
+    out = agent._rescale_loc_args({"loc": [60, 40]})
+
+    assert out["loc"] == [560, 340]
+
+
+def test_capture_view_scales_when_image_differs_from_rect(config, eventbus, killswitch):
+    agent = _agent_with_capture_view(
+        config, eventbus, killswitch,
+        {"ox": 0, "oy": 0, "w": 1000, "h": 500, "iw": 500, "ih": 250},
+    )
+
+    out = agent._rescale_loc_args({"loc": [250, 125]})
+
+    assert out["loc"] == [500, 250]
+
+
+def test_capture_view_takes_precedence_over_last_perception(config, eventbus, killswitch):
+    agent = _agent_with_capture_view(
+        config, eventbus, killswitch,
+        {"ox": 500, "oy": 300, "w": 600, "h": 400, "iw": 600, "ih": 400},
+    )
+    agent._last_perception = _scaled_perception()
+
+    out = agent._rescale_loc_args({"loc": [60, 40]})
+
+    assert out["loc"] == [560, 340]  # capture view wins, not 2x screen scaling
+
+
+def test_set_capture_view_from_rect_and_image_size(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    agent._set_capture_view((10, 20, 300, 200), (60, 40))
+
+    assert agent._capture_view == {
+        "ox": 10, "oy": 20, "w": 300, "h": 200, "iw": 60, "ih": 40,
+    }
+
+
+def test_set_last_perception_clears_capture_view(config, eventbus, killswitch):
+    agent = _agent_with_capture_view(
+        config, eventbus, killswitch,
+        {"ox": 500, "oy": 300, "w": 600, "h": 400, "iw": 600, "ih": 400},
+    )
+
+    agent._set_last_perception(_blank_perception())
+
+    assert agent._capture_view is None
+    assert agent._last_perception is not None
+
+
+# ---------------------------------------------------------------------------
 # PreviewPoints (coordinate preview before raw-coordinate clicking)
 # ---------------------------------------------------------------------------
 

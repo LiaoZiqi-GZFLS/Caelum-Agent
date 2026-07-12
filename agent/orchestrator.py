@@ -146,6 +146,11 @@ class AgentOrchestrator:
         self.mcp = mcp
         self.kill_switch = kill_switch
         self.detector: Any | None = None
+        # Active CaptureWindow coordinate view (window screen rect + image
+        # size). While set, model-given loc values map through THIS view —
+        # the model is looking at the captured window image, not the last
+        # full-screen perception. Cleared whenever a new perception lands.
+        self._capture_view: dict[str, int] | None = None
         self.state = AgentStateMachine(eventbus)
         self._kimi_client: Any | None = None
         if config.memory.use_kimi_memory or config.reflection.use_rethink:
@@ -324,6 +329,7 @@ class AgentOrchestrator:
             self.config.llm,
             self.config.cache_dir_absolute(),
             uploader=self.media_uploader,
+            on_capture=self._set_capture_view,
         )
         self.self_window = register_self_window(self.llm)
         # Guardrail: a hidden console must never outlive the process, or the
@@ -562,7 +568,7 @@ class AgentOrchestrator:
             center_y = int(round(oy + float(loc[1]) * sh / ch))
 
         region = await self.perception.perceive_region(center_x, center_y, px)
-        self._last_perception = region
+        self._set_last_perception(region)
         self._pending_region = region
         return (
             f"[ok] Zoomed {size} region ({px}px) around screen ({center_x}, "
@@ -1258,7 +1264,7 @@ class AgentOrchestrator:
             perception = await self.perception.perceive(
                 instruction=self.current_instruction,
             )
-            self._last_perception = perception
+            self._set_last_perception(perception)
             perception_content = self._format_perception(perception)
             # Any extra context for this round (loop-extension notice, task
             # list render, or the one-time planning nudge) rides as extra text
@@ -1305,7 +1311,7 @@ class AgentOrchestrator:
                 return f"{reason}; agent is stuck."
 
             current_perception = perception
-            self._last_perception = perception
+            self._set_last_perception(perception)
 
             try:
                 response = await self._think_and_act()
@@ -1333,7 +1339,7 @@ class AgentOrchestrator:
                 post_action_perception = await self.perception.perceive(
                     instruction=self.current_instruction,
                 )
-                self._last_perception = post_action_perception
+                self._set_last_perception(post_action_perception)
                 self.history.append({
                     "role": "user",
                     "content": self._format_perception(post_action_perception),
@@ -1442,7 +1448,7 @@ class AgentOrchestrator:
                 fresh = await self.perception.perceive(
                     instruction=self.current_instruction,
                 )
-                self._last_perception = fresh
+                self._set_last_perception(fresh)
                 followup_parts.extend(self._format_perception(fresh))
                 followup_parts.append({
                     "type": "text",
@@ -1702,18 +1708,54 @@ class AgentOrchestrator:
             for k, v in args.items()
         }
 
-    def _rescale_loc_args(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Convert a model-given loc from screenshot space to native pixels.
+    def _set_last_perception(self, perception: Any) -> None:
+        """Record the latest perception; any CaptureWindow view is superseded.
 
-        The model only ever sees the compressed screenshot and is told (via
-        the perception description) to give coordinates in that space; the
-        scaling math stays on our side where it is exact. Pass-through when
-        the latest perception lacks dimensions, and skipped entirely when
+        The model always grounds its coordinates against the most recently
+        shown image: a new perception replaces the CaptureWindow image, so
+        the window's coordinate view must not outlive it.
+        """
+        self._last_perception = perception
+        self._capture_view = None
+
+    def _set_capture_view(
+        self, rect: tuple[int, int, int, int], image_size: tuple[int, int]
+    ) -> None:
+        """Record the CaptureWindow coordinate view (see _capture_view)."""
+        left, top, w, h = rect
+        iw, ih = image_size
+        self._capture_view = {
+            "ox": left, "oy": top, "w": w, "h": h, "iw": iw, "ih": ih,
+        }
+
+    def _rescale_loc_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Convert a model-given loc from image space to native screen pixels.
+
+        After a CaptureWindow call the model is looking at the captured
+        window image, so loc maps through that window's screen rect (origin
+        + scale). Otherwise the model sees the compressed screenshot and loc
+        maps through the latest perception's dimensions (the scaling math
+        stays on our side where it is exact). Pass-through when the active
+        view lacks dimensions, and skipped entirely when
         crop_to_active_window is on (then the image is window-relative and
         the mapping would need the crop offset).
         """
         loc = args.get("loc")
         if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
+            return args
+        view = self._capture_view
+        if view is not None and view.get("iw") and view.get("ih"):
+            x, y = float(loc[0]), float(loc[1])
+            rescaled = [
+                int(round(view["ox"] + x * view["w"] / view["iw"])),
+                int(round(view["oy"] + y * view["h"] / view["ih"])),
+            ]
+            logger.debug(
+                "Rescaled loc %s -> %s via CaptureWindow view (origin %s,%s)",
+                list(loc), rescaled, view["ox"], view["oy"],
+            )
+            args = dict(args)
+            args["loc"] = rescaled
             return args
         if getattr(self.config.screenshot, "crop_to_active_window", False):
             return args

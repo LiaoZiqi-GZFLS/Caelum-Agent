@@ -42,11 +42,12 @@ def _capturer(
     def fake_list() -> list[tuple[int, str]]:
         return listing
 
-    def fake_capture(hwnd: int, out: Path) -> None:
+    def fake_capture(hwnd: int, out: Path) -> tuple[int, int, int, int]:
         if fail_capture:
             raise RuntimeError("PrintWindow returned empty bitmap")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(_png_bytes())
+        return (10, 20, 300, 200)  # window rect in screen space
 
     return WindowCapturer(
         tmp_path / "captures",
@@ -106,6 +107,55 @@ async def test_handler_reports_capture_failure(tmp_path: Path) -> None:
 
     assert result.startswith("[error]")
     assert "PrintWindow" in result
+
+
+def test_capture_by_title_returns_window_rect(tmp_path: Path) -> None:
+    full, path, rect = _capturer(tmp_path).capture_by_title("微信")
+
+    assert full == "微信"
+    assert path.exists()
+    assert rect == (10, 20, 300, 200)  # screen rect from the capture
+
+
+@pytest.mark.asyncio
+async def test_handler_reports_view_to_on_capture(tmp_path: Path) -> None:
+    views: list = []
+    handler = make_capture_window_handler(
+        _capturer(tmp_path), _FakeUploader(),
+        on_capture=lambda rect, size: views.append((rect, size)),
+    )
+
+    result = await handler(title="微信")
+
+    assert len(views) == 1
+    rect, image_size = views[0]
+    assert rect == (10, 20, 300, 200)
+    # The model sees the IMAGE, so the image's real pixel size is the loc space.
+    assert image_size == (60, 40)
+    assert "translated to screen coordinates" in result
+
+
+@pytest.mark.asyncio
+async def test_handler_without_rect_skips_on_capture(tmp_path: Path) -> None:
+    # A legacy capture returning None provides no view; on_capture stays silent.
+    capturer = _capturer(tmp_path)
+
+    def legacy_capture(hwnd: int, out: Path):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(_png_bytes())
+        return None
+
+    capturer._capture = legacy_capture
+    views: list = []
+    handler = make_capture_window_handler(
+        capturer, _FakeUploader(),
+        on_capture=lambda rect, size: views.append((rect, size)),
+    )
+
+    result = await handler(title="微信")
+
+    assert result.startswith("[media_ref]")
+    assert views == []
 
 
 class _RecordingLLM:
