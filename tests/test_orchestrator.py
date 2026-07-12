@@ -2143,3 +2143,49 @@ def test_redact_args_masks_only_sensitive_keys():
         {"text": "secret", "label": "3", "Password": "pw"}
     )
     assert redacted == {"text": "***", "label": "3", "Password": "***"}
+
+
+# ---------------------------------------------------------------------------
+# State persistence (history is NOT persisted)
+# ---------------------------------------------------------------------------
+
+
+def test_save_state_excludes_history(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch
+    )
+    agent.history = [{"role": "user", "content": "big base64 blob"}]
+    agent.current_instruction = "do things"
+    agent.consecutive_action_failures = 2
+
+    agent._save_state()
+
+    import json as _json
+
+    raw = agent.memory.get_state(agent.STATE_KEY)
+    payload = _json.loads(raw)
+    assert "history" not in payload
+    assert payload["current_instruction"] == "do things"
+    assert payload["consecutive_action_failures"] == 2
+
+
+def test_load_state_never_restores_history(config, eventbus, killswitch):
+    import json as _json
+
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch
+    )
+    # Simulate a legacy payload that still carries a history field.
+    agent.memory.set_state(agent.STATE_KEY, _json.dumps({
+        "state": "EXECUTING",
+        "current_instruction": "old task",
+        "consecutive_action_failures": 1,
+        "consecutive_api_failures": 0,
+        "history": [{"role": "user", "content": "stale"}],
+    }))
+
+    agent._load_state()
+
+    assert agent.history == []
+    assert agent.current_instruction == "old task"
+    assert agent.consecutive_action_failures == 1

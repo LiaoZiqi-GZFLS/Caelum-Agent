@@ -304,13 +304,15 @@ class AgentOrchestrator:
             self.ui_detector.shutdown()
 
     def _save_state(self) -> None:
+        # Deliberately excludes `history`: it embeds base64 screenshots (tens
+        # of MB per long task), and run_task rebuilds it from scratch anyway,
+        # so a restored history was never read — pure disk cost.
         payload = {
             "state": self.state.current_state,
             "task_id": self.task_id,
             "current_instruction": self.current_instruction,
             "consecutive_action_failures": self.consecutive_action_failures,
             "consecutive_api_failures": self.consecutive_api_failures,
-            "history": self.history,
         }
         self.memory.set_state(self.STATE_KEY, json.dumps(payload, ensure_ascii=False))
         logger.info("Orchestrator state saved")
@@ -333,7 +335,9 @@ class AgentOrchestrator:
                 return
             self.consecutive_action_failures = payload.get("consecutive_action_failures", 0)
             self.consecutive_api_failures = payload.get("consecutive_api_failures", 0)
-            self.history = payload.get("history", [])
+            # History is never restored (see _save_state); ignore the legacy
+            # field if an older payload still carries one.
+            self.history = []
             self.current_instruction = payload.get("current_instruction", "")
             if saved_state != "IDLE":
                 asyncio.create_task(
