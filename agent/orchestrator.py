@@ -36,6 +36,7 @@ from agent.task_list import TaskList, register_task_list
 from agent.tools import (
     COMPLETE_TASK_SCHEMA,
     DESKTOP_INTERACT_SCHEMA,
+    PREVIEW_POINTS_SCHEMA,
     REQUEST_HUMAN_HELP_SCHEMA,
     UPGRADE_VISION_SCHEMA,
     register_all,
@@ -223,6 +224,11 @@ class AgentOrchestrator:
         # see the markers it is choosing among (main-loop perceptions carry no
         # SoM in lazy mode). Cleared after each append and at task start.
         self._pending_som_followup: Any | None = None
+        # PreviewPoints: the tool stashes (annotated_path, points) here;
+        # _think_and_act appends the marked screenshot to history right after
+        # the tool result so the model can verify/adjust its coordinate guess
+        # before clicking. Cleared after each append and at task start.
+        self._pending_preview: tuple[Path, list[tuple[float, float]]] | None = None
         # ViewMedia uploads: the tool result carries a "[media_ref] kind ms://"
         # marker; _execute_tool_calls lifts it here and _think_and_act appends
         # a real image_url/video_url content part after the tool results so the
@@ -277,6 +283,7 @@ class AgentOrchestrator:
             allow_javascript=self.security.auto_approve,
         )
         self._register_desktop_interact()
+        self._register_preview_points()
         self._register_upgrade_vision()
         self._register_complete_task()
         self._register_human_help()
@@ -592,6 +599,73 @@ class AgentOrchestrator:
             ),
         )
 
+    async def _preview_points_impl(self, points: list) -> str:
+        """Preview candidate click coordinates as numbered markers.
+
+        Last-resort locator: when UIA labels and vision pointing both fail,
+        the model guesses coordinates from the compressed screenshot. This
+        draws the guesses on a clean copy and shows them back (via the
+        _pending_preview follow-up appended by _think_and_act) so the model
+        can adjust before committing to a real click through windows__Click.
+        """
+        from PIL import Image
+
+        from agent.preview_points import mark_points, validate_points
+
+        try:
+            pts = validate_points(points)
+        except ValueError as exc:
+            return f"[error] {exc}"
+        perception = getattr(self, "_last_perception", None)
+        base_path = getattr(perception, "screenshot_path", None) if perception else None
+        if base_path is None or not Path(base_path).exists():
+            return (
+                "[error] No screenshot available to preview on. Wait for the "
+                "first perception (or call windows__Screenshot) and retry."
+            )
+        try:
+            marked = mark_points(Image.open(base_path), pts)
+        except Exception as exc:
+            return f"[error] Failed to draw preview markers: {exc}"
+        out_path = self.config.cache_dir_absolute() / "preview_points.jpg"
+        try:
+            marked.save(out_path, "JPEG")
+        except Exception as exc:
+            return f"[error] Failed to save preview image: {exc}"
+        # Replace semantics: each call redraws from the clean base, so the
+        # stash only ever holds the latest guess set.
+        self._pending_preview = (out_path, pts)
+        listing = ", ".join(
+            f"marker {i + 1} at ({x:.0f}, {y:.0f})" for i, (x, y) in enumerate(pts)
+        )
+        return (
+            f"Preview attached: {listing} (screenshot coordinate space). "
+            "The marked screenshot is shown below — check whether the markers "
+            "sit on the target. Call PreviewPoints again with adjusted "
+            "coordinates if needed (it replaces the previous markers); once a "
+            "marker is right, click with windows__Click(loc=[x, y]) using "
+            "those exact coordinates."
+        )
+
+    def _register_preview_points(self) -> None:
+        """Register the PreviewPoints local function tool with the LLM."""
+        self.llm.register_local_function(
+            "PreviewPoints",
+            self._preview_points_impl,
+            schema=PREVIEW_POINTS_SCHEMA,
+            description=(
+                "Preview up to 3 candidate click coordinates BEFORE clicking: "
+                "your best guesses (in the current screenshot's coordinate "
+                "space) are drawn as numbered red markers on a clean copy of "
+                "the screenshot and shown back to you. Use this as the LAST "
+                "RESORT when neither UIA labels (windows__Snapshot) nor vision "
+                "pointing (DesktopInteract) can locate the target: give your "
+                "best 1-3 guesses, look at the markers, adjust if needed, then "
+                "click with windows__Click(loc=[x, y]) using the confirmed "
+                "coordinates."
+            ),
+        )
+
     def _complete_task_impl(self, answer: str) -> str:
         """Handler for the CompleteTask tool: stash the final answer for run_task.
 
@@ -769,6 +843,38 @@ class AgentOrchestrator:
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ]
 
+    @staticmethod
+    def _format_preview_followup(
+        path: Path, points: list[tuple[float, float]]
+    ) -> list[dict[str, Any]] | None:
+        """Build the PreviewPoints follow-up: the marked screenshot image.
+
+        Appended right after the PreviewPoints tool result so the model can
+        visually verify where its candidate markers landed and adjust before
+        clicking. Returns None when the image is unreadable.
+        """
+        try:
+            b64 = base64.b64encode(Path(path).read_bytes()).decode("utf-8")
+        except Exception:
+            return None
+        listing = "\n".join(
+            f"  marker {i + 1}: ({x:.0f}, {y:.0f})"
+            for i, (x, y) in enumerate(points)
+        )
+        return [
+            {
+                "type": "text",
+                "text": (
+                    "Preview of your candidate click coordinates (numbered red "
+                    f"markers, screenshot coordinate space):\n{listing}\n"
+                    "If a marker is off-target, call PreviewPoints again with "
+                    "adjusted coordinates. When a marker is on target, click "
+                    "with windows__Click(loc=[x, y]) using those coordinates."
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
+
     async def _llm_chat_with_breaker(
         self,
         messages: list[dict[str, Any]],
@@ -918,7 +1024,11 @@ class AgentOrchestrator:
             "- Use DesktopInteract(action='type', target='...', text='...') to type into an input field\n"
             "- Use DesktopInteract(action='scroll_down', target='...') to scroll at an element\n"
             "- For browser elements with refs (like e12), use playwright__browser_click(target='e12') instead.\n"
-            "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n\n"
+            "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n"
+            "- LAST RESORT — when neither UIA labels nor DesktopInteract can locate the target: "
+            "PreviewPoints(points=[[x, y], ...]) draws your coordinate guesses as numbered markers "
+            "on the screenshot and shows them back; adjust until a marker sits on the target, then "
+            "click with windows__Click(loc=[x, y]).\n\n"
             "## Working with desktop (Windows-MCP) tools\n"
             "Before clicking or typing in a desktop app you MUST call windows__Snapshot first to "
             "get the target element's [id], then pass it as `label`:\n"
@@ -978,6 +1088,7 @@ class AgentOrchestrator:
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
         self._pending_som_followup = None
+        self._pending_preview = None
         self._pending_media_parts = []
         self._upgrade_requested = False
         self.perception.max_size_override = None
@@ -1259,6 +1370,12 @@ class AgentOrchestrator:
                 som_content = self._format_som_followup(som_followup)
                 if som_content is not None:
                     followup_parts.extend(som_content)
+            preview = self._pending_preview
+            if preview is not None:
+                self._pending_preview = None
+                preview_content = self._format_preview_followup(*preview)
+                if preview_content is not None:
+                    followup_parts.extend(preview_content)
             if followup_parts:
                 self.history.append({"role": "user", "content": followup_parts})
             if self._pending_completion is not None:

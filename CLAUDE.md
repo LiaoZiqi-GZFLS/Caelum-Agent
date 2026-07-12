@@ -84,6 +84,7 @@ desktop-agent/
 │   ├── media.py               # ViewMedia: image/video upload with native ms:// rendering
 │   ├── content_writer.py      # DraftContent: writer subagent tool (Partial Mode prefill)
 │   ├── task_list.py           # Model-managed task list tool for long-task coherence
+│   ├── preview_points.py      # PreviewPoints: numbered markers for raw coordinate guesses
 │   ├── history_archive.py     # Flight recorder: per-task JSONL history archive
 │   ├── choice_menu.py         # msvcrt keyboard choice menu (RequestHumanHelp)
 │   ├── self_window.py         # Own console window hide/show (SelfWindow)
@@ -142,6 +143,7 @@ Beyond MCP tools, the orchestrator registers these local tools on the LLM client
 |------|--------|---------|
 | `CodeRunner` | `tools.py` | Sandboxed local Python; JavaScript only with `--yes`/`--yes-all` |
 | `DesktopInteract` | `orchestrator.py` | Vision-based interaction for any app: preferred call is `target=<short visual description>` — the LLM-written query is handed to GUI-Actor pointing (top-k candidates), the verifier re-ranks, and the best candidate executes immediately; ties (same verdict, scores within `AMBIGUITY_SCORE_MARGIN=0.1`) return `[ambiguous]` + annotated screenshot for `label=` disambiguation |
+| `PreviewPoints` | `orchestrator.py` + `preview_points.py` | Last-resort locator: 1-3 guessed coordinates (screenshot space) drawn as numbered markers on a clean screenshot copy and shown back to the model, which adjusts then clicks via `windows__Click(loc=...)`; replace semantics per call |
 | `UpgradeVision` | `orchestrator.py` + `perception.py` | Raise screenshot cap from 720p to 1080p (`screenshot.upgraded_max_*`) for the rest of the task when the model can't read small text; injects a fresh 1080p perception immediately; reset per task |
 | `CompleteTask` | `orchestrator.py` | Model-decided fast path: finish without verification |
 | `RequestHumanHelp` | `orchestrator.py` + `choice_menu.py` | Interactive TTY question with selectable options |

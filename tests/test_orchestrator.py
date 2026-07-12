@@ -2677,3 +2677,125 @@ def test_desktop_interact_schema_requires_only_action():
     assert DESKTOP_INTERACT_SCHEMA["required"] == ["action"]
     assert "target" in DESKTOP_INTERACT_SCHEMA["properties"]
     assert "label" in DESKTOP_INTERACT_SCHEMA["properties"]
+
+
+# ---------------------------------------------------------------------------
+# PreviewPoints (coordinate preview before raw-coordinate clicking)
+# ---------------------------------------------------------------------------
+
+def _perception_with_real_screenshot(tmp_path: Path) -> Perception:
+    from PIL import Image as _Image
+
+    shot = tmp_path / "shot.jpg"
+    _Image.new("RGB", (200, 200), "white").save(shot, "JPEG")
+    return Perception(
+        screenshot_path=shot,
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[],
+        screen_width=200,
+        screen_height=200,
+        screenshot_width=200,
+        screenshot_height=200,
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_points_draws_and_stashes_followup(config, eventbus, killswitch, tmp_path):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _perception_with_real_screenshot(tmp_path)
+
+    result = await agent._preview_points_impl(points=[[100, 50]])
+
+    assert "marker" in result.lower()
+    assert agent._pending_preview is not None
+    path, pts = agent._pending_preview
+    assert path.exists() and pts == [(100.0, 50.0)]
+
+
+@pytest.mark.asyncio
+async def test_preview_points_replace_semantics(config, eventbus, killswitch, tmp_path):
+    from PIL import Image as _Image
+
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _perception_with_real_screenshot(tmp_path)
+
+    await agent._preview_points_impl(points=[[50, 50]])
+    await agent._preview_points_impl(points=[[150, 150]])
+
+    path, pts = agent._pending_preview
+    assert pts == [(150.0, 150.0)]
+    marked = _Image.open(path)
+    # The second call redrew from the clean base: the first point is not red.
+    r, g, b = marked.getpixel((50, 50))
+    assert not (r > 200 and g < 150 and b < 150)
+    r, g, b = marked.getpixel((150, 150))
+    assert r > 200 and g < 150 and b < 150
+
+
+@pytest.mark.asyncio
+async def test_preview_points_validates_input(config, eventbus, killswitch, tmp_path):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _perception_with_real_screenshot(tmp_path)
+
+    assert (await agent._preview_points_impl(points=[])).startswith("[error]")
+    assert (await agent._preview_points_impl(points=[[1, 2], [3, 4], [5, 6], [7, 8]])).startswith("[error]")
+    assert (await agent._preview_points_impl(points=[["a", "b"]])).startswith("[error]")
+    assert agent._pending_preview is None
+
+
+@pytest.mark.asyncio
+async def test_preview_points_without_screenshot(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = None
+
+    result = await agent._preview_points_impl(points=[[10, 10]])
+
+    assert result.startswith("[error]")
+    assert agent._pending_preview is None
+
+
+@pytest.mark.asyncio
+async def test_preview_points_followup_injected_in_run_task(config, eventbus, killswitch, tmp_path):
+    """The annotated preview image is appended to history right after the
+    PreviewPoints tool result, so the model can see its markers."""
+
+    class _PreviewLLM(FakeLLM):
+        def __init__(self, agent_holder, responses):
+            super().__init__(responses)
+            self._holder = agent_holder
+
+        async def execute_tool_calls(self, calls):
+            out = []
+            for c in calls:
+                args = json.loads(c.function.arguments)
+                content = await self._holder["agent"]._preview_points_impl(**args)
+                out.append({"role": "tool", "tool_call_id": c.id, "content": content})
+            return out
+
+    perception = FakePerception([_perception_with_real_screenshot(tmp_path)] * 2)
+    holder: dict[str, Any] = {}
+    llm = _PreviewLLM(holder, [
+        _message("preview", tool_calls=[_tool_call("PreviewPoints", {"points": [[100, 50]]})]),
+        _message("Marker 1 is on the button."),
+        _message("YES"),
+        _message("done"),
+    ])
+    agent = AgentOrchestrator(config, eventbus, llm, FakeMCP(), killswitch, perception=perception)
+    holder["agent"] = agent
+
+    await agent.run_task("click the button by coordinates")
+
+    user_msgs = [m for m in agent.history if m["role"] == "user" and isinstance(m["content"], list)]
+    assert any(
+        any(part.get("type") == "image_url" for part in m["content"])
+        for m in user_msgs
+    ), "no annotated preview image was injected into history"
+
+
+def test_preview_points_schema():
+    from agent.tools import PREVIEW_POINTS_SCHEMA
+
+    assert PREVIEW_POINTS_SCHEMA["required"] == ["points"]
+    assert PREVIEW_POINTS_SCHEMA["properties"]["points"]["maxItems"] == 3

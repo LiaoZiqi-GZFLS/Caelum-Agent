@@ -63,6 +63,32 @@ UPGRADE_VISION_SCHEMA: dict[str, Any] = {
 }
 
 
+PREVIEW_POINTS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "points": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {"type": "number"},
+            },
+            "description": (
+                "1-3 candidate [x, y] coordinates in the CURRENT SCREENSHOT's "
+                "coordinate space (the compressed resolution stated in the "
+                "environment description, not physical pixels). Numbered markers "
+                "are drawn on a clean copy of the screenshot and shown back to "
+                "you so you can adjust before clicking."
+            ),
+        },
+    },
+    "required": ["points"],
+}
+
+
 COMPLETE_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
