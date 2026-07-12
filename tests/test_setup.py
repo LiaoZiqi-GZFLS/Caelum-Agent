@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -255,3 +256,96 @@ class TestEnsureOnnxruntimeDml:
         assert setup.ensure_onnxruntime_dml(
             probe=boom_probe, run_cmd=lambda cmd: None, is_windows=True
         ) == "failed"
+
+
+# ---------------------------------------------------------------------------
+# YOLO (OmniParser icon_detect) weight download
+# ---------------------------------------------------------------------------
+
+def _make_zip(path: Path, members: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+
+
+def _big_model() -> bytes:
+    return b"x" * (setup.YOLO_MIN_MODEL_BYTES + 1)
+
+
+class TestYoloWeightsPresent:
+    def test_missing_model(self, tmp_path: Path) -> None:
+        assert setup.yolo_weights_present(tmp_path) is False
+
+    def test_too_small_model_is_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "model.pt").write_bytes(b"tiny")
+        assert setup.yolo_weights_present(tmp_path) is False
+
+    def test_real_size_model(self, tmp_path: Path) -> None:
+        (tmp_path / "model.pt").write_bytes(_big_model())
+        assert setup.yolo_weights_present(tmp_path) is True
+
+
+class TestDownloadYoloWeights:
+    def test_skips_when_already_present(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_detect"
+        target.mkdir()
+        (target / "model.pt").write_bytes(_big_model())
+        calls: list = []
+
+        ok = setup.download_yolo_weights(
+            target_dir=target, fetch=lambda url, dest: calls.append((url, dest))
+        )
+
+        assert ok is True
+        assert calls == []
+
+    def test_extracts_nested_zip_layout(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_detect"
+        big = _big_model()
+
+        def fake_fetch(url: str, dest: Path) -> None:
+            _make_zip(
+                dest,
+                {"icon_detect/model.pt": big, "icon_detect/model.yaml": b"cfg"},
+            )
+
+        assert setup.download_yolo_weights(target_dir=target, fetch=fake_fetch) is True
+        assert (target / "model.pt").read_bytes() == big
+        assert (target / "model.yaml").read_bytes() == b"cfg"
+
+    def test_extracts_root_level_zip_layout(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_detect"
+        big = _big_model()
+
+        def fake_fetch(url: str, dest: Path) -> None:
+            _make_zip(dest, {"model.pt": big})
+
+        assert setup.download_yolo_weights(target_dir=target, fetch=fake_fetch) is True
+        assert (target / "model.pt").read_bytes() == big
+
+    def test_fetch_failure_is_best_effort(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_detect"
+
+        def boom(url: str, dest: Path) -> None:
+            raise RuntimeError("network down")
+
+        assert setup.download_yolo_weights(target_dir=target, fetch=boom) is False
+        assert not (target / "model.pt").exists()
+
+    def test_zip_without_model_is_best_effort(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_detect"
+
+        def fake_fetch(url: str, dest: Path) -> None:
+            _make_zip(dest, {"readme.txt": b"no model here"})
+
+        assert setup.download_yolo_weights(target_dir=target, fetch=fake_fetch) is False
+        assert not (target / "model.pt").exists()
+
+
+def test_argparser_keeps_download_weights_but_drops_weights_source() -> None:
+    parser = setup.build_argparser()
+    args = parser.parse_args(["--download-weights"])
+    assert args.download_weights is True
+    assert not hasattr(args, "weights_source")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--weights-source", "github"])

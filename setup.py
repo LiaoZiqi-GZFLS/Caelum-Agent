@@ -5,7 +5,8 @@ Run:
     python setup.py
 
 It will:
-1. Verify Python 3.12 (GUI-Actor-3B requires <3.13; windows-mcp metadata says >=3.13 but works on 3.12).
+1. Verify Python 3.12 (windows-mcp 0.8.2 requires >=3.12; the venv stays on
+   3.12 for a fully supported combination).
 2. Create a virtual environment under .venv/ (prefer uv, fall back to stdlib venv).
 3. Install Python dependencies from requirements.txt.
    - windows-mcp 0.8.2 declares requires-python >=3.13, but it runs fine on 3.12.
@@ -16,9 +17,10 @@ It will:
 4. Copy config.yaml.example -> config.yaml if missing and prompt for your Kimi API key.
 5. Validate config.yaml (parseable and contains a real API key).
 6. Create data/ directory and a minimal SQLite schema.
-7. Optionally download GUI-Actor-3B weights from GitHub Release mirror or hf-mirror.com.
+7. Optionally download the OmniParser icon_detect YOLO weights (~40MB zip from
+   the GitHub Release mirror) used for SoM vision annotation.
 8. Install Playwright Chromium if not already present.
-9. Run a smoke test (Kimi API + Windows-MCP tool list).
+9. Run a smoke test (Kimi API + Windows-MCP tool list + YOLO load).
 
 For non-interactive installs you can pass the key on the command line:
     python setup.py --api-key sk-...
@@ -30,11 +32,8 @@ For Playwright Chromium download behind the Chinese firewall:
     $env:PLAYWRIGHT_DOWNLOAD_HOST = "https://npmmirror.com/mirrors/playwright"
     python setup.py
 
-To download weights from the GitHub Release mirror (recommended for China):
-    python setup.py --download-weights --weights-source github
-
-To download weights from HuggingFace via hf-mirror.com:
-    python setup.py --download-weights --weights-source huggingface
+To download the YOLO vision weights from the GitHub Release mirror:
+    python setup.py --download-weights
 """
 
 from __future__ import annotations
@@ -47,6 +46,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 from agent.config import Config, MCPServerConfig
@@ -437,25 +439,73 @@ def install_playwright_browser() -> None:
     run(["npx", "playwright", "install", "chromium"], env=env, check=False)
 
 
-def download_weights(source: str) -> bool:
-    if source == "huggingface":
-        script = PROJECT_ROOT / "scripts" / "download_weights_from_huggingface.py"
-    elif source == "github":
-        script = PROJECT_ROOT / "scripts" / "download_weights_from_github.py"
-    else:
-        raise ValueError(f"Unknown weights source: {source}")
+# ---------------------------------------------------------------------------
+# YOLO (OmniParser icon_detect) weight download
+# ---------------------------------------------------------------------------
 
-    if not script.exists():
-        log(f"Weight download script not found: {script}")
-        return False
+YOLO_WEIGHTS_URL = (
+    "https://github.com/LiaoZiqi-GZFLS/omniparser-weights/"
+    "releases/download/v2.0/icon_detect.zip"
+)
+YOLO_WEIGHTS_DIR = PROJECT_ROOT / "models" / "omniparser" / "icon_detect"
+# The real model.pt is ~40MB; anything smaller is a truncated/placeholder file.
+YOLO_MIN_MODEL_BYTES = 1_000_000
 
-    log(f"Downloading GUI-Actor-3B weights from {source}...")
-    try:
-        run([str(PYTHON_EXE), str(script)])
-        log("Weight download complete.")
+
+def yolo_weights_present(dir_path: Path) -> bool:
+    """True when dir_path holds a plausible model.pt (exists and big enough)."""
+    model = dir_path / "model.pt"
+    return model.exists() and model.stat().st_size >= YOLO_MIN_MODEL_BYTES
+
+
+def _fetch_url(url: str, dest: Path) -> None:
+    """Download url to dest (stdlib only; follows redirects)."""
+    with urllib.request.urlopen(url) as response, open(dest, "wb") as out:
+        shutil.copyfileobj(response, out)
+
+
+def download_yolo_weights(
+    url: str = YOLO_WEIGHTS_URL,
+    target_dir: Path = YOLO_WEIGHTS_DIR,
+    fetch=None,
+) -> bool:
+    """Download and extract the OmniParser icon_detect YOLO weights.
+
+    Idempotent: skips the download when a plausible model.pt already exists.
+    Best-effort: any failure (network, bad zip, missing model.pt inside) logs
+    a warning and returns False so setup can continue — the agent still works
+    via UIA; only vision SoM annotation needs these weights.
+    """
+    if yolo_weights_present(target_dir):
+        log("YOLO weights already present; skipping download.")
         return True
-    except subprocess.CalledProcessError as exc:
-        log(f"Weight download failed: {exc}")
+    fetch = fetch or _fetch_url
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            zip_path = tmp_path / "icon_detect.zip"
+            log(f"Downloading YOLO weights from {url}...")
+            fetch(url, zip_path)
+            extracted = tmp_path / "extracted"
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(extracted)
+            # The zip may nest the files under icon_detect/ or keep them at
+            # the root — locate model.pt and copy its whole directory.
+            candidates = sorted(extracted.rglob("model.pt"))
+            if not candidates:
+                raise RuntimeError("model.pt not found inside icon_detect.zip")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(candidates[0].parent, target_dir, dirs_exist_ok=True)
+        if not yolo_weights_present(target_dir):
+            raise RuntimeError("model.pt missing or too small after extraction")
+        log(f"YOLO weights installed to {target_dir}.")
+        return True
+    except Exception as exc:
+        log(f"WARNING: YOLO weight download failed: {exc}")
+        log(
+            "The agent still works via UIA; vision SoM annotation needs "
+            "models/omniparser/icon_detect/model.pt."
+        )
         return False
 
 
@@ -504,36 +554,33 @@ def smoke_test_mcp_servers() -> bool:
     return all_ok
 
 
-def smoke_test_gui_actor() -> bool:
-    log("Running GUI-Actor-3B smoke test...")
-    model_dir = PROJECT_ROOT / "models" / "gui-actor-3b"
-    if not model_dir.exists():
-        log("  GUI-Actor model not found; skipping.")
+def smoke_test_yolo() -> bool:
+    log("Running YOLO (OmniParser icon_detect) smoke test...")
+    model = YOLO_WEIGHTS_DIR / "model.pt"
+    if not model.exists():
+        log("  YOLO weights not found; skipping.")
         return True
-    script = PROJECT_ROOT / "spikes" / "load_gui_actor.py"
-    if not script.exists():
-        log("  spikes/load_gui_actor.py not found; skipping.")
-        return True
+    code = (
+        "from ultralytics import YOLO; "
+        "from PIL import Image; "
+        f"m = YOLO(r'{model}'); "
+        "r = m.predict(Image.new('RGB', (64, 64)), imgsz=64, verbose=False); "
+        "print('boxes:', len(r[0].boxes))"
+    )
     try:
-        result = run([str(PYTHON_EXE), str(script)], check=False)
+        result = run([str(PYTHON_EXE), "-c", code], check=False)
         return result.returncode == 0
     except Exception as exc:
-        log(f"GUI-Actor smoke test failed: {exc}")
+        log(f"YOLO smoke test failed: {exc}")
         return False
 
 
-def main() -> int:
+def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Caelum-Agent first-run setup")
     parser.add_argument(
         "--download-weights",
         action="store_true",
-        help="Download GUI-Actor-3B weights after environment setup.",
-    )
-    parser.add_argument(
-        "--weights-source",
-        choices=["huggingface", "github"],
-        default="github",
-        help="Source for weight download (default: github).",
+        help="Download OmniParser YOLO vision weights (~40MB) after environment setup.",
     )
     parser.add_argument(
         "--api-key",
@@ -551,7 +598,11 @@ def main() -> int:
         action="store_true",
         help="Skip interactive prompts (useful for CI).",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = build_argparser().parse_args()
 
     log("Starting Caelum-Agent setup...")
     log(f"Project root: {PROJECT_ROOT}")
@@ -611,7 +662,7 @@ def main() -> int:
 
         create_data_dir()
         if args.download_weights:
-            download_weights(args.weights_source)
+            download_yolo_weights()
         install_playwright_browser()
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -635,7 +686,7 @@ def main() -> int:
 
     kimi_ok = smoke_test_kimi()
     mcp_ok = smoke_test_mcp_servers()
-    gui_ok = smoke_test_gui_actor()
+    yolo_ok = smoke_test_yolo()
 
     log("=" * 50)
     log("Setup complete.")
@@ -643,9 +694,9 @@ def main() -> int:
         log("WARNING: Kimi API smoke test did not finish successfully. Check config.yaml and your API key.")
     if not mcp_ok:
         log("WARNING: One or more MCP server smoke tests failed.")
-    if not gui_ok:
-        log("WARNING: GUI-Actor smoke test did not finish successfully.")
-    if kimi_ok and mcp_ok and gui_ok:
+    if not yolo_ok:
+        log("WARNING: YOLO smoke test did not finish successfully.")
+    if kimi_ok and mcp_ok and yolo_ok:
         log("All smoke tests passed.")
     log("Activate the environment with:")
     if platform.system() == "Windows":
@@ -655,7 +706,7 @@ def main() -> int:
     log("Then run the agent with: python main.py")
     log("=" * 50)
 
-    return 0 if (kimi_ok and mcp_ok and gui_ok) else 2
+    return 0 if (kimi_ok and mcp_ok and yolo_ok) else 2
 
 
 if __name__ == "__main__":

@@ -72,37 +72,23 @@ mcp_servers:
       - "C:/Users/%USERNAME%/Documents"
     env: {}
 
-# GUI-Actor-3B local vision model
-ui_detector:
+# OmniParser icon_detect YOLOv8 — the vision grounding backend. Annotates
+# screenshots with numbered boxes (SoM) so DesktopInteract(label=N) can click
+# UIA-less apps (WeChat/Qt/Electron). Weights: models/omniparser/icon_detect/
+# (~40MB; `python setup.py --download-weights` fetches them from the GitHub
+# Release mirror).
+yolo:
   enabled: true
-  # Lazy (default): load the model and run vision only when DesktopInteract
-  # needs SoM coordinates. Pure compute/filesystem/API tasks never load the
-  # model. Set to false to load at startup and run vision every perception.
-  lazy: true
-  # Warm-load the model at startup while keeping lazy inference. Only meaningful
-  # when lazy: true. The model stays resident so the first DesktopInteract does
-  # not stall on a multi-GB load, but perceive() still does NOT annotate every
-  # frame (so non-UI rounds pay nothing). Defaults to true; set to false to defer
-  # the multi-GB load to the first DesktopInteract (saves memory until then, but
-  # the first SoM click stalls). Trade-off: ~7.6GB resident memory for a fast
-  # first click. Has no effect when lazy: false (eager already preloads).
-  preload: true
-  # Auto SoM compensation (lazy mode only): when a perception finds an empty UI
-  # tree but OCR text (a UIA-less app such as WeChat/Qt/Electron), run GUI-Actor
-  # SoM detection automatically so the model gets clickable markers without
-  # having to discover DesktopInteract. Costs one detection pass, and only on
-  # UIA-less screens.
-  auto_compensate: true
-  model_path: ./models/gui-actor-3b
+  model_path: ./models/omniparser/icon_detect/model.pt
+  # Inference device; automatically falls back to cpu if cuda inference fails.
   device: cuda:0
-  dtype: bfloat16
-  # flash_attention_2 is faster but harder to install on Windows.
-  # Use "sdpa" for broader compatibility.
-  attn_implementation: sdpa
-  topk: 3
-  verifier:
-    enabled: true
-    # Verifier uses the same model; it re-runs inference to pick the best candidate.
+  conf: 0.25
+  imgsz: 1280
+  # Auto SoM compensation: when a perception finds an empty UI tree but OCR
+  # text (a UIA-less app), run YOLO detection anyway so the model gets
+  # clickable markers without having to ask. Costs one fast pass (~50ms GPU),
+  # and only on UIA-less screens.
+  auto_compensate: true
 
 screenshot:
   # Capture backend: mss (recommended) or PIL
