@@ -175,11 +175,13 @@ Quick syntax/import check using the project venv:
 .\.venv\Scripts\python.exe -c "import agent; import mcp_client; import eventbus; import main; import setup"
 ```
 
-Run the test suite:
+Run the test suite (parallel via pytest-xdist, coverage on by default):
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/ -q
 ```
+
+Useful variants: `-n0` runs serially (required for pdb/breakpoint); `-m "not smoke"` skips the real API/MCP smoke tests in `tests/test_integration.py` (~45s of the suite); `--no-cov` skips coverage measurement.
 
 Run first-time setup:
 

@@ -68,7 +68,10 @@ def test_code_too_long(runner):
     assert "too long" in result
 
 
-def test_timeout_catches_infinite_loop(runner):
+def test_timeout_catches_infinite_loop():
+    # A 1s-timeout runner keeps the test fast; waiting out the production
+    # default (10s) is not what this test needs to prove.
+    runner = CodeRunner(timeout_seconds=1)
     result = runner.run("while True: pass", language="python")
     assert result.startswith("[error]")
     assert "timed out" in result

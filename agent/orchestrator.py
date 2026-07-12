@@ -629,6 +629,7 @@ class AgentOrchestrator:
             return f"[error] Failed to draw preview markers: {exc}"
         out_path = self.config.cache_dir_absolute() / "preview_points.jpg"
         try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             marked.save(out_path, "JPEG")
         except Exception as exc:
             return f"[error] Failed to save preview image: {exc}"

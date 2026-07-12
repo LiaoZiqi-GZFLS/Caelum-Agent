@@ -2440,6 +2440,8 @@ class _FakeSelfWindow:
 
 @pytest.mark.asyncio
 async def test_self_window_registered_on_initialize(config, eventbus, killswitch):
+    # No need for the real GUI-Actor model here: tool registration only.
+    config.ui_detector.enabled = False
     agent = AgentOrchestrator(
         config, eventbus, FakeLLM(), FakeMCP(), killswitch,
         perception=FakePerception([_blank_perception()]),
@@ -2497,6 +2499,8 @@ class _FakeFocusGuard:
 
 @pytest.mark.asyncio
 async def test_focus_guard_registered_on_initialize(config, eventbus, killswitch):
+    # No need for the real GUI-Actor model here: tool registration only.
+    config.ui_detector.enabled = False
     agent = AgentOrchestrator(
         config, eventbus, FakeLLM(), FakeMCP(), killswitch,
         perception=FakePerception([_blank_perception()]),

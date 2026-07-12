@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chromadb import PersistentClient
-
 
 logger = logging.getLogger("caelum.memory")
 
@@ -65,6 +63,10 @@ class MemoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.vector_dir.mkdir(parents=True, exist_ok=True)
         self._init_sqlite()
+        # chromadb (~1s import + ONNX embedding model on first query) is
+        # imported lazily so test collection and memory-free tasks stay cheap.
+        from chromadb import PersistentClient
+
         self.chroma = PersistentClient(path=str(self.vector_dir))
         self.skill_collection = self.chroma.get_or_create_collection("skills")
         self.sync_skills()

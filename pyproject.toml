@@ -2,7 +2,10 @@
 testpaths = ["tests"]
 # Coverage is on by default so the suite always reports where tests are thin.
 # Opt out any time with `pytest --no-cov`. Markers are registered in tests/conftest.py.
-addopts = "--cov=. --cov-report=term-missing"
+# Tests run on 8 parallel workers (pytest-xdist); use `-n0` to run serially
+# (required for pdb/breakpoint) and `-m "not smoke"` to skip the real
+# API/MCP smoke tests (~45s of the suite on their own).
+addopts = "--cov=. --cov-report=term-missing -n 8"
 
 [tool.coverage.run]
 source = ["."]

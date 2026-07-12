@@ -297,3 +297,71 @@ def _tool_call(
 ) -> Any:
     """Shorthand to create a FakeToolCall."""
     return _FakeToolCall(name, args, call_id)
+
+
+class FakeMemoryStore:
+    """In-memory MemoryStore stand-in: no SQLite, no ChromaDB.
+
+    The real MemoryStore eagerly builds a ChromaDB client whose default ONNX
+    embedding model costs ~1s per process to load and contends badly under
+    pytest-xdist. This fake implements only what AgentOrchestrator /
+    ReflectionEngine / SkillLearner actually call. Tests that exercise real
+    memory behavior (test_memory.py, test_skills.py) construct and pass a
+    real MemoryStore explicitly, bypassing this fake entirely.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.kimi = kwargs.get("kimi")
+        self._state: dict[str, str] = {}
+        self._prefs: dict[str, str] = {}
+        self.reflections: list[dict[str, Any]] = []
+        self.audits: list[tuple[str, str, str, str | None]] = []
+        self.sync_skills_calls = 0
+
+    def set_preference(self, key: str, value: str) -> None:
+        self._prefs[key] = value
+
+    def get_preference(self, key: str, default: str | None = None) -> str | None:
+        return self._prefs.get(key, default)
+
+    async def aset_preference(self, key: str, value: str) -> None:
+        self._prefs[key] = value
+
+    async def aget_preference(self, key: str, default: str | None = None) -> str | None:
+        return self._prefs.get(key, default)
+
+    def add_reflection(
+        self,
+        task_summary: str,
+        failure_reason: str | None = None,
+        fix_action: str | None = None,
+    ) -> int:
+        self.reflections.append({
+            "task_summary": task_summary,
+            "failure_reason": failure_reason,
+            "fix_action": fix_action,
+        })
+        return len(self.reflections)
+
+    def list_reflections(self, limit: int = 20) -> list[dict[str, Any]]:
+        return list(reversed(self.reflections[-limit:]))
+
+    def audit(
+        self, level: str, actor: str, action: str, result: str | None = None
+    ) -> None:
+        self.audits.append((level, actor, action, result))
+
+    def set_state(self, key: str, value: str) -> None:
+        self._state[key] = value
+
+    def get_state(self, key: str, default: str | None = None) -> str | None:
+        return self._state.get(key, default)
+
+    def delete_state(self, key: str) -> None:
+        self._state.pop(key, None)
+
+    def sync_skills(self) -> None:
+        self.sync_skills_calls += 1
+
+    def search_skills(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+        return []

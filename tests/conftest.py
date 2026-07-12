@@ -102,3 +102,23 @@ def memory_store(tmp_path: Path):
         skills_dir=tmp_path / "skills",
         vector_dir=tmp_path / "chroma",
     )
+
+
+# Modules whose tests need the orchestrator to build its REAL default
+# MemoryStore (integration smoke fidelity). Everything else gets a
+# ChromaDB-free fake: the real store's default ONNX embedding model costs
+# ~1s per process to load and serializes badly under pytest-xdist. Tests
+# that exercise memory behavior directly (test_memory.py, test_skills.py)
+# pass a real MemoryStore explicitly and are unaffected by this patch.
+_REAL_MEMORY_MODULES = {"tests.test_integration"}
+
+
+@pytest.fixture(autouse=True)
+def _fast_default_memory(monkeypatch, request):
+    """Swap AgentOrchestrator's default MemoryStore for an in-memory fake."""
+    module = getattr(request, "module", None)
+    if module is not None and module.__name__ in _REAL_MEMORY_MODULES:
+        return
+    from tests.fakes import FakeMemoryStore
+
+    monkeypatch.setattr("agent.orchestrator.MemoryStore", FakeMemoryStore)
