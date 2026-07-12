@@ -26,16 +26,16 @@ def pm(config):
 # _compress / hashing
 # ---------------------------------------------------------------------------
 
-def test_compress_png_and_thumbnail(pm, config):
+def test_compress_png_and_inverse_dpi(pm, config, monkeypatch):
+    """PNG format is honored; the image follows the inverse-DPI rule (at
+    200% scaling a 4000x2000 shot is halved, same as OCR input)."""
     config.screenshot.format = "PNG"
-    config.screenshot.max_width = 50
-    config.screenshot.max_height = 50
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 2.0)
 
-    out = pm._compress(Image.new("RGB", (200, 100), "red"))
+    out = pm._compress(Image.new("RGB", (4000, 2000), "red"))
 
     assert out[:8] == b"\x89PNG\r\n\x1a\n"
-    reopened = Image.open(io.BytesIO(out))
-    assert reopened.size[0] <= 50 and reopened.size[1] <= 50
+    assert Image.open(io.BytesIO(out)).size == (2000, 1000)
 
 
 def test_compress_jpeg(pm, config):
@@ -321,12 +321,13 @@ async def test_perceive_records_compressed_dimensions(pm, monkeypatch):
         pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
     monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
-    pm.mcp = None  # real _compress runs: 2560x1440 -> 1280x720
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
+    pm.mcp = None  # real _compress runs: 2560x1440 at 125% -> 2048x1152
 
     p = await pm.perceive("x")
 
     assert (p.screen_width, p.screen_height) == (2560, 1440)
-    assert (p.screenshot_width, p.screenshot_height) == (1280, 720)
+    assert (p.screenshot_width, p.screenshot_height) == (2048, 1152)
 
 
 @pytest.mark.asyncio
@@ -336,9 +337,10 @@ async def test_description_declares_coordinate_space(pm, monkeypatch):
         pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
     monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
     pm.mcp = None
 
     p = await pm.perceive("x")
 
-    assert "1280x720" in p.description
+    assert "2560x1440" in p.description
     assert "loc" in p.description

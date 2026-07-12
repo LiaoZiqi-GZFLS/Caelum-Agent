@@ -391,19 +391,60 @@ async def test_perceive_with_vision_helper(
     assert spy.calls == 1
 
 
-def test_compress_honors_max_size_override(config: Config) -> None:
-    """Vision upgrade: an override replaces the configured 720p cap."""
+def test_compress_matches_ocr_at_100_percent(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model-facing screenshot uses the SAME inverse-DPI rule as OCR:
+    at 100% scaling the original image passes through untouched."""
     module = PerceptionModule(config)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
     big = Image.new("RGB", (3000, 1500), (10, 20, 30))
 
-    default_bytes = module._compress(big.copy())
-    assert Image.open(io.BytesIO(default_bytes)).size[1] <= 720
+    out = module._compress(big)
 
-    module.max_size_override = (1920, 1080)
-    upgraded_bytes = module._compress(big.copy())
-    upgraded = Image.open(io.BytesIO(upgraded_bytes))
-    assert upgraded.size[1] <= 1080
-    assert upgraded.size[0] > Image.open(io.BytesIO(default_bytes)).size[0]
+    assert Image.open(io.BytesIO(out)).size == (3000, 1500)
+
+
+def test_compress_matches_ocr_at_125_percent(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 125% scaling the screenshot is normalized by the inverse factor
+    (0.8x), exactly like OCR input."""
+    module = PerceptionModule(config)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
+    big = Image.new("RGB", (3000, 1500), (10, 20, 30))
+
+    out = module._compress(big)
+
+    assert Image.open(io.BytesIO(out)).size == (2400, 1200)
+
+
+def test_compress_floored_at_1080p(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse-scale result is floored at the 1080p box, same as OCR."""
+    module = PerceptionModule(config)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 3.0)
+    big = Image.new("RGB", (3840, 2160), (10, 20, 30))
+
+    out = module._compress(big)
+
+    assert Image.open(io.BytesIO(out)).size == (1920, 1080)
+
+
+def test_compress_original_resolution_skips_resize(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UpgradeVision sets original_resolution: the screenshot is the
+    original image (原画) regardless of display scaling."""
+    module = PerceptionModule(config)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 3.0)
+    big = Image.new("RGB", (3840, 2160), (10, 20, 30))
+
+    module.original_resolution = True
+    out = module._compress(big)
+
+    assert Image.open(io.BytesIO(out)).size == (3840, 2160)
 
 
 class _SpyRapidOCR:

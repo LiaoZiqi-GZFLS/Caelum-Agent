@@ -2413,8 +2413,9 @@ async def test_system_prompt_prefers_desktop_interact_when_uia_fails(
 
 @pytest.mark.asyncio
 async def test_upgrade_vision_raises_resolution_and_reperceives(config, eventbus, killswitch):
-    """UpgradeVision sets the 1080p override and immediately injects a fresh
-    high-res perception so the model can keep working without a wasted round."""
+    """UpgradeVision switches screenshots to the ORIGINAL resolution and
+    immediately injects a fresh full-res perception so the model can keep
+    working without a wasted round."""
     class _UpgradeLLM(FakeLLM):
         def __init__(self, agent: AgentOrchestrator, responses: list[Any]) -> None:
             super().__init__(responses)
@@ -2448,12 +2449,12 @@ async def test_upgrade_vision_raises_resolution_and_reperceives(config, eventbus
 
     await agent.run_task("read tiny text")
 
-    assert perception.max_size_override == (1920, 1080)
+    assert perception.original_resolution is True
     # A fresh perception was taken right after the upgrade call and injected.
     assert len(perception.calls) >= 2
     upgrade_notes = [
         m for m in agent.history
-        if m["role"] == "user" and "1080" in str(m.get("content", ""))
+        if m["role"] == "user" and "original resolution" in str(m.get("content", ""))
     ]
     assert upgrade_notes, "no upgraded-screenshot note was injected"
 
@@ -2465,11 +2466,11 @@ async def test_new_task_resets_vision_upgrade(config, eventbus, killswitch):
     agent = AgentOrchestrator(
         config, eventbus, llm, FakeMCP(), killswitch, perception=perception,
     )
-    perception.max_size_override = (1920, 1080)
+    perception.original_resolution = True
 
     await agent.run_task("fresh task")
 
-    assert perception.max_size_override is None
+    assert perception.original_resolution is False
 
 
 # ---------------------------------------------------------------------------

@@ -237,7 +237,8 @@ class AgentOrchestrator:
         # user message to avoid consecutive same-role turns).
         self._pending_media_parts: list[dict[str, Any]] = []
         # UpgradeVision: the handler sets this flag; _think_and_act consumes it
-        # by injecting a fresh 1080p perception right after the tool result.
+        # by injecting a fresh full-resolution perception right after the tool
+        # result.
         self._upgrade_requested: bool = False
         # Set by initialize() when the corresponding tools are enabled; the
         # task-end finally block fire-and-forgets their remote sweeps.
@@ -548,22 +549,19 @@ class AgentOrchestrator:
         return f"[error] {result.content}"
 
     async def _upgrade_vision_impl(self) -> str:
-        """Handler for UpgradeVision: raise the screenshot cap to 1080p.
+        """Handler for UpgradeVision: switch screenshots to the original image.
 
         Sets the perception override so every subsequent screenshot (main-loop
-        and SoM passes) compresses to the upgraded size, and flags
-        _think_and_act to inject a fresh high-res perception right after this
+        and SoM passes) is the full native-resolution original, and flags
+        _think_and_act to inject a fresh full-res perception right after this
         tool result so the model can continue without wasting a round.
         """
-        cfg = self.config.screenshot
-        self.perception.max_size_override = (
-            cfg.upgraded_max_width, cfg.upgraded_max_height
-        )
+        self.perception.original_resolution = True
         self._upgrade_requested = True
         return (
-            f"[ok] Vision upgraded to {cfg.upgraded_max_width}x"
-            f"{cfg.upgraded_max_height} for the rest of this task. A fresh "
-            "high-resolution screenshot follows."
+            "[ok] Vision upgraded to the ORIGINAL (full native) resolution "
+            "for the rest of this task. A fresh full-resolution screenshot "
+            "follows."
         )
 
     def _register_upgrade_vision(self) -> None:
@@ -573,10 +571,10 @@ class AgentOrchestrator:
             self._upgrade_vision_impl,
             schema=UPGRADE_VISION_SCHEMA,
             description=(
-                "Upgrade screenshot resolution from 720p to 1080p for the rest "
-                "of this task. Use when you repeatedly cannot read small text "
-                "or locate elements in the screenshot. A fresh high-resolution "
-                "screenshot is attached right after the call."
+                "Upgrade screenshots to the ORIGINAL (full native) resolution "
+                "for the rest of this task. Use when you repeatedly cannot "
+                "read small text or locate elements in the screenshot. A "
+                "fresh full-resolution screenshot is attached right after the call."
             ),
         )
 
@@ -1095,7 +1093,7 @@ class AgentOrchestrator:
         self._pending_preview = None
         self._pending_media_parts = []
         self._upgrade_requested = False
-        self.perception.max_size_override = None
+        self.perception.original_resolution = False
         self.task_list.clear()
         self._task_list_nudged = False
         self._pending_loop_notice = None
@@ -1354,8 +1352,9 @@ class AgentOrchestrator:
                             "attached for your reference.",
                 })
             if self._upgrade_requested:
-                # UpgradeVision: take a fresh 1080p perception immediately so
-                # the model can continue this turn with sharper eyes.
+                # UpgradeVision: take a fresh full-resolution perception
+                # immediately so the model can continue this turn with
+                # sharper eyes.
                 self._upgrade_requested = False
                 fresh = await self.perception.perceive(
                     instruction=self.current_instruction,
@@ -1366,7 +1365,7 @@ class AgentOrchestrator:
                 followup_parts.append({
                     "type": "text",
                     "text": "[UpgradeVision] The perception above was captured "
-                            "at 1080p resolution.",
+                            "at the original resolution.",
                 })
             som_followup = self._pending_som_followup
             if som_followup is not None:

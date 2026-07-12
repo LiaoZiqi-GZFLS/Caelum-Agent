@@ -111,10 +111,11 @@ class PerceptionModule:
         self.mcp = mcp
         self.ui_detector = ui_detector
         self._ocr: Any | None = None
-        # Vision upgrade: when the model calls UpgradeVision, the orchestrator
-        # sets this to (1920, 1080) so subsequent screenshots are compressed
-        # to 1080p instead of the configured 720p default. Reset per task.
-        self.max_size_override: tuple[int, int] | None = None
+        # UpgradeVision: when the model calls UpgradeVision, the orchestrator
+        # flips this to True so subsequent screenshots are the ORIGINAL image
+        # (原画, no resizing) instead of the inverse-DPI normalized default.
+        # Reset per task.
+        self.original_resolution: bool = False
         self._io_executor = ThreadPoolExecutor(
             max_workers=max_io_workers, thread_name_prefix="perception-io"
         )
@@ -134,15 +135,15 @@ class PerceptionModule:
         orig_w, orig_h = image.size
 
         # OCR reads the screenshot before the LLM-bound compression (inverse-
-        # DPI normalized inside _run_ocr): the 1280x720 copy would erase small
+        # DPI normalized inside _run_ocr): any smaller copy would erase small
         # text, and OCR is local CPU work that costs no tokens. This must run
-        # before _compress(), which thumbnails the image in place.
+        # before _compress(), which resizes the image in place.
         ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
 
         image_bytes = await loop.run_in_executor(
             self._io_executor, self._compress, image
         )
-        # _compress thumbnails in place: image.size is now the compressed
+        # _compress resizes in place: image.size is now the compressed
         # (model-visible) coordinate space.
         compressed_width, compressed_height = image.size
         await loop.run_in_executor(
@@ -281,10 +282,18 @@ class PerceptionModule:
             return image
 
     def _compress(self, image: Image.Image) -> bytes:
-        max_size = self.max_size_override or (
-            self.config.screenshot.max_width, self.config.screenshot.max_height
-        )
-        image.thumbnail(max_size)
+        # The model sees exactly what OCR sees: the same inverse-DPI
+        # normalization (original at 100% scale, 1/scale above, floored at
+        # the 1080p box). UpgradeVision (original_resolution) skips resizing
+        # entirely — the model gets the original image. Mutates in place
+        # (like the old thumbnail) so perceive() reads the final size.
+        if not self.original_resolution:
+            ratio = _ocr_resize_ratio(image.size, _display_scale())
+            if ratio < 1.0:
+                w, h = image.size
+                image.thumbnail(
+                    (round(w * ratio), round(h * ratio)), Image.Resampling.LANCZOS
+                )
         fmt = self.config.screenshot.format
         buf = io.BytesIO()
         if fmt == "PNG":

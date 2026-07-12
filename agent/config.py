@@ -76,11 +76,10 @@ class UIDetectorConfig(BaseModel):
 
 class ScreenshotConfig(BaseModel):
     backend: Literal["mss", "PIL"] = "mss"
-    max_width: int = 1280
-    max_height: int = 720
-    # Applied when the model calls UpgradeVision mid-task (too blurry to read).
-    upgraded_max_width: int = 1920
-    upgraded_max_height: int = 1080
+    # The model-facing screenshot uses the same inverse-DPI normalization as
+    # OCR (original at 100% scale, 1/scale above, floored at a 1080p box —
+    # see perception._ocr_resize_ratio); UpgradeVision switches to the
+    # original image. There are no size knobs on purpose.
     quality: int = 60
     format: Literal["JPEG", "PNG"] = "JPEG"
     crop_to_active_window: bool = False
