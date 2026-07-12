@@ -25,6 +25,9 @@ class LLMConfig(BaseModel):
     # Register the ReadDocument tool (Kimi Files API file-extract) for binary
     # documents (PDF/DOCX/PPTX/EPUB/XLSX). Disable to keep documents local-only.
     enable_file_extract: bool = True
+    # Register the ViewMedia tool (Kimi Files API image/video upload with
+    # native ms:// rendering). Disable to keep local media files offline.
+    enable_media_upload: bool = True
 
     @field_validator("model")
     @classmethod

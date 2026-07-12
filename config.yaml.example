@@ -18,6 +18,11 @@ llm:
   # extracted text is cached locally by file hash. Set to false to keep
   # documents local-only.
   enable_file_extract: true
+  # Register the ViewMedia tool: uploads local images (downscaled to 4K if
+  # larger) and videos (re-encoded to 15fps/1080p via ffmpeg, requires ffmpeg
+  # on PATH) so the model sees them natively. 100 MB upload cap; remote copies
+  # are swept when each task ends. Set to false to keep media local-only.
+  enable_media_upload: true
   # Which Formula tools to register. Comment out tools you do not want.
   # NOTE: Formula URIs use hyphens (e.g. code-runner, web-search); the registered
   #       tool name uses underscores (code_runner, web_search). The local

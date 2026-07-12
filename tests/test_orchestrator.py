@@ -2208,3 +2208,66 @@ async def test_run_task_writes_history_archive(config, eventbus, killswitch):
     meta = _json.loads(first_line)
     assert meta["instruction"] == "archive me"
     assert meta["outcome"] == "finished."
+
+
+# ---------------------------------------------------------------------------
+# ViewMedia: ms:// media reference injection + task-end remote sweep
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_view_media_result_injected_as_media_message(config, eventbus, killswitch):
+    llm = FakeLLM(
+        [
+            _message("Let me look.", tool_calls=[_tool_call("ViewMedia", {"path": "shot.png"}, call_id="c1")]),
+            _message("I see it."),
+            _message("YES"),
+            _message("done."),
+        ],
+        tool_responses=[
+            [{"role": "tool", "tool_call_id": "c1",
+              "content": "[media_ref] image ms://files/abc123\nattached"}],
+        ],
+        tool_names=["ViewMedia"],
+    )
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.run_task("describe the image")
+
+    media_msgs = [
+        m for m in agent.history
+        if m["role"] == "user" and isinstance(m["content"], list)
+        and any(
+            isinstance(p, dict) and p.get("type") == "image_url"
+            and p.get("image_url", {}).get("url") == "ms://files/abc123"
+            for p in m["content"]
+        )
+    ]
+    assert len(media_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_task_sweeps_remote_uploads_on_exit(config, eventbus, killswitch):
+    class _FakeSweeper:
+        def __init__(self):
+            self.sweeps = 0
+
+        async def sweep_remote(self):
+            self.sweeps += 1
+            return 0
+
+    llm = FakeLLM([_message("done."), _message("YES"), _message("finished.")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.file_extractor = _FakeSweeper()
+    agent.media_uploader = _FakeSweeper()
+
+    await agent.run_task("sweep after me")
+    await asyncio.sleep(0)  # let the fire-and-forget sweep tasks run
+
+    assert agent.file_extractor.sweeps == 1
+    assert agent.media_uploader.sweeps == 1

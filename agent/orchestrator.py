@@ -19,6 +19,7 @@ from agent.content_writer import register_draft_content
 from agent.file_reader import register_read_document
 from agent.history_archive import HistoryArchiver
 from agent.kill_switch import KillSwitch
+from agent.media import parse_media_refs, register_view_media
 from agent.kimi_memory import KimiMemoryClient
 from agent.llm_client import LLMClient
 from agent.memory import MemoryStore
@@ -205,6 +206,16 @@ class AgentOrchestrator:
         # see the markers it is choosing among (main-loop perceptions carry no
         # SoM in lazy mode). Cleared after each append and at task start.
         self._pending_som_followup: Any | None = None
+        # ViewMedia uploads: the tool result carries a "[media_ref] kind ms://"
+        # marker; _execute_tool_calls lifts it here and _think_and_act appends
+        # a real image_url/video_url content part after the tool results so the
+        # model sees the actual media (merged with the SoM follow-up into one
+        # user message to avoid consecutive same-role turns).
+        self._pending_media_parts: list[dict[str, Any]] = []
+        # Set by initialize() when the corresponding tools are enabled; the
+        # task-end finally block fire-and-forgets their remote sweeps.
+        self.file_extractor: Any | None = None
+        self.media_uploader: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
     def set_human_confirmation_callback(self, callback: Any) -> None:
@@ -250,14 +261,21 @@ class AgentOrchestrator:
         extractor = register_read_document(
             self.llm, self.config.llm, self.config.cache_dir_absolute()
         )
+        self.file_extractor = extractor
+        self.media_uploader = register_view_media(
+            self.llm, self.config.llm, self.config.cache_dir_absolute()
+        )
         # Fire-and-forget quota sweep: the platform keeps uploads forever and
         # the per-read delete is only best-effort. Only scheduled when the LLM
         # client shares its real httpx pool (production); fakes have no .http
         # and unit tests stay hermetic.
-        if extractor is not None and getattr(self.llm, "http", None) is not None:
-            sweep_task = asyncio.create_task(extractor.sweep_remote())
-            self._background_tasks.add(sweep_task)
-            sweep_task.add_done_callback(self._background_tasks.discard)
+        if getattr(self.llm, "http", None) is not None:
+            for sweeper in (self.file_extractor, self.media_uploader):
+                if sweeper is None:
+                    continue
+                sweep_task = asyncio.create_task(sweeper.sweep_remote())
+                self._background_tasks.add(sweep_task)
+                sweep_task.add_done_callback(self._background_tasks.discard)
         register_draft_content(
             self.llm,
             self.config.cache_dir_absolute() / "drafts",
@@ -690,6 +708,15 @@ class AgentOrchestrator:
                 )
             except Exception as exc:  # archiving must never break the agent
                 logger.warning("Failed to archive history: %s", exc)
+            # Task-end quota sweep: ms:// media references are only valid for
+            # this task's history, and file-extract leftovers are throwaway,
+            # so all remote uploads are stale once the task is done.
+            for sweeper in (self.file_extractor, self.media_uploader):
+                if sweeper is None:
+                    continue
+                sweep_task = asyncio.create_task(sweeper.sweep_remote())
+                self._background_tasks.add(sweep_task)
+                sweep_task.add_done_callback(self._background_tasks.discard)
 
     async def _run_task_impl(self, user_input: str, task_id: str) -> str:
         self.task_id = task_id
@@ -794,6 +821,7 @@ class AgentOrchestrator:
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
         self._pending_som_followup = None
+        self._pending_media_parts = []
         self.task_list.clear()
         self._task_list_nudged = False
         self._pending_loop_notice = None
@@ -1035,16 +1063,30 @@ class AgentOrchestrator:
 
             tool_results = await self._execute_tool_calls(tool_calls)
             self.history.extend(tool_results)
-            # Lazy-mode SoM follow-up: show the model the annotated screenshot
-            # from the DesktopInteract detection pass (stashed by
-            # _desktop_interact_impl), right after the tool result so the
-            # tool_call/tool pairing order is preserved.
+            # Post-tool user turn, merging two follow-up sources into a single
+            # message (Kimi rejects consecutive same-role turns):
+            # 1. ViewMedia ms:// media parts — the model sees the actual media.
+            # 2. Lazy-mode SoM follow-up — the annotated screenshot from the
+            #    DesktopInteract detection pass (stashed by
+            #    _desktop_interact_impl), so the model sees the markers it is
+            #    choosing among.
+            followup_parts: list[dict[str, Any]] = []
+            if self._pending_media_parts:
+                followup_parts.extend(self._pending_media_parts)
+                self._pending_media_parts = []
+                followup_parts.append({
+                    "type": "text",
+                    "text": "[ViewMedia] The media above was uploaded and "
+                            "attached for your reference.",
+                })
             som_followup = self._pending_som_followup
             if som_followup is not None:
                 self._pending_som_followup = None
                 som_content = self._format_som_followup(som_followup)
                 if som_content is not None:
-                    self.history.append({"role": "user", "content": som_content})
+                    followup_parts.extend(som_content)
+            if followup_parts:
+                self.history.append({"role": "user", "content": followup_parts})
             if self._pending_completion is not None:
                 # The model called CompleteTask inside this batch: surface its
                 # answer as this round's final message so the tool loop stops and
@@ -1125,6 +1167,12 @@ class AgentOrchestrator:
                 outputs = await self.llm.execute_tool_calls([call])
                 results.extend(outputs)
                 succeeded.extend([True] * len(outputs))
+                # ViewMedia results carry "[media_ref] kind ms://url" markers;
+                # lift them into real media parts injected after this batch.
+                for output in outputs:
+                    for kind, url in parse_media_refs(str(output.get("content", ""))):
+                        key = "video_url" if kind == "video" else "image_url"
+                        self._pending_media_parts.append({"type": key, key: {"url": url}})
                 if self._is_ui_tool(name, None):
                     self._used_ui_tool = True
                 continue
