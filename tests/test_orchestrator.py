@@ -2271,3 +2271,33 @@ async def test_run_task_sweeps_remote_uploads_on_exit(config, eventbus, killswit
 
     assert agent.file_extractor.sweeps == 1
     assert agent.media_uploader.sweeps == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_label_error_gets_recovery_hint(config, eventbus, killswitch):
+    """windows-mcp 'Label N out of range' must tell the model to re-Snapshot."""
+    llm = FakeLLM([
+        _message("Typing.", tool_calls=[_tool_call("windows__Type", {"text": "微信", "label": 967})]),
+        _message("retrying"),
+        _message("YES"),
+        _message("done."),
+    ])
+    mcp = FakeMCP([{"server": "windows", "name": "Type", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Type", ToolResult(
+        success=False,
+        content="Error calling tool 'Type': Failed to find element with label 967: "
+                "Label 967 out of range",
+    ))
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.set_human_confirmation_callback(lambda summary, action: True)
+
+    await agent.run_task("type something")
+
+    tool_msgs = [m for m in agent.history if m["role"] == "tool"]
+    assert any("967" in m["content"] for m in tool_msgs)
+    hint_msg = next(m for m in tool_msgs if "967" in m["content"])
+    assert "windows__Snapshot" in hint_msg["content"]
+    assert "invalidat" in hint_msg["content"].lower()

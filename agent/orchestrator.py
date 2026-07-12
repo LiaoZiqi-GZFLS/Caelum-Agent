@@ -63,6 +63,12 @@ class APIBreakerTripped(Exception):
 # client-side with an actionable error that points the model at Snapshot first.
 _POSITIONAL_WINDOWS_TOOLS = frozenset({"Click", "Type", "Scroll", "Move"})
 
+# windows-mcp errors when a label from an older Snapshot is used after a new
+# Snapshot/Screenshot rebuilt the label space.
+_STALE_LABEL_RE = re.compile(
+    r"Label \d+ out of range|Failed to find element with label", re.IGNORECASE
+)
+
 # Local function tools that must pass the security guard before execution.
 # Formula tools (cloud-side) and the other local tools are intentionally
 # ungated: the former cannot touch the machine, the latter are the agent's
@@ -1232,6 +1238,13 @@ class AgentOrchestrator:
                 result: ToolResult = await self.mcp.call(server, tool_name, args)
                 content = result.content
                 success = result.success
+                if not success and _STALE_LABEL_RE.search(content):
+                    content += (
+                        "\n[hint] Labels are invalidated whenever a new "
+                        "Snapshot/Screenshot is taken. Call windows__Snapshot "
+                        "now to get fresh labels, then retry this action with "
+                        "the new label."
+                    )
             await self.eventbus.emit(
                 ToolCallCompleted(
                     server=server,

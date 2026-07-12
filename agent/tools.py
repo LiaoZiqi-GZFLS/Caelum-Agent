@@ -391,16 +391,35 @@ def run_code(code: str, language: str = "python") -> str:
     return RestrictedCodeRunner().run(code, language=language)
 
 
+# Windows-MCP positional tools whose `label` argument is only valid against
+# the most recent Snapshot: any new Snapshot/Screenshot rebuilds the label
+# space, so acting on a stale label fails with "Label N out of range".
+_WINDOWS_LABEL_TOOLS = {"Click", "Type", "Scroll", "Move"}
+
+_LABEL_FRESHNESS_NOTE = (
+    " IMPORTANT: a `label` is only valid for the MOST RECENT windows__Snapshot "
+    "— any new Snapshot/Screenshot invalidates all previous labels. Call this "
+    "tool immediately after Snapshot, and re-Snapshot if anything changed the "
+    "screen in between."
+)
+
+
 def build_mcp_tools(mcp: "MCPMultiplexer") -> list[dict[str, Any]]:
     """Convert MCP tool schemas into OpenAI function tool definitions."""
     tools = []
     for tool in mcp.all_tools():
         name = f"{tool['server']}__{tool['name']}"
+        description = (
+            tool.get("description", "")
+            or f"Call {tool['name']} on {tool['server']} MCP server"
+        )
+        if tool["server"] == "windows" and tool["name"] in _WINDOWS_LABEL_TOOLS:
+            description += _LABEL_FRESHNESS_NOTE
         tools.append({
             "type": "function",
             "function": {
                 "name": name,
-                "description": tool.get("description", "") or f"Call {tool['name']} on {tool['server']} MCP server",
+                "description": description,
                 "parameters": tool.get("schema", {"type": "object"}),
             },
         })

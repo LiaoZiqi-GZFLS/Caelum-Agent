@@ -275,3 +275,22 @@ def test_register_all_wires_javascript_gate():
     llm2 = _LLM()
     register_all(llm2, FakeMCP())
     assert llm2.local["CodeRunner"].__self__.allow_javascript is False
+
+
+def test_build_mcp_tools_warns_windows_label_freshness():
+    from agent.tools import build_mcp_tools
+
+    mcp = FakeMCP([
+        {"server": "windows", "name": "Type", "description": "Type text.", "schema": {}},
+        {"server": "windows", "name": "Click", "description": "Click.", "schema": {}},
+        {"server": "windows", "name": "Snapshot", "description": "Snapshot.", "schema": {}},
+        {"server": "playwright", "name": "browser_click", "description": "Click.", "schema": {}},
+    ])
+    tools = {t["function"]["name"]: t["function"]["description"] for t in build_mcp_tools(mcp)}
+
+    # Positional windows tools get the label-expiry warning.
+    assert "invalidat" in tools["windows__Type"].lower()
+    assert "invalidat" in tools["windows__Click"].lower()
+    # Snapshot itself and non-windows tools are untouched.
+    assert "invalidat" not in tools["windows__Snapshot"].lower()
+    assert "invalidat" not in tools["playwright__browser_click"].lower()
