@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
 
@@ -319,3 +320,18 @@ async def test_perceive_with_vision_helper(
     await module.perceive_with_vision("click OK")
 
     assert spy.calls == 1
+
+
+def test_compress_honors_max_size_override(config: Config) -> None:
+    """Vision upgrade: an override replaces the configured 720p cap."""
+    module = PerceptionModule(config)
+    big = Image.new("RGB", (3000, 1500), (10, 20, 30))
+
+    default_bytes = module._compress(big.copy())
+    assert Image.open(io.BytesIO(default_bytes)).size[1] <= 720
+
+    module.max_size_override = (1920, 1080)
+    upgraded_bytes = module._compress(big.copy())
+    upgraded = Image.open(io.BytesIO(upgraded_bytes))
+    assert upgraded.size[1] <= 1080
+    assert upgraded.size[0] > Image.open(io.BytesIO(default_bytes)).size[0]

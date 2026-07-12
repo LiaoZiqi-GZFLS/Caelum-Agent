@@ -67,6 +67,10 @@ class PerceptionModule:
         self.mcp = mcp
         self.ui_detector = ui_detector
         self._ocr: Any | None = None
+        # Vision upgrade: when the model calls UpgradeVision, the orchestrator
+        # sets this to (1920, 1080) so subsequent screenshots are compressed
+        # to 1080p instead of the configured 720p default. Reset per task.
+        self.max_size_override: tuple[int, int] | None = None
         self._io_executor = ThreadPoolExecutor(
             max_workers=max_io_workers, thread_name_prefix="perception-io"
         )
@@ -212,7 +216,9 @@ class PerceptionModule:
             return image
 
     def _compress(self, image: Image.Image) -> bytes:
-        max_size = (self.config.screenshot.max_width, self.config.screenshot.max_height)
+        max_size = self.max_size_override or (
+            self.config.screenshot.max_width, self.config.screenshot.max_height
+        )
         image.thumbnail(max_size)
         fmt = self.config.screenshot.format
         buf = io.BytesIO()

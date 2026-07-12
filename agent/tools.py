@@ -47,6 +47,12 @@ DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
 }
 
 
+UPGRADE_VISION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+}
+
+
 COMPLETE_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

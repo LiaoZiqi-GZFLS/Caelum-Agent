@@ -34,6 +34,7 @@ from agent.tools import (
     COMPLETE_TASK_SCHEMA,
     DESKTOP_INTERACT_SCHEMA,
     REQUEST_HUMAN_HELP_SCHEMA,
+    UPGRADE_VISION_SCHEMA,
     register_all,
 )
 from agent.window_capture import register_capture_window
@@ -220,6 +221,9 @@ class AgentOrchestrator:
         # model sees the actual media (merged with the SoM follow-up into one
         # user message to avoid consecutive same-role turns).
         self._pending_media_parts: list[dict[str, Any]] = []
+        # UpgradeVision: the handler sets this flag; _think_and_act consumes it
+        # by injecting a fresh 1080p perception right after the tool result.
+        self._upgrade_requested: bool = False
         # Set by initialize() when the corresponding tools are enabled; the
         # task-end finally block fire-and-forgets their remote sweeps.
         self.file_extractor: Any | None = None
@@ -263,6 +267,7 @@ class AgentOrchestrator:
             allow_javascript=self.security.auto_approve,
         )
         self._register_desktop_interact()
+        self._register_upgrade_vision()
         self._register_complete_task()
         self._register_human_help()
         register_task_list(self.llm, self.task_list)
@@ -481,6 +486,39 @@ class AgentOrchestrator:
                 msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
             return msg
         return f"[error] {result.content}"
+
+    async def _upgrade_vision_impl(self) -> str:
+        """Handler for UpgradeVision: raise the screenshot cap to 1080p.
+
+        Sets the perception override so every subsequent screenshot (main-loop
+        and SoM passes) compresses to the upgraded size, and flags
+        _think_and_act to inject a fresh high-res perception right after this
+        tool result so the model can continue without wasting a round.
+        """
+        cfg = self.config.screenshot
+        self.perception.max_size_override = (
+            cfg.upgraded_max_width, cfg.upgraded_max_height
+        )
+        self._upgrade_requested = True
+        return (
+            f"[ok] Vision upgraded to {cfg.upgraded_max_width}x"
+            f"{cfg.upgraded_max_height} for the rest of this task. A fresh "
+            "high-resolution screenshot follows."
+        )
+
+    def _register_upgrade_vision(self) -> None:
+        """Register the UpgradeVision local function tool with the LLM."""
+        self.llm.register_local_function(
+            "UpgradeVision",
+            self._upgrade_vision_impl,
+            schema=UPGRADE_VISION_SCHEMA,
+            description=(
+                "Upgrade screenshot resolution from 720p to 1080p for the rest "
+                "of this task. Use when you repeatedly cannot read small text "
+                "or locate elements in the screenshot. A fresh high-resolution "
+                "screenshot is attached right after the call."
+            ),
+        )
 
     def _register_desktop_interact(self) -> None:
         """Register the DesktopInteract local function tool with the LLM."""
@@ -855,6 +893,8 @@ class AgentOrchestrator:
         self._last_perception: Any | None = None
         self._pending_som_followup = None
         self._pending_media_parts = []
+        self._upgrade_requested = False
+        self.perception.max_size_override = None
         self.task_list.clear()
         self._task_list_nudged = False
         self._pending_loop_notice = None
@@ -1111,6 +1151,21 @@ class AgentOrchestrator:
                     "type": "text",
                     "text": "[ViewMedia] The media above was uploaded and "
                             "attached for your reference.",
+                })
+            if self._upgrade_requested:
+                # UpgradeVision: take a fresh 1080p perception immediately so
+                # the model can continue this turn with sharper eyes.
+                self._upgrade_requested = False
+                fresh = await self.perception.perceive(
+                    instruction=self.current_instruction,
+                    with_vision=not self.config.ui_detector.lazy,
+                )
+                self._last_perception = fresh
+                followup_parts.extend(self._format_perception(fresh))
+                followup_parts.append({
+                    "type": "text",
+                    "text": "[UpgradeVision] The perception above was captured "
+                            "at 1080p resolution.",
                 })
             som_followup = self._pending_som_followup
             if som_followup is not None:

@@ -140,6 +140,7 @@ Beyond MCP tools, the orchestrator registers these local tools on the LLM client
 |------|--------|---------|
 | `CodeRunner` | `tools.py` | Sandboxed local Python; JavaScript only with `--yes`/`--yes-all` |
 | `DesktopInteract` | `orchestrator.py` | SoM label → GUI-Actor coordinates → click/type/scroll |
+| `UpgradeVision` | `orchestrator.py` + `perception.py` | Raise screenshot cap from 720p to 1080p (`screenshot.upgraded_max_*`) for the rest of the task when the model can't read small text; injects a fresh 1080p perception immediately; reset per task |
 | `CompleteTask` | `orchestrator.py` | Model-decided fast path: finish without verification |
 | `RequestHumanHelp` | `orchestrator.py` + `choice_menu.py` | Interactive TTY question with selectable options |
 | `UpdateTaskList` | `task_list.py` | Model-managed pending/in_progress/completed task list; self-clears when done |

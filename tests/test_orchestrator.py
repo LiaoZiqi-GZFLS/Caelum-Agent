@@ -2362,3 +2362,64 @@ async def test_system_prompt_prefers_desktop_interact_when_uia_fails(
     # DesktopInteract guidance must appear AFTER (i.e. as the fallback for)
     # the Snapshot guidance.
     assert system.rfind("DesktopInteract") > system.find("windows__Snapshot")
+
+
+@pytest.mark.asyncio
+async def test_upgrade_vision_raises_resolution_and_reperceives(config, eventbus, killswitch):
+    """UpgradeVision sets the 1080p override and immediately injects a fresh
+    high-res perception so the model can keep working without a wasted round."""
+    class _UpgradeLLM(FakeLLM):
+        def __init__(self, agent: AgentOrchestrator, responses: list[Any]) -> None:
+            super().__init__(responses)
+            self._agent = agent
+
+        async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
+            out = []
+            for c in calls:
+                if c.function.name == "UpgradeVision":
+                    content = await self._agent._upgrade_vision_impl()
+                else:
+                    content = "{}"
+                out.append({"role": "tool", "tool_call_id": c.id, "content": content})
+            return out
+
+    perception = FakePerception([_blank_perception()] * 3)
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch, perception=perception,
+    )
+    llm = _UpgradeLLM(
+        agent,
+        [
+            _message("Too blurry.", tool_calls=[_tool_call("UpgradeVision", {}, call_id="c7")]),
+            _message("now clear"),
+            _message("YES"),
+            _message("done."),
+        ],
+    )
+    agent.llm = llm
+    agent._register_upgrade_vision()
+
+    await agent.run_task("read tiny text")
+
+    assert perception.max_size_override == (1920, 1080)
+    # A fresh perception was taken right after the upgrade call and injected.
+    assert len(perception.calls) >= 2
+    upgrade_notes = [
+        m for m in agent.history
+        if m["role"] == "user" and "1080" in str(m.get("content", ""))
+    ]
+    assert upgrade_notes, "no upgraded-screenshot note was injected"
+
+
+@pytest.mark.asyncio
+async def test_new_task_resets_vision_upgrade(config, eventbus, killswitch):
+    llm = FakeLLM([_message("done."), _message("YES"), _message("finished.")])
+    perception = FakePerception([_blank_perception()] * 3)
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch, perception=perception,
+    )
+    perception.max_size_override = (1920, 1080)
+
+    await agent.run_task("fresh task")
+
+    assert perception.max_size_override is None

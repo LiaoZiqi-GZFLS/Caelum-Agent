@@ -72,6 +72,9 @@ class ScreenshotConfig(BaseModel):
     backend: Literal["mss", "PIL"] = "mss"
     max_width: int = 1280
     max_height: int = 720
+    # Applied when the model calls UpgradeVision mid-task (too blurry to read).
+    upgraded_max_width: int = 1920
+    upgraded_max_height: int = 1080
     quality: int = 60
     format: Literal["JPEG", "PNG"] = "JPEG"
     crop_to_active_window: bool = False
