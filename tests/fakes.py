@@ -154,7 +154,7 @@ class FakePerception(PerceptionModule):
         self._index = 0
         self.calls: list[str] = []
 
-    async def perceive(self, instruction: str = "", with_vision: bool = False) -> Perception:
+    async def perceive(self, instruction: str = "") -> Perception:
         self.calls.append(instruction)
         if self._index >= len(self.perceptions):
             base = (
@@ -170,8 +170,19 @@ class FakePerception(PerceptionModule):
             perception.ui_hash = f"fake-{self._index - 1}"
         return perception
 
-    async def perceive_with_vision(self, instruction: str = "") -> Perception:
-        return await self.perceive(instruction=instruction, with_vision=True)
+
+class FakeYoloDetector:
+    """Sync YoloDetector stand-in: canned annotations + call recording."""
+
+    def __init__(self, annotations: list[dict[str, Any]] | None = None) -> None:
+        self.annotations = list(annotations or [])
+        self.calls = 0
+        self.seen_sizes: list[tuple[int, int]] = []
+
+    def detect(self, image: Any) -> list[dict[str, Any]]:
+        self.calls += 1
+        self.seen_sizes.append(image.size)
+        return list(self.annotations)
 
 
 class FakeReflection(ReflectionEngine):

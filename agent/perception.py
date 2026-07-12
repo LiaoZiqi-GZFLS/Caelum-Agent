@@ -1,8 +1,9 @@
-"""Perception fusion: screenshot, OCR, UI tree, GUI-Actor SoM.
+"""Perception fusion: screenshot, OCR, UI tree, YOLO SoM annotation.
 
-Blocking work (screenshots, compression, OCR) is offloaded to an IO thread
-pool so the asyncio event loop stays responsive. Visual inference runs in the
-UIDetector's own visual-inference thread pool.
+Blocking work (screenshots, compression, OCR, YOLO inference) is offloaded to
+an IO thread pool so the asyncio event loop stays responsive. YOLO (OmniParser
+icon detection) runs only as automatic compensation on UIA-less frames — an
+empty UI tree with OCR text present (WeChat/Qt/Electron-style apps).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from agent.snapshot_parser import (
 
 if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
-    from ui_detector import UIDetector
+    from ui_detector import YoloDetector
 
 
 logger = logging.getLogger("caelum.perception")
@@ -88,13 +89,19 @@ class Perception:
     ui_tree: dict[str, Any]
     som_annotations: list[dict[str, Any]]
     ui_hash: str = ""
+    # Native-pixel size of the AREA the screenshot covers (the full screen for
+    # normal perceptions; the cropped region for ZoomRegion views).
     screen_width: int = 0
     screen_height: int = 0
     # Size of the compressed screenshot the model actually sees. Coordinates
     # the model gives (loc) are in THIS space; the orchestrator rescales them
-    # to native screen pixels using screen_width/screen_height.
+    # to native pixels: screen = origin + loc * screen / screenshot.
     screenshot_width: int = 0
     screenshot_height: int = 0
+    # Native-pixel origin of the covered area ((0, 0) for full-screen views;
+    # the crop's top-left corner for ZoomRegion views).
+    image_origin_x: int = 0
+    image_origin_y: int = 0
     annotated_screenshot_path: Path | None = None
     blocked_count: int = 0
 
@@ -104,12 +111,12 @@ class PerceptionModule:
         self,
         config: Config,
         mcp: MCPMultiplexer | None = None,
-        ui_detector: UIDetector | None = None,
+        detector: "YoloDetector | None" = None,
         max_io_workers: int = 8,
     ) -> None:
         self.config = config
         self.mcp = mcp
-        self.ui_detector = ui_detector
+        self.detector = detector
         self._ocr: Any | None = None
         # UpgradeVision: when the model calls UpgradeVision, the orchestrator
         # flips this to True so subsequent screenshots are the ORIGINAL image
@@ -124,7 +131,7 @@ class PerceptionModule:
         """Release the IO thread pool."""
         self._io_executor.shutdown(wait=True)
 
-    async def perceive(self, instruction: str = "", with_vision: bool = False) -> Perception:
+    async def perceive(self, instruction: str = "") -> Perception:
         cache_dir = self.config.cache_dir_absolute()
         cache_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(time.time() * 1000)
@@ -155,24 +162,21 @@ class PerceptionModule:
         )
         ui_tree = await self._fetch_ui_tree()
         # Auto SoM compensation: on UIA-less screens (empty tree but OCR text,
-        # e.g. WeChat/Qt/Electron), run vision detection even in lazy mode so
-        # the model gets clickable SoM markers instead of a dead end.
+        # e.g. WeChat/Qt/Electron), run YOLO icon detection so the model gets
+        # clickable numbered boxes instead of a dead end. YOLO annotates the
+        # COMPRESSED image so normalized coordinates match what the model sees.
+        som_annotations: list[dict[str, Any]] = []
         if (
-            not with_vision
-            and self.config.ui_detector.auto_compensate
+            self.config.yolo.auto_compensate
             and self._needs_vision_compensation(ui_tree, ocr_text)
         ):
             logger.info(
                 "UIA-less screen detected (empty tree, OCR present); "
-                "running SoM compensation"
+                "running YOLO annotation"
             )
-            with_vision = True
-        if with_vision:
-            som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
-        else:
-            som_annotations, blocked_count = [], 0
-        # Drop placeholder/invalid annotations (e.g. detector error sentinels)
-        # so visualize_som never crashes on a missing center_x/center_y.
+            som_annotations = await self._run_yolo(image)
+        # Drop placeholder/invalid annotations so visualize_som never crashes
+        # on a missing center_x/center_y.
         valid_annotations = [
             a for a in som_annotations
             if isinstance(a, dict) and "center_x" in a and "center_y" in a
@@ -191,7 +195,7 @@ class PerceptionModule:
         )
 
         annotated_screenshot_path: Path | None = None
-        if som_annotations and self.ui_detector is not None:
+        if som_annotations and self.detector is not None:
             annotated_image = await loop.run_in_executor(
                 self._io_executor, self._generate_annotated,
                 screenshot_path, som_annotations,
@@ -218,16 +222,7 @@ class PerceptionModule:
             screenshot_width=compressed_width,
             screenshot_height=compressed_height,
             annotated_screenshot_path=annotated_screenshot_path,
-            blocked_count=blocked_count,
         )
-
-    async def perceive_with_vision(self, instruction: str = "") -> Perception:
-        """Capture perception with GUI-Actor SoM detection enabled.
-
-        Used by ``DesktopInteract`` so labels are resolved against the latest
-        screenshot. This is the only on-demand vision entry point.
-        """
-        return await self.perceive(instruction=instruction, with_vision=True)
 
     @staticmethod
     def _generate_annotated(
@@ -409,19 +404,23 @@ class PerceptionModule:
             return {"error": str(exc)}
         return {}
 
-    async def _run_ui_detector(
-        self, image: Image.Image, instruction: str
-    ) -> tuple[list[dict[str, Any]], int]:
-        if self.ui_detector is None or not self.config.ui_detector.enabled:
-            return [], 0
+    async def _run_yolo(self, image: Image.Image) -> list[dict[str, Any]]:
+        """Run YOLO icon detection on the (compressed) screenshot.
+
+        YOLO inference is sync and runs in the IO thread pool; failures are
+        logged and degrade to "no annotations" so perception never breaks a
+        task.
+        """
+        if self.detector is None or not self.config.yolo.enabled:
+            return []
+        loop = asyncio.get_event_loop()
         try:
-            annotations, blocked = await self.ui_detector.annotate(image, instruction)
-            return annotations, blocked
-        except Exception as exc:
-            logger.warning(
-                "UI detector failed during annotate: %s", exc, exc_info=True
+            return await loop.run_in_executor(
+                self._io_executor, self.detector.detect, image
             )
-            return [{"error": str(exc)}], 0
+        except Exception as exc:
+            logger.warning("YOLO detection failed: %s", exc, exc_info=True)
+            return []
 
     @staticmethod
     def _build_description(

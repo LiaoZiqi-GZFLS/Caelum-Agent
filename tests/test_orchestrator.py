@@ -1191,22 +1191,72 @@ async def test_desktop_interact_type_focuses_then_types(config, eventbus, killsw
     assert mcp.calls[1][2]["text"] == "hello"
 
 
+@pytest.mark.asyncio
+async def test_desktop_interact_applies_region_origin(config, eventbus, killswitch):
+    """ZoomRegion perceptions carry a native-pixel origin; label centers are
+    translated by it (screen = origin + center * region_native_size)."""
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="region",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+        screen_width=1000,
+        screen_height=1000,
+        image_origin_x=200,
+        image_origin_y=100,
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="click")
+
+    assert "OK" in result
+    server, tool, args = mcp.calls[-1]
+    assert (server, tool) == ("windows", "Click")
+    assert args["loc"] == [700, 600]  # 200 + 0.5*1000, 100 + 0.5*1000
+
+
+@pytest.mark.asyncio
+async def test_rescale_loc_args_applies_region_origin(config, eventbus, killswitch):
+    """_rescale_loc_args adds the perception origin after scaling."""
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="region",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[],
+        screen_width=2000,
+        screen_height=1000,
+        screenshot_width=1000,
+        screenshot_height=500,
+        image_origin_x=100,
+        image_origin_y=50,
+    )
+
+    out = agent._rescale_loc_args({"loc": [500, 250]})
+
+    assert out["loc"] == [1100, 550]  # 100 + 500*2, 50 + 250*2
+
+
 # ---------------------------------------------------------------------------
 # _format_perception tests
 # ---------------------------------------------------------------------------
 
 
-def test_format_perception_prefers_annotated_screenshot():
-    """_format_perception uses annotated_screenshot_path when available."""
+def test_format_perception_sends_both_clean_and_annotated():
+    """With YOLO annotations, _format_perception sends TWO images: the clean
+    screenshot first, then the annotated copy (Kimi reads both)."""
+    import base64
     import tempfile
 
     tmpdir = Path(tempfile.gettempdir())
-    raw = tmpdir / "screenshot_raw_test.jpg"
-    annotated = tmpdir / "screenshot_annotated_test.jpg"
-    jpeg_header = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\x09\x09\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\xff\xdb\x00C\x01\x09\x09\x09\x0c\x0b\x0c\x18\r\r\x182!\x1c!22222222222222222222222222222222222222222222222222\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07\"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\x09\n\x16\x17\x18\x19\x1a%&'()*456789:CDEFGHIJSTUVWXYZcdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xf9\xfe\x00\x1f\xff\xd9"
+    raw = tmpdir / "screenshot_raw_dual_test.jpg"
+    annotated = tmpdir / "screenshot_annotated_dual_test.jpg"
     try:
-        raw.write_bytes(jpeg_header)
-        annotated.write_bytes(jpeg_header)
+        raw.write_bytes(b"\xff\xd8raw-bytes\xff\xd9")
+        annotated.write_bytes(b"\xff\xd8annotated-bytes\xff\xd9")
 
         p = Perception(
             screenshot_path=raw,
@@ -1218,9 +1268,12 @@ def test_format_perception_prefers_annotated_screenshot():
         )
         result = AgentOrchestrator._format_perception(p)
 
-        # The result should include the annotated image's base64 content.
-        image_found = any(part.get("type") == "image_url" for part in result)
-        assert image_found, "Annotated screenshot should be included as image_url"
+        images = [part for part in result if part.get("type") == "image_url"]
+        assert len(images) == 2, "clean + annotated images should both be sent"
+        raw_b64 = base64.b64encode(b"\xff\xd8raw-bytes\xff\xd9").decode()
+        ann_b64 = base64.b64encode(b"\xff\xd8annotated-bytes\xff\xd9").decode()
+        assert raw_b64 in images[0]["image_url"]["url"]
+        assert ann_b64 in images[1]["image_url"]["url"]
     finally:
         for p in (raw, annotated):
             if p.exists():
@@ -1484,21 +1537,19 @@ class _SpyDetector:
         self.calls = 0
         self.annotations = annotations or []
 
-    async def annotate(
-        self, image: Any, instruction: str
-    ) -> tuple[list[dict[str, Any]], int]:
+    def detect(self, image: Any) -> list[dict[str, Any]]:
         self.calls += 1
-        return list(self.annotations), 0
+        return list(self.annotations)
 
 
 def _patch_perception_capture(
-    module: _PerceptionModule, monkeypatch: pytest.MonkeyPatch
+    module: _PerceptionModule, monkeypatch: pytest.MonkeyPatch, ocr_text: str = ""
 ) -> None:
     # Instance attributes do not bind like methods, so lambdas take no `self`.
     monkeypatch.setattr(
         module, "_capture_screenshot", lambda: _PILImage.new("RGB", (100, 100))
     )
-    monkeypatch.setattr(module, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(module, "_run_ocr", lambda img: ocr_text)
     monkeypatch.setattr(
         module, "_generate_annotated", lambda path, ann: _PILImage.new("RGB", (10, 10))
     )
@@ -1508,9 +1559,10 @@ def _patch_perception_capture(
 async def test_pure_filesystem_task_skips_vision(
     config, eventbus, killswitch, monkeypatch
 ):
-    # Lazy mode (default): a filesystem task never runs the detector.
+    # No OCR text -> no UIA-less compensation -> a filesystem task never runs
+    # the detector.
     spy = _SpyDetector()
-    perception = _PerceptionModule(config, ui_detector=spy)
+    perception = _PerceptionModule(config, detector=spy)
     _patch_perception_capture(perception, monkeypatch)
 
     llm = FakeLLM([
@@ -1525,7 +1577,7 @@ async def test_pure_filesystem_task_skips_vision(
     agent = AgentOrchestrator(
         config, eventbus, llm, mcp, killswitch, perception=perception,
     )
-    agent.ui_detector = spy  # lazy mode would have constructed it
+    agent.ui_detector = spy  # initialize() would have constructed it
 
     result = await agent.run_task("list files")
 
@@ -1541,7 +1593,7 @@ async def test_desktop_interact_uses_last_perception_without_detection(
     # Label-only DesktopInteract resolves against the LAST perception's SoM
     # annotations; it must NOT run a detection pass of its own.
     spy = _SpyDetector()
-    perception = _PerceptionModule(config, ui_detector=spy)
+    perception = _PerceptionModule(config, detector=spy)
     _patch_perception_capture(perception, monkeypatch)
 
     mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
@@ -1572,14 +1624,14 @@ async def test_desktop_interact_uses_last_perception_without_detection(
 
 
 @pytest.mark.asyncio
-async def test_eager_mode_runs_vision_each_loop(
+async def test_uia_less_loop_runs_yolo_compensation(
     config, eventbus, killswitch, monkeypatch
 ):
-    # lazy=False restores legacy behaviour: vision runs on every perception.
-    config.ui_detector.lazy = False
+    # UIA-less screen (empty tree via FakeMCP default + OCR text present):
+    # YOLO compensation runs on the loop's perceptions.
     spy = _SpyDetector()
-    perception = _PerceptionModule(config, ui_detector=spy)
-    _patch_perception_capture(perception, monkeypatch)
+    perception = _PerceptionModule(config, detector=spy)
+    _patch_perception_capture(perception, monkeypatch, ocr_text="登录")
 
     llm = FakeLLM([
         _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),

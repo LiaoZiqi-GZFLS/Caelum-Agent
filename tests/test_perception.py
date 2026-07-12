@@ -193,17 +193,17 @@ def test_perception_defaults_screen_dims_to_zero() -> None:
 
 
 class _SpyDetector:
-    """Records annotate() calls and returns a fixed annotation list."""
+    """Records detect() calls and returns a fixed annotation list (YOLO-style)."""
 
     def __init__(self, annotations: list[dict[str, Any]] | None = None) -> None:
         self.calls = 0
         self.annotations = annotations or []
+        self.seen_sizes: list[tuple[int, int]] = []
 
-    async def annotate(
-        self, image: Image.Image, instruction: str
-    ) -> tuple[list[dict[str, Any]], int]:
+    def detect(self, image: Image.Image) -> list[dict[str, Any]]:
         self.calls += 1
-        return list(self.annotations), 0
+        self.seen_sizes.append(image.size)
+        return list(self.annotations)
 
 
 def _patch_capture(module: PerceptionModule, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,14 +219,15 @@ def _patch_capture(module: PerceptionModule, monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
-async def test_perceive_without_vision_skips_detector(
+async def test_perceive_without_compensation_skips_detector(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No OCR text -> no UIA-less compensation -> detector never runs."""
     spy = _SpyDetector()
-    module = PerceptionModule(config, ui_detector=spy)
+    module = PerceptionModule(config, detector=spy)
     _patch_capture(module, monkeypatch)
 
-    result = await module.perceive(instruction="list files", with_vision=False)
+    result = await module.perceive(instruction="list files")
 
     assert spy.calls == 0
     assert result.som_annotations == []
@@ -252,7 +253,7 @@ async def test_perceive_runs_ocr_on_full_resolution_image(
         module, "_run_ocr", lambda img: seen_sizes.append(img.size) or ""
     )
 
-    await module.perceive(instruction="x", with_vision=False)
+    await module.perceive(instruction="x")
 
     assert seen_sizes == [(1920, 1080)]
 
@@ -362,33 +363,51 @@ def test_display_scale_falls_back_to_1_on_error(
 
 
 @pytest.mark.asyncio
-async def test_perceive_with_vision_runs_detector(
+async def test_perceive_compensation_detects_on_compressed_image(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """YOLO annotates the COMPRESSED (model-visible) image, so normalized
+    annotation coordinates line up with the screenshot the model sees."""
     annotations = [
-        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
+        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9},
     ]
     spy = _SpyDetector(annotations)
-    module = PerceptionModule(config, ui_detector=spy)
-    _patch_capture(module, monkeypatch)
+    module = PerceptionModule(config, detector=spy)
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
+    )
+    monkeypatch.setattr(module, "_run_ocr", lambda img: "登录按钮")
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
+    module.mcp = None  # empty UI tree -> compensation fires; real _compress runs
 
-    result = await module.perceive(instruction="click OK", with_vision=True)
+    result = await module.perceive(instruction="click OK")
 
     assert spy.calls == 1
+    assert spy.seen_sizes == [(2048, 1152)]  # 2560x1440 at 125% inverse-DPI
     assert result.som_annotations == annotations
 
 
 @pytest.mark.asyncio
-async def test_perceive_with_vision_helper(
+async def test_perceive_survives_detector_failure(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spy = _SpyDetector()
-    module = PerceptionModule(config, ui_detector=spy)
-    _patch_capture(module, monkeypatch)
+    """A YOLO failure must not break perception: annotations stay empty."""
 
-    await module.perceive_with_vision("click OK")
+    class _Boom:
+        def detect(self, image):
+            raise RuntimeError("cuda boom")
 
-    assert spy.calls == 1
+    module = PerceptionModule(config, detector=_Boom())
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (100, 100))
+    )
+    monkeypatch.setattr(module, "_run_ocr", lambda img: "text")
+    module.mcp = None
+
+    result = await module.perceive(instruction="x")
+
+    assert result.som_annotations == []
+    assert result.annotated_screenshot_path is None
 
 
 def test_compress_matches_ocr_at_100_percent(

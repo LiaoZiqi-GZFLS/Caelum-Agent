@@ -194,28 +194,24 @@ async def test_perceive_filters_invalid_annotations_and_writes_annotated(
     pm, config, monkeypatch
 ):
     class SpyDetector:
-        async def annotate(self, image, instruction):
-            return (
-                [
-                    {"center_x": 0.5, "center_y": 0.5, "score": 0.9},
-                    {"label": 2},  # invalid: missing centers
-                ],
-                1,
-            )
+        def detect(self, image):
+            return [
+                {"center_x": 0.5, "center_y": 0.5, "score": 0.9},
+                {"label": 2},  # invalid: missing centers
+            ]
 
-    pm.ui_detector = SpyDetector()
+    pm.detector = SpyDetector()
     pm.mcp = None
     monkeypatch.setattr(pm, "_capture_screenshot", lambda: Image.new("RGB", (100, 100)))
     monkeypatch.setattr(pm, "_compress", lambda img: b"jpeg")
-    monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(pm, "_run_ocr", lambda img: "text")  # triggers compensation
     monkeypatch.setattr(
         pm, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
     )
 
-    result = await pm.perceive("do", with_vision=True)
+    result = await pm.perceive("do")
 
     assert len(result.som_annotations) == 1  # invalid annotation dropped
-    assert result.blocked_count == 1
     assert result.annotated_screenshot_path is not None
     assert result.annotated_screenshot_path.exists()
 
@@ -238,9 +234,9 @@ class _SpyDetector:
     def __init__(self):
         self.calls = 0
 
-    async def annotate(self, image, instruction):
+    def detect(self, image):
         self.calls += 1
-        return ([{"center_x": 0.5, "center_y": 0.5, "score": 0.9}], 0)
+        return [{"center_x": 0.5, "center_y": 0.5, "score": 0.9}]
 
 
 def _patch_capture(pm, monkeypatch, ocr_text="登录"):
@@ -254,13 +250,13 @@ def _patch_capture(pm, monkeypatch, ocr_text="登录"):
 
 @pytest.mark.asyncio
 async def test_perceive_auto_compensates_when_uia_empty(pm, monkeypatch):
-    """Empty UI tree + OCR text -> run SoM detection even in lazy mode."""
+    """Empty UI tree + OCR text -> run YOLO detection automatically."""
     detector = _SpyDetector()
-    pm.ui_detector = detector
+    pm.detector = detector
     pm.mcp = None  # ui_tree will be {}
     _patch_capture(pm, monkeypatch)
 
-    result = await pm.perceive("do", with_vision=False)
+    result = await pm.perceive("do")
 
     assert detector.calls == 1
     assert len(result.som_annotations) == 1
@@ -270,11 +266,11 @@ async def test_perceive_auto_compensates_when_uia_empty(pm, monkeypatch):
 @pytest.mark.asyncio
 async def test_perceive_no_compensation_when_tree_present(pm, monkeypatch):
     detector = _SpyDetector()
-    pm.ui_detector = detector
+    pm.detector = detector
     _patch_capture(pm, monkeypatch)
     monkeypatch.setattr(pm, "_fetch_ui_tree", lambda: _async_return({"snapshot": "buttons"}))
 
-    result = await pm.perceive("do", with_vision=False)
+    result = await pm.perceive("do")
 
     assert detector.calls == 0
     assert result.som_annotations == []
@@ -283,24 +279,24 @@ async def test_perceive_no_compensation_when_tree_present(pm, monkeypatch):
 @pytest.mark.asyncio
 async def test_perceive_no_compensation_when_ocr_empty(pm, monkeypatch):
     detector = _SpyDetector()
-    pm.ui_detector = detector
+    pm.detector = detector
     pm.mcp = None
     _patch_capture(pm, monkeypatch, ocr_text="   ")
 
-    result = await pm.perceive("do", with_vision=False)
+    result = await pm.perceive("do")
 
     assert detector.calls == 0
 
 
 @pytest.mark.asyncio
 async def test_perceive_compensation_disabled_by_config(pm, config, monkeypatch):
-    config.ui_detector.auto_compensate = False
+    config.yolo.auto_compensate = False
     detector = _SpyDetector()
-    pm.ui_detector = detector
+    pm.detector = detector
     pm.mcp = None
     _patch_capture(pm, monkeypatch)
 
-    result = await pm.perceive("do", with_vision=False)
+    result = await pm.perceive("do")
 
     assert detector.calls == 0
 

@@ -442,11 +442,15 @@ class AgentOrchestrator:
             available = [a.get("label") for a in anns]
             return f"[error] SoM label {label} not found. Available labels: {available}"
 
-        # Convert normalized [0,1] to screen pixel coordinates.
+        # Convert normalized [0,1] to screen pixel coordinates, honoring the
+        # covered area's native origin (full-screen views have origin (0, 0);
+        # ZoomRegion views carry the crop's top-left corner).
         sw = perception.screen_width or 1920
         sh = perception.screen_height or 1080
-        screen_x = int(round(match.get("center_x", 0) * sw))
-        screen_y = int(round(match.get("center_y", 0) * sh))
+        ox = getattr(perception, "image_origin_x", 0) or 0
+        oy = getattr(perception, "image_origin_y", 0) or 0
+        screen_x = int(round(ox + match.get("center_x", 0) * sw))
+        screen_y = int(round(oy + match.get("center_y", 0) * sh))
 
         if action in ("click", "double_click", "right_click"):
             mcp_action = "Click"
@@ -689,11 +693,17 @@ class AgentOrchestrator:
 
     @staticmethod
     def _format_perception(perception: Any) -> list[dict[str, Any]]:
-        """Convert a Perception dataclass into a multimodal message for the LLM."""
+        """Convert a Perception dataclass into a multimodal message for the LLM.
+
+        When YOLO annotations exist, BOTH the clean screenshot and the
+        annotated copy are sent (clean first): the model reads text and fine
+        detail from the clean image and takes marker numbers from the
+        annotated one.
+        """
         text_parts = [perception.description]
         if perception.som_annotations:
             text_parts.append(
-                "SoM annotations (numbered markers on screenshot):\n"
+                "SoM annotations (numbered red boxes on the SECOND image):\n"
                 + "\n".join(
                     f"  [{a.get('label', '?')}] at ({a.get('center_x', 0):.3f}, {a.get('center_y', 0):.3f})"
                     + (f" score={a.get('score', 0):.2f}" if a.get('score') else "")
@@ -701,8 +711,9 @@ class AgentOrchestrator:
                 )
             )
             text_parts.append(
-                "To interact with a marked element, call "
-                "DesktopInteract(label=<number>, action=<action>). "
+                "The SECOND image is the annotated copy with numbered red "
+                "boxes; the first is the clean screenshot. To interact with a "
+                "marked element, call DesktopInteract(label=<number>, action=<action>). "
                 "Actions: click, double_click, right_click, type (needs text=), scroll_down, scroll_up."
             )
 
@@ -710,28 +721,28 @@ class AgentOrchestrator:
             {"type": "text", "text": "\n\n".join(text_parts)},
         ]
 
-        # Prefer the SoM-annotated screenshot if it exists; fall back to raw.
-        image_path: Path | None = None
-        for candidate in (
-            perception.annotated_screenshot_path,
-            perception.screenshot_path,
-        ):
-            if candidate is not None and candidate.exists():
-                image_path = candidate
-                break
-        if image_path is not None and image_path.exists():
-            try:
-                image_bytes = image_path.read_bytes()
-                b64 = base64.b64encode(image_bytes).decode("utf-8")
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                })
-            except Exception as exc:
-                content.append({
-                    "type": "text",
-                    "text": f"[Could not include screenshot: {exc}]",
-                })
+        # Clean screenshot first, annotated copy second (when it exists).
+        image_paths: list[Path] = []
+        raw = perception.screenshot_path
+        annotated = perception.annotated_screenshot_path
+        if raw is not None and raw.exists():
+            image_paths.append(raw)
+        if annotated is not None and annotated.exists():
+            image_paths.append(annotated)
+        if image_paths:
+            for path in image_paths:
+                try:
+                    image_bytes = path.read_bytes()
+                    b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    })
+                except Exception as exc:
+                    content.append({
+                        "type": "text",
+                        "text": f"[Could not include screenshot: {exc}]",
+                    })
         else:
             content.append({
                 "type": "text",
@@ -1039,7 +1050,6 @@ class AgentOrchestrator:
             self._pending_completion = None
             perception = await self.perception.perceive(
                 instruction=self.current_instruction,
-                with_vision=not self.config.ui_detector.lazy,
             )
             self._last_perception = perception
             perception_content = self._format_perception(perception)
@@ -1135,7 +1145,6 @@ class AgentOrchestrator:
                 # Capture the post-action perception for state-based verification.
                 post_action_perception = await self.perception.perceive(
                     instruction=self.current_instruction,
-                    with_vision=not self.config.ui_detector.lazy,
                 )
                 self._last_perception = post_action_perception
                 self.history.append({
@@ -1245,7 +1254,6 @@ class AgentOrchestrator:
                 self._upgrade_requested = False
                 fresh = await self.perception.perceive(
                     instruction=self.current_instruction,
-                    with_vision=not self.config.ui_detector.lazy,
                 )
                 self._last_perception = fresh
                 followup_parts.extend(self._format_perception(fresh))
@@ -1519,8 +1527,10 @@ class AgentOrchestrator:
         ch = getattr(p, "screenshot_height", 0) or 0
         if not (sw and sh and cw and ch):
             return args
+        ox = getattr(p, "image_origin_x", 0) or 0
+        oy = getattr(p, "image_origin_y", 0) or 0
         x, y = float(loc[0]), float(loc[1])
-        rescaled = [int(round(x * sw / cw)), int(round(y * sh / ch))]
+        rescaled = [int(round(ox + x * sw / cw)), int(round(oy + y * sh / ch))]
         if rescaled != list(loc):
             logger.debug(
                 "Rescaled loc %s -> %s (screenshot %dx%d, screen %dx%d)",
