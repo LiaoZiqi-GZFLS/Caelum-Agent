@@ -2822,6 +2822,119 @@ async def test_zoom_region_tool_registered(config, eventbus, killswitch):
     assert "ZoomRegion" in llm.tool_names()
 
 
+# ---------------------------------------------------------------------------
+# NearbyLabels (find markers near a point)
+# ---------------------------------------------------------------------------
+
+
+def _annotations_perception() -> Perception:
+    return Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="full",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[
+            {"label": 1, "center_x": 0.1, "center_y": 0.1},
+            {"label": 2, "center_x": 0.2, "center_y": 0.15},
+            {"label": 3, "center_x": 0.9, "center_y": 0.9},
+        ],
+        screen_width=1000,
+        screen_height=1000,
+        screenshot_width=1000,
+        screenshot_height=1000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_from_loc_sorted_by_distance(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _annotations_perception()
+
+    result = await agent._nearby_labels_impl(loc=[110, 100])
+
+    assert result.startswith("[nearby labels]")
+    lines = [l for l in result.splitlines() if l.strip().startswith("label")]
+    assert len(lines) == 3
+    assert lines[0].startswith("  label 1")  # 10px away
+    assert lines[1].startswith("  label 2")  # ~103px
+    assert lines[2].startswith("  label 3")  # far
+    assert "(100, 100)" in lines[0]
+    assert "DesktopInteract(label=N)" in result
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_from_label_excludes_self(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _annotations_perception()
+
+    result = await agent._nearby_labels_impl(label=2)
+
+    lines = [l for l in result.splitlines() if l.strip().startswith("label")]
+    assert not any(l.strip().startswith("label 2 ") or l.strip() == "label 2" for l in lines)
+    assert lines[0].strip().startswith("label 1")  # closest to (200,150)
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_respects_k(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _annotations_perception()
+
+    result = await agent._nearby_labels_impl(loc=[110, 100], k=2)
+
+    lines = [l for l in result.splitlines() if l.strip().startswith("label")]
+    assert len(lines) == 2
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_requires_exactly_one_query(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _annotations_perception()
+
+    both = await agent._nearby_labels_impl(label=1, loc=[1, 2])
+    neither = await agent._nearby_labels_impl()
+
+    assert both.startswith("[error]")
+    assert neither.startswith("[error]")
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_no_annotations_error(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="t",
+        ocr_text="",
+        ui_tree={"snapshot": "x"},
+        som_annotations=[],
+    )
+
+    result = await agent._nearby_labels_impl(loc=[10, 10])
+
+    assert result.startswith("[error]")
+    assert "Snapshot" in result
+    assert "ZoomRegion" in result
+    assert "PreviewPoints" in result
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_unknown_label_error(config, eventbus, killswitch):
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
+    agent._last_perception = _annotations_perception()
+
+    result = await agent._nearby_labels_impl(label=99)
+
+    assert result.startswith("[error]")
+    assert "99" in result
+
+
+@pytest.mark.asyncio
+async def test_nearby_labels_tool_registered(config, eventbus, killswitch):
+    llm = FakeLLM()
+    agent = AgentOrchestrator(config, eventbus, llm, FakeMCP(), killswitch)
+    agent._register_nearby_labels()
+    assert "NearbyLabels" in llm.tool_names()
+
+
 @pytest.mark.asyncio
 async def test_preview_points_draws_and_stashes_followup(config, eventbus, killswitch, tmp_path):
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)

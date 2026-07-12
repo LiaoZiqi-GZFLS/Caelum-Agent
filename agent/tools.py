@@ -47,6 +47,35 @@ DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
 }
 
 
+NEARBY_LABELS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "label": {
+            "type": "integer",
+            "description": (
+                "Marker number whose center is the query point. Give exactly "
+                "one of label or loc."
+            ),
+        },
+        "loc": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {"type": "number"},
+            "description": (
+                "Query point [x, y] in the current screenshot's coordinate "
+                "space."
+            ),
+        },
+        "k": {
+            "type": "integer",
+            "description": "How many nearest markers to return (default 6).",
+        },
+    },
+    "required": [],
+}
+
+
 ZOOM_REGION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

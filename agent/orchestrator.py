@@ -7,6 +7,7 @@ import atexit
 import base64
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from collections import deque
@@ -37,6 +38,7 @@ from agent.task_list import TaskList, register_task_list
 from agent.tools import (
     COMPLETE_TASK_SCHEMA,
     DESKTOP_INTERACT_SCHEMA,
+    NEARBY_LABELS_SCHEMA,
     PREVIEW_POINTS_SCHEMA,
     REQUEST_HUMAN_HELP_SCHEMA,
     UPGRADE_VISION_SCHEMA,
@@ -281,6 +283,7 @@ class AgentOrchestrator:
         self._register_desktop_interact()
         self._register_preview_points()
         self._register_zoom_region()
+        self._register_nearby_labels()
         self._register_upgrade_vision()
         self._register_complete_task()
         self._register_human_help()
@@ -592,6 +595,108 @@ class AgentOrchestrator:
                 "coordinates refer to the region image (conversion is "
                 "automatic); the next perception round returns to the full "
                 "screen."
+            ),
+        )
+
+    async def _nearby_labels_impl(
+        self,
+        label: int | None = None,
+        loc: list | None = None,
+        k: int = 6,
+    ) -> str:
+        """Handler for NearbyLabels: list markers nearest to a query point.
+
+        Pure geometry over the current perception's YOLO annotations — no new
+        capture or detection. Distances and centers are reported in the
+        current screenshot's pixel space (what the model sees); the model
+        clicks the closest match with DesktopInteract(label=N) or refines a
+        raw-coordinate guess with PreviewPoints.
+        """
+        perception = getattr(self, "_last_perception", None)
+        if perception is None:
+            return "[error] No perception data available. Run perception first."
+        anns = perception.som_annotations
+        if not anns:
+            return (
+                "[error] The current view has no YOLO annotations. Use a "
+                "windows__Snapshot label, ZoomRegion to re-perceive an area, "
+                "or PreviewPoints for raw coordinates."
+            )
+        if (label is None) == (loc is None):
+            return (
+                "[error] NearbyLabels needs exactly one query point: "
+                "label=<marker number> or loc=[x, y] (current screenshot space)."
+            )
+
+        cw = perception.screenshot_width or 0
+        ch = perception.screenshot_height or 0
+
+        def to_px(ann: dict[str, Any]) -> tuple[float, float]:
+            cx = float(ann.get("center_x", 0))
+            cy = float(ann.get("center_y", 0))
+            if cw and ch:
+                return cx * cw, cy * ch
+            return cx, cy
+
+        if label is not None:
+            match = next(
+                (a for a in anns if a.get("label") == label), None
+            )
+            if match is None:
+                available = [a.get("label") for a in anns]
+                return (
+                    f"[error] SoM label {label} not found. Available labels: "
+                    f"{available}"
+                )
+            qx, qy = to_px(match)
+            pool = [a for a in anns if a is not match]
+        else:
+            if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
+                return "[error] loc must be [x, y] in the current screenshot's coordinate space."
+            qx, qy = float(loc[0]), float(loc[1])
+            pool = list(anns)
+
+        try:
+            k = max(1, int(k))
+        except (TypeError, ValueError):
+            k = 6
+
+        scored = []
+        for ann in pool:
+            px, py = to_px(ann)
+            scored.append((math.hypot(px - qx, py - qy), ann, px, py))
+        scored.sort(key=lambda t: t[0])
+        scored = scored[:k]
+        if not scored:
+            return "[error] No other markers near the query point."
+
+        unit = "px" if (cw and ch) else ""
+        lines = [
+            f"  label {ann.get('label')} at ({px:.0f}, {py:.0f}) — "
+            f"distance {dist:.0f}{unit}"
+            for dist, ann, px, py in scored
+        ]
+        return (
+            f"[nearby labels] closest to ({qx:.0f}, {qy:.0f}):\n"
+            + "\n".join(lines)
+            + "\nUse DesktopInteract(label=N) to click one, or PreviewPoints "
+              "with adjusted coordinates."
+        )
+
+    def _register_nearby_labels(self) -> None:
+        """Register the NearbyLabels local function tool with the LLM."""
+        self.llm.register_local_function(
+            "NearbyLabels",
+            self._nearby_labels_impl,
+            schema=NEARBY_LABELS_SCHEMA,
+            description=(
+                "List the YOLO markers nearest to a point: label=<marker "
+                "number> or loc=[x, y] (current screenshot space), plus "
+                "optional k (default 6). Returns marker labels, centers, and "
+                "distances sorted nearest-first. Use when no marker covers "
+                "your exact target: pick the closest with "
+                "DesktopInteract(label=N), or use a neighbor's coordinates to "
+                "refine a PreviewPoints guess."
             ),
         )
 
@@ -1031,7 +1136,9 @@ class AgentOrchestrator:
             "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n"
             "- If text is too small to read or no marker covers your target: "
             "ZoomRegion(size='small'|'medium'|'large', label=N or loc=[x, y]) re-perceives "
-            "that area at original resolution with fresh markers.\n"
+            "that area at original resolution with fresh markers. "
+            "NearbyLabels(label=N or loc=[x, y]) lists the closest markers to a point so you "
+            "can pick the nearest one.\n"
             "- LAST RESORT — when neither UIA labels nor DesktopInteract markers locate the target: "
             "PreviewPoints(points=[[x, y], ...]) draws your coordinate guesses as numbered markers "
             "on the screenshot and shows them back; adjust until a marker sits on the target, then "
