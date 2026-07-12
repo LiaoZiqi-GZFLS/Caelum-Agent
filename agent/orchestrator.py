@@ -498,7 +498,9 @@ class AgentOrchestrator:
             mcp_action = "Click"
             mcp_args: dict[str, Any] = {"loc": [screen_x, screen_y]}
             if action == "double_click":
-                mcp_args["times"] = 2
+                # windows-mcp Click takes `clicks` (0=hover, 1=single,
+                # 2=double); `times` is rejected by server-side validation.
+                mcp_args["clicks"] = 2
             elif action == "right_click":
                 mcp_args["button"] = "right"
         elif action == "type":

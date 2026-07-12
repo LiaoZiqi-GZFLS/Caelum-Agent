@@ -1020,8 +1020,13 @@ async def test_desktop_interact_no_perception_error(config, eventbus, killswitch
 
 
 @pytest.mark.asyncio
-async def test_desktop_interact_double_click_sets_times(config, eventbus, killswitch):
-    """desktop_interact double_click sends times=2 to Click."""
+async def test_desktop_interact_double_click_sets_clicks(config, eventbus, killswitch):
+    """desktop_interact double_click sends clicks=2 to Click.
+
+    windows-mcp's Click tool takes `clicks` (0=hover, 1=single, 2=double),
+    not `times` — passing `times` fails server-side pydantic validation
+    ("unexpected_keyword_argument").
+    """
     from agent.perception import Perception
 
     mcp = FakeMCP()
@@ -1043,7 +1048,7 @@ async def test_desktop_interact_double_click_sets_times(config, eventbus, killsw
     server, tool, args = mcp.calls[-1]
     assert server == "windows"
     assert tool == "Click"
-    assert args["times"] == 2
+    assert args["clicks"] == 2
 
 
 @pytest.mark.asyncio
