@@ -145,7 +145,7 @@ class AgentOrchestrator:
         self.llm = llm
         self.mcp = mcp
         self.kill_switch = kill_switch
-        self.ui_detector: Any | None = None
+        self.detector: Any | None = None
         self.state = AgentStateMachine(eventbus)
         self._kimi_client: Any | None = None
         if config.memory.use_kimi_memory or config.reflection.use_rethink:
@@ -330,22 +330,18 @@ class AgentOrchestrator:
         # user is left with an invisible agent they cannot see or stop.
         atexit.register(self._restore_console)
         self.focus_guard = register_focus_guard(self.llm)
-        if self.config.ui_detector.enabled:
-            from ui_detector import UIDetector
+        if self.config.yolo.enabled:
+            from ui_detector import YoloDetector
 
-            self.ui_detector = UIDetector(self.config.ui_detector)
-            if not self.config.ui_detector.lazy:
-                # Eager mode: load the model at startup and run vision on every
-                # perception (legacy behaviour, useful for pure-vision tasks).
-                self.ui_detector.load()
-            elif self.config.ui_detector.preload:
-                # Warm load + lazy inference: keep the model resident so the first
-                # DesktopInteract doesn't stall, while perceive() still skips
-                # annotate. Costs resident memory for a fast first click.
-                self.ui_detector.load()
-            # Lazy mode (default): the model loads on first predict/annotate,
-            # so compute/filesystem/API tasks never pay the load cost.
-            self.perception.ui_detector = self.ui_detector
+            # The detector loads its weights lazily on the first detection
+            # (~200ms), so compute/filesystem/API tasks never pay the cost.
+            self.detector = YoloDetector(
+                Path(self.config.yolo.model_path).expanduser(),
+                device=self.config.yolo.device,
+                conf=self.config.yolo.conf,
+                imgsz=self.config.yolo.imgsz,
+            )
+            self.perception.detector = self.detector
         self._load_state()
         self.kill_switch.start()
 
@@ -368,8 +364,8 @@ class AgentOrchestrator:
         await self.mcp.disconnect_all()
         await self.llm.close()
         self.perception.shutdown()
-        if self.ui_detector is not None:
-            self.ui_detector.shutdown()
+        if self.detector is not None:
+            self.detector.shutdown()
 
     def _save_state(self) -> None:
         # Deliberately excludes `history`: it embeds base64 screenshots (tens
@@ -755,7 +751,7 @@ class AgentOrchestrator:
     async def _preview_points_impl(self, points: list) -> str:
         """Preview candidate click coordinates as numbered markers.
 
-        Last-resort locator: when UIA labels and vision pointing both fail,
+        Last-resort locator: when UIA labels and SoM markers both fail,
         the model guesses coordinates from the compressed screenshot. This
         draws the guesses on a clean copy and shows them back (via the
         _pending_preview follow-up appended by _think_and_act) so the model
@@ -812,8 +808,8 @@ class AgentOrchestrator:
                 "your best guesses (in the current screenshot's coordinate "
                 "space) are drawn as numbered red markers on a clean copy of "
                 "the screenshot and shown back to you. Use this as the LAST "
-                "RESORT when neither UIA labels (windows__Snapshot) nor vision "
-                "pointing (DesktopInteract) can locate the target: give your "
+                "RESORT when neither UIA labels (windows__Snapshot) nor SoM "
+                "markers (DesktopInteract) can locate the target: give your "
                 "best 1-3 guesses, look at the markers, adjust if needed, then "
                 "click with windows__Click(loc=[x, y]) using the confirmed "
                 "coordinates."
@@ -1296,26 +1292,6 @@ class AgentOrchestrator:
                     ),
                 })
             self.history.append({"role": "user", "content": perception_content})
-
-            # Check for total rejection by verifier (all candidates blocked).
-            if perception.blocked_count > 0 and not perception.som_annotations:
-                reason = f"Verifier rejected all {perception.blocked_count} candidates"
-                await self.reflection.record(
-                    task_summary=user_input,
-                    failure_reason=reason,
-                    fix_action="Retry detection with a different instruction or ask for human guidance.",
-                )
-                self.history.append({
-                    "role": "user",
-                    "content": (
-                        f"{reason}. The UI may have changed or the target element may not be visible. "
-                        "Try a different approach or describe what you are looking for differently."
-                    ),
-                })
-                await self.state.transition("REFLECT", task_id=self.task_id)
-                reflection_text = await self._reflect()
-                await self.state.transition("PLANNING", task_id=self.task_id)
-                continue
 
             if self._used_ui_tool and self._is_same_ui_loop(perception.ui_hash):
                 loops = len(self._recent_hashes)

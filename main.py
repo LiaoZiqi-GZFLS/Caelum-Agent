@@ -237,7 +237,7 @@ async def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.no_vision:
-        config.ui_detector.enabled = False
+        config.yolo.enabled = False
         config.ocr.enabled = False
 
     log_level = args.log_level or config.logging.level

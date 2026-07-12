@@ -49,34 +49,9 @@ class MCPConfig(BaseModel):
     filesystem: MCPServerConfig | None = None
 
 
-class UIDetectorConfig(BaseModel):
-    enabled: bool = True
-    lazy: bool = True
-    # When True together with lazy=True, load the model at startup (warm) but keep
-    # on-demand inference: perceive() still skips annotate, and vision runs only
-    # when DesktopInteract needs SoM coordinates. Trades resident GPU/CPU memory
-    # for eliminating the first-click load stall. Defaults to True (warm start);
-    # set to False to defer the load to the first DesktopInteract. Ignored when
-    # lazy=False (eager mode already loads at startup and annotates every
-    # perception).
-    preload: bool = True
-    # Auto SoM compensation: in lazy mode, when a perception finds an empty UI
-    # tree but OCR text (a UIA-less app like WeChat/Qt), run GUI-Actor SoM
-    # detection anyway so the model gets clickable markers without having to
-    # guess that DesktopInteract exists. Costs one detection pass only on
-    # UIA-less screens.
-    auto_compensate: bool = True
-    model_path: str = "./models/gui-actor-3b"
-    device: str = "cuda:0"
-    dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
-    attn_implementation: Literal["flash_attention_2", "sdpa", "eager"] = "sdpa"
-    topk: int = 3
-    verifier: dict[str, Any] = Field(default_factory=lambda: {"enabled": True})
-
-
 class YoloConfig(BaseModel):
     # OmniParser icon_detect YOLOv8 for SoM annotation when the UIA tree is
-    # unavailable (WeChat/Qt/Electron) — the GUI-Actor replacement.
+    # unavailable (WeChat/Qt/Electron): the vision grounding backend.
     enabled: bool = True
     model_path: str = "./models/omniparser/icon_detect/model.pt"
     # Inference device; automatically falls back to cpu once if a cuda
@@ -158,7 +133,6 @@ class KillSwitchConfig(BaseModel):
 class Config(BaseModel):
     llm: LLMConfig
     mcp_servers: MCPConfig = Field(default_factory=MCPConfig)
-    ui_detector: UIDetectorConfig = Field(default_factory=UIDetectorConfig)
     yolo: YoloConfig = Field(default_factory=YoloConfig)
     screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
@@ -177,9 +151,6 @@ class Config(BaseModel):
             raise FileNotFoundError(f"Config file not found: {path}")
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         return cls.model_validate(data)
-
-    def model_path_absolute(self) -> Path:
-        return Path(self.ui_detector.model_path).expanduser().resolve()
 
     def sqlite_path_absolute(self) -> Path:
         return Path(self.memory.sqlite_path).expanduser().resolve()

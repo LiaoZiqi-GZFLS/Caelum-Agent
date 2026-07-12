@@ -33,7 +33,7 @@ def mock_agent():
 @pytest.fixture
 def mock_load_config(tmp_path):
     config = SimpleNamespace(
-        ui_detector=SimpleNamespace(enabled=True),
+        yolo=SimpleNamespace(enabled=True),
         ocr=SimpleNamespace(enabled=True),
         logging=SimpleNamespace(level="INFO", data_dir=str(tmp_path / "logs")),
         mcp_servers={},
@@ -82,7 +82,7 @@ async def test_main_no_vision_disables_vision_and_ocr(mock_agent, mock_load_conf
          patch("main.EventBus", MagicMock()):
         await main.main(["--task", "list files", "--no-vision"])
 
-    assert captured["config"].ui_detector.enabled is False
+    assert captured["config"].yolo.enabled is False
     assert captured["config"].ocr.enabled is False
 
 

@@ -65,6 +65,10 @@ class YoloDetector:
             self._model = _get_yolo_cls()(self.model_path)
         return self._model
 
+    def shutdown(self) -> None:
+        """Release the loaded model (frees GPU memory); reloads on next use."""
+        self._model = None
+
     def detect(self, image: Image.Image) -> list[dict]:
         model = self._load()
         try:

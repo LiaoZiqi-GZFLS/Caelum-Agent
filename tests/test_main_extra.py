@@ -138,7 +138,7 @@ class _ReplAgent:
 
 def _cfg(tmp_path) -> SimpleNamespace:
     return SimpleNamespace(
-        ui_detector=SimpleNamespace(enabled=True),
+        yolo=SimpleNamespace(enabled=True),
         ocr=SimpleNamespace(enabled=True),
         logging=SimpleNamespace(level="INFO", data_dir=str(tmp_path)),
         llm=SimpleNamespace(),

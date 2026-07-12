@@ -66,3 +66,13 @@ def test_visualize_som_pixel_bbox():
     ]
     result = visualize_som(image, anns)
     assert _red_pixels(result) > 50
+
+
+def test_visualize_som_empty_annotations_returns_unmodified_copy():
+    """No annotations -> no ink at all, but the image content is preserved."""
+    image = Image.new("RGB", (100, 100), "white")
+    result = visualize_som(image, [])
+
+    assert result.size == image.size
+    assert _red_pixels(result) == 0
+    assert list(result.getdata()) == list(image.getdata())

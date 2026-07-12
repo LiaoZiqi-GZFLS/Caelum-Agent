@@ -410,7 +410,8 @@ async def test_system_prompt_non_interactive_forbids_human_help(config, eventbus
 async def test_initialize_creates_cache_dir(monkeypatch, config, eventbus, killswitch):
     # The cache directory must exist by the time tools run, so scratch files
     # steered there by the system prompt can actually be written.
-    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
+    # YoloDetector construction is side-effect free (weights load lazily on
+    # the first detection), so initialize() needs no detector monkeypatch.
     agent = AgentOrchestrator(
         config, eventbus, FakeLLM(), FakeMCP(), killswitch,
         perception=FakePerception([_blank_perception()]),
@@ -869,52 +870,6 @@ async def test_run_task_skill_learner_failure_is_ignored(config, eventbus, kills
 
     assert result == "Files: a.txt, b.txt."
     assert agent.state.current_state == "COMPLETED"
-
-
-@pytest.mark.asyncio
-async def test_run_task_full_rejection_triggers_reflect(config, eventbus, killswitch):
-    """When verifier rejects all candidates, orchestrator reflects and retries."""
-    rejected_perception = Perception(
-        screenshot_path=Path("/tmp/blank.jpg"),
-        description="Blank screen with all elements rejected",
-        ocr_text="",
-        ui_tree={},
-        som_annotations=[],  # all were rejected
-        blocked_count=3,
-    )
-    normal_perception = Perception(
-        screenshot_path=Path("/tmp/blank.jpg"),
-        description="Blank screen",
-        ocr_text="",
-        ui_tree={},
-        som_annotations=[
-            {"label": 1, "center_x": 0.5, "center_y": 0.5},
-        ],
-        blocked_count=0,
-    )
-    llm = FakeLLM([
-        # After full rejection, model reflects:
-        _message("I need to try a different approach."),
-        # Then normal flow:
-        _message("Listing files.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
-        _message("I listed them."),
-        _message("YES"),
-        _message("Files: a.txt."),
-    ])
-    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
-    mcp.set_result("filesystem", "list_directory", ToolResult(success=True, content="a.txt"))
-    reflection = FakeReflection()
-    agent = AgentOrchestrator(
-        config, eventbus, llm, mcp, killswitch,
-        perception=FakePerception([rejected_perception, normal_perception]),
-        reflection=reflection,
-    )
-
-    result = await agent.run_task("list files")
-
-    assert result == "Files: a.txt."
-    assert agent.state.current_state == "COMPLETED"
-    assert any("rejected all" in r["failure_reason"] for r in reflection.recorded)
 
 
 @pytest.mark.asyncio
@@ -1577,7 +1532,7 @@ async def test_pure_filesystem_task_skips_vision(
     agent = AgentOrchestrator(
         config, eventbus, llm, mcp, killswitch, perception=perception,
     )
-    agent.ui_detector = spy  # initialize() would have constructed it
+    agent.detector = spy  # initialize() would have constructed it
 
     result = await agent.run_task("list files")
 
@@ -1600,7 +1555,7 @@ async def test_desktop_interact_uses_last_perception_without_detection(
     mcp.set_result("windows", "Click", ToolResult(success=True, content="clicked"))
 
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch, perception=perception)
-    agent.ui_detector = spy
+    agent.detector = spy
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
         description="test",
@@ -1645,7 +1600,7 @@ async def test_uia_less_loop_runs_yolo_compensation(
     agent = AgentOrchestrator(
         config, eventbus, llm, mcp, killswitch, perception=perception,
     )
-    agent.ui_detector = spy
+    agent.detector = spy
 
     result = await agent.run_task("list files")
 
@@ -1653,97 +1608,6 @@ async def test_uia_less_loop_runs_yolo_compensation(
     assert agent.state.current_state == "COMPLETED"
     # Top-of-loop + post-action perceptions in a single one-round task.
     assert spy.calls >= 1
-
-
-# ---------------------------------------------------------------------------
-# preload (warm load + lazy inference) tests
-# ---------------------------------------------------------------------------
-
-class _SpyUIDetector:
-    def __init__(self, config: Any) -> None:
-        self.config = config
-        self.load_calls = 0
-        self.shutdown_calls = 0
-
-    def load(self) -> None:
-        self.load_calls += 1
-
-    def shutdown(self) -> None:
-        self.shutdown_calls += 1
-
-
-@pytest.mark.asyncio
-async def test_preload_loads_detector_at_startup(
-    monkeypatch, config, eventbus, killswitch
-):
-    # lazy=True + preload=True -> initialize() loads the model (warm), even though
-    # perceive() will still skip annotate (lazy inference).
-    config.ui_detector.lazy = True
-    config.ui_detector.preload = True
-    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
-    agent = AgentOrchestrator(
-        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
-        perception=FakePerception([_blank_perception()]),
-    )
-    agent.perception.shutdown = lambda: None
-
-    await agent.initialize()
-    try:
-        assert isinstance(agent.ui_detector, _SpyUIDetector)
-        assert agent.ui_detector.load_calls == 1
-    finally:
-        await agent.shutdown()
-
-
-def test_preload_default_is_on():
-    # Out-of-the-box, lazy mode preloads so the first SoM click never stalls.
-    from agent.config import UIDetectorConfig
-
-    assert UIDetectorConfig().lazy is True
-    assert UIDetectorConfig().preload is True
-
-
-@pytest.mark.asyncio
-async def test_lazy_preload_off_defers_load_to_first_click(
-    monkeypatch, config, eventbus, killswitch
-):
-    # lazy=True + preload=False (explicit opt-out) -> model is NOT loaded at
-    # startup; it loads on the first DesktopInteract instead.
-    config.ui_detector.lazy = True
-    config.ui_detector.preload = False
-    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
-    agent = AgentOrchestrator(
-        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
-        perception=FakePerception([_blank_perception()]),
-    )
-    agent.perception.shutdown = lambda: None
-
-    await agent.initialize()
-    try:
-        assert agent.ui_detector.load_calls == 0
-    finally:
-        await agent.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_eager_loads_at_startup_regardless_of_preload(
-    monkeypatch, config, eventbus, killswitch
-):
-    # lazy=False (eager) loads at startup no matter what preload is set to.
-    config.ui_detector.lazy = False
-    config.ui_detector.preload = False
-    monkeypatch.setattr("ui_detector.UIDetector", _SpyUIDetector)
-    agent = AgentOrchestrator(
-        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
-        perception=FakePerception([_blank_perception()]),
-    )
-    agent.perception.shutdown = lambda: None
-
-    await agent.initialize()
-    try:
-        assert agent.ui_detector.load_calls == 1
-    finally:
-        await agent.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -2471,8 +2335,8 @@ class _FakeSelfWindow:
 
 @pytest.mark.asyncio
 async def test_self_window_registered_on_initialize(config, eventbus, killswitch):
-    # No need for the real GUI-Actor model here: tool registration only.
-    config.ui_detector.enabled = False
+    # No need for the real YOLO model here: tool registration only.
+    config.yolo.enabled = False
     agent = AgentOrchestrator(
         config, eventbus, FakeLLM(), FakeMCP(), killswitch,
         perception=FakePerception([_blank_perception()]),
@@ -2530,8 +2394,8 @@ class _FakeFocusGuard:
 
 @pytest.mark.asyncio
 async def test_focus_guard_registered_on_initialize(config, eventbus, killswitch):
-    # No need for the real GUI-Actor model here: tool registration only.
-    config.ui_detector.enabled = False
+    # No need for the real YOLO model here: tool registration only.
+    config.yolo.enabled = False
     agent = AgentOrchestrator(
         config, eventbus, FakeLLM(), FakeMCP(), killswitch,
         perception=FakePerception([_blank_perception()]),

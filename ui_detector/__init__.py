@@ -1,6 +1,6 @@
-"""UI detector package: YOLO icon detection and SoM visualization."""
+"""UI detector package: OmniParser YOLO icon detection and SoM visualization."""
 
-from ui_detector.detector import UIDetector  # TODO: removed in Task 6
+from ui_detector.visualizer import visualize_som
 from ui_detector.yolo_detector import YoloDetector
 
-__all__ = ["UIDetector", "YoloDetector"]
+__all__ = ["YoloDetector", "visualize_som"]

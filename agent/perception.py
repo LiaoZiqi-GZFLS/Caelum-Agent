@@ -107,7 +107,6 @@ class Perception:
     image_origin_x: int = 0
     image_origin_y: int = 0
     annotated_screenshot_path: Path | None = None
-    blocked_count: int = 0
 
 
 class PerceptionModule:

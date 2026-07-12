@@ -154,6 +154,18 @@ def test_cpu_failure_propagates(monkeypatch):
         det.detect(_image())
 
 
+def test_shutdown_releases_model_and_next_detect_reloads(fake_yolo):
+    det = yd.YoloDetector("model.pt")
+    det.detect(_image())
+    assert len(FakeYOLO.instances) == 1
+
+    det.shutdown()
+    assert det._model is None
+
+    det.detect(_image())  # reloads after shutdown
+    assert len(FakeYOLO.instances) == 2
+
+
 # ---------------------------------------------------------------------------
 # YoloConfig
 # ---------------------------------------------------------------------------
