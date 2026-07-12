@@ -276,6 +276,8 @@ Screenshot
     └──▶ GUI-Actor-3B element detection → SoM annotation ──┘
 ```
 
+Vision (GUI-Actor SoM) is lazy by default — it runs only for `DesktopInteract`. As an automatic compensation (`ui_detector.auto_compensate`, default true), `perceive()` also runs one vision pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself.
+
 ### MCP server concurrency
 
 Three MCP servers run as separate stdio processes managed in a single asyncio event loop. Corrected package names after spike verification:

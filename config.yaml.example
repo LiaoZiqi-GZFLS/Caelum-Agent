@@ -87,6 +87,12 @@ ui_detector:
   # the first SoM click stalls). Trade-off: ~7.6GB resident memory for a fast
   # first click. Has no effect when lazy: false (eager already preloads).
   preload: true
+  # Auto SoM compensation (lazy mode only): when a perception finds an empty UI
+  # tree but OCR text (a UIA-less app such as WeChat/Qt/Electron), run GUI-Actor
+  # SoM detection automatically so the model gets clickable markers without
+  # having to discover DesktopInteract. Costs one detection pass, and only on
+  # UIA-less screens.
+  auto_compensate: true
   model_path: ./models/gui-actor-3b
   device: cuda:0
   dtype: bfloat16

@@ -60,6 +60,12 @@ class UIDetectorConfig(BaseModel):
     # lazy=False (eager mode already loads at startup and annotates every
     # perception).
     preload: bool = True
+    # Auto SoM compensation: in lazy mode, when a perception finds an empty UI
+    # tree but OCR text (a UIA-less app like WeChat/Qt), run GUI-Actor SoM
+    # detection anyway so the model gets clickable markers without having to
+    # guess that DesktopInteract exists. Costs one detection pass only on
+    # UIA-less screens.
+    auto_compensate: bool = True
     model_path: str = "./models/gui-actor-3b"
     device: str = "cuda:0"
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"

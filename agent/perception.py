@@ -106,6 +106,19 @@ class PerceptionModule:
             self._io_executor, self._compute_image_hash, image
         )
         ui_tree = await self._fetch_ui_tree()
+        # Auto SoM compensation: on UIA-less screens (empty tree but OCR text,
+        # e.g. WeChat/Qt/Electron), run vision detection even in lazy mode so
+        # the model gets clickable SoM markers instead of a dead end.
+        if (
+            not with_vision
+            and self.config.ui_detector.auto_compensate
+            and self._needs_vision_compensation(ui_tree, ocr_text)
+        ):
+            logger.info(
+                "UIA-less screen detected (empty tree, OCR present); "
+                "running SoM compensation"
+            )
+            with_vision = True
         if with_vision:
             som_annotations, blocked_count = await self._run_ui_detector(image, instruction)
         else:
@@ -283,6 +296,11 @@ class PerceptionModule:
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
                     texts.append(str(item[1]))
         return "\n".join(texts)
+
+    @staticmethod
+    def _needs_vision_compensation(ui_tree: dict[str, Any], ocr_text: str) -> bool:
+        """UIA-less heuristic: no usable tree but the screen has text."""
+        return not ui_tree and bool(ocr_text.strip())
 
     async def _fetch_ui_tree(self) -> dict[str, Any]:
         if self.mcp is None:

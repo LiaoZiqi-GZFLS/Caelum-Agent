@@ -228,3 +228,82 @@ def test_shutdown_releases_executor(config):
     module = PerceptionModule(config)
     module.shutdown()  # should not raise
     assert module._io_executor._shutdown is True
+
+
+# ---------------------------------------------------------------------------
+# auto SoM compensation for UIA-less screens
+# ---------------------------------------------------------------------------
+
+class _SpyDetector:
+    def __init__(self):
+        self.calls = 0
+
+    async def annotate(self, image, instruction):
+        self.calls += 1
+        return ([{"center_x": 0.5, "center_y": 0.5, "score": 0.9}], 0)
+
+
+def _patch_capture(pm, monkeypatch, ocr_text="登录"):
+    monkeypatch.setattr(pm, "_capture_screenshot", lambda: Image.new("RGB", (100, 100)))
+    monkeypatch.setattr(pm, "_compress", lambda img: b"jpeg")
+    monkeypatch.setattr(pm, "_run_ocr", lambda img: ocr_text)
+    monkeypatch.setattr(
+        pm, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
+    )
+
+
+@pytest.mark.asyncio
+async def test_perceive_auto_compensates_when_uia_empty(pm, monkeypatch):
+    """Empty UI tree + OCR text -> run SoM detection even in lazy mode."""
+    detector = _SpyDetector()
+    pm.ui_detector = detector
+    pm.mcp = None  # ui_tree will be {}
+    _patch_capture(pm, monkeypatch)
+
+    result = await pm.perceive("do", with_vision=False)
+
+    assert detector.calls == 1
+    assert len(result.som_annotations) == 1
+    assert result.annotated_screenshot_path is not None
+
+
+@pytest.mark.asyncio
+async def test_perceive_no_compensation_when_tree_present(pm, monkeypatch):
+    detector = _SpyDetector()
+    pm.ui_detector = detector
+    _patch_capture(pm, monkeypatch)
+    monkeypatch.setattr(pm, "_fetch_ui_tree", lambda: _async_return({"snapshot": "buttons"}))
+
+    result = await pm.perceive("do", with_vision=False)
+
+    assert detector.calls == 0
+    assert result.som_annotations == []
+
+
+@pytest.mark.asyncio
+async def test_perceive_no_compensation_when_ocr_empty(pm, monkeypatch):
+    detector = _SpyDetector()
+    pm.ui_detector = detector
+    pm.mcp = None
+    _patch_capture(pm, monkeypatch, ocr_text="   ")
+
+    result = await pm.perceive("do", with_vision=False)
+
+    assert detector.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_perceive_compensation_disabled_by_config(pm, config, monkeypatch):
+    config.ui_detector.auto_compensate = False
+    detector = _SpyDetector()
+    pm.ui_detector = detector
+    pm.mcp = None
+    _patch_capture(pm, monkeypatch)
+
+    result = await pm.perceive("do", with_vision=False)
+
+    assert detector.calls == 0
+
+
+async def _async_return(value):
+    return value
