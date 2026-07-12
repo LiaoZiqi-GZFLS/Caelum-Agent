@@ -18,6 +18,7 @@ from agent.config import Config
 from agent.content_writer import register_draft_content
 from agent.file_reader import register_read_document
 from agent.history_archive import HistoryArchiver
+from agent.image_gen import register_generate_image
 from agent.kill_switch import KillSwitch
 from agent.media import parse_media_refs, register_view_media
 from agent.kimi_memory import KimiMemoryClient
@@ -280,6 +281,14 @@ class AgentOrchestrator:
             self.llm,
             self.config.cache_dir_absolute() / "drafts",
             doc_resolver=extractor.read_by_ref if extractor is not None else None,
+        )
+        # GenerateImage reuses the media uploader for its visual self-review;
+        # it is unavailable (not registered) when media upload is disabled.
+        register_generate_image(
+            self.llm,
+            self.config.llm,
+            self.config.cache_dir_absolute(),
+            uploader=self.media_uploader,
         )
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
