@@ -25,8 +25,8 @@ async def main() -> int:
     )
     capturer = WindowCapturer(WORK)
 
-    full_title, path = capturer.capture_by_title(title)
-    print(f"[capture] '{full_title}' -> {path}")
+    full_title, path, rect = capturer.capture_by_title(title)
+    print(f"[capture] '{full_title}' -> {path} (rect={rect})")
     kind, url = await uploader.upload(path)
     print(f"[upload] {kind} {url}")
 
