@@ -1357,6 +1357,11 @@ class AgentOrchestrator:
                 succeeded.append(False)
                 continue
 
+            # The model gives loc in the compressed screenshot's coordinate
+            # space (that is the image it sees); convert to native pixels.
+            if server == "windows":
+                args = self._rescale_loc_args(args)
+
             await self.eventbus.emit(
                 ToolCallRequested(
                     server=server, tool_name=tool_name, arguments=args, task_id=self.task_id
@@ -1419,6 +1424,39 @@ class AgentOrchestrator:
             k: ("***" if k.lower() in _SENSITIVE_ARG_KEYS else v)
             for k, v in args.items()
         }
+
+    def _rescale_loc_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Convert a model-given loc from screenshot space to native pixels.
+
+        The model only ever sees the compressed screenshot and is told (via
+        the perception description) to give coordinates in that space; the
+        scaling math stays on our side where it is exact. Pass-through when
+        the latest perception lacks dimensions, and skipped entirely when
+        crop_to_active_window is on (then the image is window-relative and
+        the mapping would need the crop offset).
+        """
+        loc = args.get("loc")
+        if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
+            return args
+        if getattr(self.config.screenshot, "crop_to_active_window", False):
+            return args
+        p = getattr(self, "_last_perception", None)
+        sw = getattr(p, "screen_width", 0) or 0
+        sh = getattr(p, "screen_height", 0) or 0
+        cw = getattr(p, "screenshot_width", 0) or 0
+        ch = getattr(p, "screenshot_height", 0) or 0
+        if not (sw and sh and cw and ch):
+            return args
+        x, y = float(loc[0]), float(loc[1])
+        rescaled = [int(round(x * sw / cw)), int(round(y * sh / ch))]
+        if rescaled != list(loc):
+            logger.debug(
+                "Rescaled loc %s -> %s (screenshot %dx%d, screen %dx%d)",
+                list(loc), rescaled, cw, ch, sw, sh,
+            )
+        args = dict(args)
+        args["loc"] = rescaled
+        return args
 
     def _resolve_mcp_tool(self, name: str) -> tuple[str | None, str | None]:
         for tool in self.mcp.all_tools():

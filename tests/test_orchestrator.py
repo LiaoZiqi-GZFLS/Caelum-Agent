@@ -2520,3 +2520,60 @@ async def test_focus_guard_stopped_on_task_end(config, eventbus, killswitch):
     await agent.run_task("x")
 
     assert fake.stop_calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# loc coordinate rescaling (screenshot space -> native screen pixels)
+# ---------------------------------------------------------------------------
+
+def _scaled_perception() -> "Perception":
+    p = _blank_perception()
+    p.screen_width, p.screen_height = 2560, 1440
+    p.screenshot_width, p.screenshot_height = 1280, 720
+    return p
+
+
+@pytest.mark.asyncio
+async def test_windows_loc_rescaled_to_native_screen(config, eventbus, killswitch):
+    llm = FakeLLM([
+        _message("click", tool_calls=[_tool_call("windows__Click", {"loc": [640, 360]})]),
+        _message("done"),
+        _message("YES"),
+        _message("final"),
+    ])
+    mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Click", ToolResult(success=True, content="clicked"))
+    perception = FakePerception([_scaled_perception()] * 3)
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch, perception=perception,
+    )
+    agent.set_human_confirmation_callback(lambda s, a: True)
+
+    await agent.run_task("click it")
+
+    clicks = [c for c in mcp.calls if c[0] == "windows" and c[1] == "Click"]
+    assert clicks, "windows__Click was never dispatched"
+    assert clicks[0][2]["loc"] == [1280, 720]
+
+
+@pytest.mark.asyncio
+async def test_windows_loc_passes_through_without_dimensions(config, eventbus, killswitch):
+    llm = FakeLLM([
+        _message("click", tool_calls=[_tool_call("windows__Click", {"loc": [640, 360]})]),
+        _message("done"),
+        _message("YES"),
+        _message("final"),
+    ])
+    mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Click", ToolResult(success=True, content="clicked"))
+    # _blank_perception has zero dims -> no rescale possible.
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([_blank_perception()] * 3),
+    )
+    agent.set_human_confirmation_callback(lambda s, a: True)
+
+    await agent.run_task("click it")
+
+    clicks = [c for c in mcp.calls if c[0] == "windows" and c[1] == "Click"]
+    assert clicks[0][2]["loc"] == [640, 360]

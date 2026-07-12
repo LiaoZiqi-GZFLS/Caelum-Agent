@@ -51,6 +51,11 @@ class Perception:
     ui_hash: str = ""
     screen_width: int = 0
     screen_height: int = 0
+    # Size of the compressed screenshot the model actually sees. Coordinates
+    # the model gives (loc) are in THIS space; the orchestrator rescales them
+    # to native screen pixels using screen_width/screen_height.
+    screenshot_width: int = 0
+    screenshot_height: int = 0
     annotated_screenshot_path: Path | None = None
     blocked_count: int = 0
 
@@ -98,6 +103,9 @@ class PerceptionModule:
         image_bytes = await loop.run_in_executor(
             self._io_executor, self._compress, image
         )
+        # _compress thumbnails in place: image.size is now the compressed
+        # (model-visible) coordinate space.
+        compressed_width, compressed_height = image.size
         await loop.run_in_executor(
             self._io_executor, screenshot_path.write_bytes, image_bytes
         )
@@ -137,7 +145,10 @@ class PerceptionModule:
         som_annotations = valid_annotations
 
         ui_hash = self._compute_ui_hash(image_hash, ocr_text, ui_tree)
-        description = self._build_description(ocr_text, ui_tree, som_annotations)
+        description = self._build_description(
+            ocr_text, ui_tree, som_annotations,
+            (compressed_width, compressed_height),
+        )
 
         annotated_screenshot_path: Path | None = None
         if som_annotations and self.ui_detector is not None:
@@ -164,6 +175,8 @@ class PerceptionModule:
             ui_hash=ui_hash,
             screen_width=orig_w,
             screen_height=orig_h,
+            screenshot_width=compressed_width,
+            screenshot_height=compressed_height,
             annotated_screenshot_path=annotated_screenshot_path,
             blocked_count=blocked_count,
         )
@@ -337,9 +350,19 @@ class PerceptionModule:
 
     @staticmethod
     def _build_description(
-        ocr_text: str, ui_tree: dict[str, Any], som_annotations: list[dict[str, Any]]
+        ocr_text: str,
+        ui_tree: dict[str, Any],
+        som_annotations: list[dict[str, Any]],
+        screenshot_size: tuple[int, int] = (0, 0),
     ) -> str:
         parts = ["Current screen:"]
+        if screenshot_size[0] and screenshot_size[1]:
+            parts.append(
+                f"Screenshot resolution: {screenshot_size[0]}x{screenshot_size[1]}. "
+                "When a tool needs coordinates (loc), give them in THIS "
+                "screenshot's coordinate space — scaling to the physical "
+                "screen is handled automatically."
+            )
         if ocr_text:
             parts.append(f"OCR text:\n{ocr_text}")
         if ui_tree:

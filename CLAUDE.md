@@ -282,6 +282,8 @@ Screenshot
 
 Vision (GUI-Actor SoM) is lazy by default — it runs only for `DesktopInteract`. As an automatic compensation (`ui_detector.auto_compensate`, default true), `perceive()` also runs one vision pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself.
 
+Coordinate contract: the model only ever sees the **compressed** screenshot (720p, or 1080p after `UpgradeVision`) and is told by the perception description to give `loc` coordinates in that image's space. The orchestrator rescales them to native screen pixels at execution time (`_rescale_loc_args`, using `Perception.screen_width/height` vs `screenshot_width/height`) — the model never does scaling math. Skipped when `screenshot.crop_to_active_window` is on (image is then window-relative).
+
 ### MCP server concurrency
 
 Three MCP servers run as separate stdio processes managed in a single asyncio event loop. Corrected package names after spike verification:
@@ -306,7 +308,7 @@ Each connection reconnects with exponential backoff on disconnect.
 
 - The official package exposes 19 tools: `Snapshot`, `Screenshot`, `Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `Wait`, `WaitFor`, `App`, `PowerShell`, `FileSystem`, `Process`, `Scrape`, `Clipboard`, `Notification`, `Registry`, `MultiSelect`, `MultiEdit`.
 - Use `Snapshot` when you need element `label` IDs for `Click`/`Type`/`Scroll`/`Move`. Use `Screenshot` for a fast visual-only capture.
-- `Snapshot` supports `use_ui_tree`, `use_vision`, `use_dom`, and `use_annotation`. Browser DOM mode (`use_dom=True`) filters browser chrome and works in Chrome, Edge, and Firefox.
+- `Snapshot` supports `use_ui_tree`, `use_vision`, `use_dom`, and `use_annotation`. Browser DOM mode (`use_dom=True`) filters browser chrome and works in Chrome, Edge, and Firefox. Note: `use_vision=True` only embeds the screenshot image (cursor highlight, optional grid) in the response — windows-mcp 0.8.2 has **no** vision-based element detection (no OmniParser); vision grounding is our own GUI-Actor/SoM path.
 - For safety, consider excluding `PowerShell` and `Registry` via `--exclude-tools "PowerShell,Registry"` unless the task explicitly requires them.
 - windows-mcp 0.8.2 has an upstream bug (`UnboundLocalError: tree_node` in `tree/service.py` when an interactive element has an empty name) that drops a window's subtree and floods stderr. `setup.py` applies an idempotent patch to the installed file after dependency installation (skipped if already fixed or the layout changed); label-expiry and stale-snapshot defenses live in `agent/tools.py` / `agent/orchestrator.py`. Root-cause writeup: `docs/windows_mcp/upstream-tree-node-issue.md`.
 

@@ -307,3 +307,38 @@ async def test_perceive_compensation_disabled_by_config(pm, config, monkeypatch)
 
 async def _async_return(value):
     return value
+
+
+# ---------------------------------------------------------------------------
+# Coordinate-space contract: the model sees the compressed image and gives
+# coordinates in ITS space; the orchestrator rescales to native pixels.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_perceive_records_compressed_dimensions(pm, monkeypatch):
+    """Perception must record both native and compressed (model-visible) sizes."""
+    monkeypatch.setattr(
+        pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
+    )
+    monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
+    pm.mcp = None  # real _compress runs: 2560x1440 -> 1280x720
+
+    p = await pm.perceive("x")
+
+    assert (p.screen_width, p.screen_height) == (2560, 1440)
+    assert (p.screenshot_width, p.screenshot_height) == (1280, 720)
+
+
+@pytest.mark.asyncio
+async def test_description_declares_coordinate_space(pm, monkeypatch):
+    """The description tells the model to give loc in the screenshot's space."""
+    monkeypatch.setattr(
+        pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
+    )
+    monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
+    pm.mcp = None
+
+    p = await pm.perceive("x")
+
+    assert "1280x720" in p.description
+    assert "loc" in p.description
