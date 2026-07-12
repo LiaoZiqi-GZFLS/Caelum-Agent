@@ -118,6 +118,9 @@ screenshot:
 ocr:
   enabled: true
   backend: rapidocr_onnxruntime
+  # GPU inference via DirectML (needs onnxruntime-directml; setup.py installs
+  # it on Windows). Falls back to CPU automatically when DML is unavailable.
+  use_dml: true
 
 memory:
   # Local SQLite fallback for preferences, reflections, skills, audit log, state.

@@ -39,7 +39,7 @@ The v8 design doc specifies the following stack:
 | Desktop control | Windows-MCP (`windows-mcp serve`, official CursorTouch package) |
 | Filesystem control | `@modelcontextprotocol/server-filesystem` (`npx -y ... <allowed-dir>`) |
 | UI detection | GUI-Actor-3B + Verifier (Microsoft, NeurIPS'25) via Transformers native inference |
-| OCR | RapidOCR (ONNXRuntime, CPU) |
+| OCR | RapidOCR (ONNXRuntime, DirectML GPU with CPU fallback) |
 | Screenshots | mss + Pillow compression/cropping |
 | Local memory | Kimi memory tool + local SQLite backup |
 | Reflection | Kimi rethink tool + local records |
@@ -284,7 +284,7 @@ Screenshot
     └──▶ GUI-Actor-3B element detection → SoM annotation ──┘
 ```
 
-OCR input is **inverse-DPI normalized**: `_run_ocr` reads the Windows display scale of the primary monitor (`shcore.GetScaleFactorForMonitor`, works despite our DPI-unaware process) and resizes the screenshot by 1/scale so text sits at its 100% size for RapidOCR — at 100% the original image is used untouched. The result is floored at the old 1080p cap (`_OCR_MAX_SIZE`), so extreme scaling never yields a smaller image than plain capping would.
+OCR input is **inverse-DPI normalized**: `_run_ocr` reads the Windows display scale of the primary monitor (`shcore.GetScaleFactorForMonitor`, works despite our DPI-unaware process) and resizes the screenshot by 1/scale so text sits at its 100% size for RapidOCR — at 100% the original image is used untouched. The result is floored at the old 1080p cap (`_OCR_MAX_SIZE`), so extreme scaling never yields a smaller image than plain capping would. OCR runs on the **GPU via DirectML** when `ocr.use_dml` is on (default) and `onnxruntime-directml` is installed — `setup.py` swaps it in post-install on Windows (rapidocr-onnxruntime's dependency always lands the CPU build first); rapidocr falls back to CPU with a warning when the DML provider is missing. Measured ~5.5x faster warm (4.3s → 0.8s on a 2560×1440 screenshot, RTX 4090 Laptop); spike: `scripts/spike_ocr_dml.py`.
 
 Vision (GUI-Actor SoM) is lazy by default — it runs only for `DesktopInteract`. As an automatic compensation (`ui_detector.auto_compensate`, default true), `perceive()` also runs one vision pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself.
 

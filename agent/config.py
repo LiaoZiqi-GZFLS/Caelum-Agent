@@ -89,6 +89,11 @@ class ScreenshotConfig(BaseModel):
 class OCRConfig(BaseModel):
     enabled: bool = True
     backend: str = "rapidocr_onnxruntime"
+    # DirectML (GPU) inference for all three OCR models. Requires the
+    # onnxruntime-directml package (setup.py installs it on Windows, replacing
+    # CPU onnxruntime); rapidocr falls back to CPU with a warning when the
+    # DmlExecutionProvider is unavailable, so this is safe to leave on.
+    use_dml: bool = True
 
 
 class MemoryConfig(BaseModel):

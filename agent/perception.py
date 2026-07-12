@@ -329,7 +329,14 @@ class PerceptionModule:
         if self._ocr is None:
             from rapidocr_onnxruntime import RapidOCR
 
-            self._ocr = RapidOCR()
+            ocr_kwargs: dict[str, Any] = {}
+            if getattr(self.config.ocr, "use_dml", False):
+                ocr_kwargs = {
+                    "det_use_dml": True,
+                    "cls_use_dml": True,
+                    "rec_use_dml": True,
+                }
+            self._ocr = RapidOCR(**ocr_kwargs)
         # Inverse-DPI normalization with a 1080p floor: Windows display
         # scaling enlarges text physically (125%+), which hurts RapidOCR, so
         # the image is scaled back by 1/scale — but never below what plain

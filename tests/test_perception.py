@@ -404,3 +404,48 @@ def test_compress_honors_max_size_override(config: Config) -> None:
     upgraded = Image.open(io.BytesIO(upgraded_bytes))
     assert upgraded.size[1] <= 1080
     assert upgraded.size[0] > Image.open(io.BytesIO(default_bytes)).size[0]
+
+
+class _SpyRapidOCR:
+    """Stand-in for rapidocr_onnxruntime.RapidOCR recording constructor kwargs."""
+
+    instances: list["_SpyRapidOCR"] = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        _SpyRapidOCR.instances.append(self)
+
+    def __call__(self, path: str) -> list:
+        return []
+
+
+def test_run_ocr_passes_dml_flags_when_enabled(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ocr.use_dml on (default), all three OCR models get use_dml=True."""
+    _SpyRapidOCR.instances.clear()
+    monkeypatch.setattr("rapidocr_onnxruntime.RapidOCR", _SpyRapidOCR)
+    config.ocr.use_dml = True
+    module = PerceptionModule(config)
+
+    module._run_ocr(Image.new("RGB", (100, 100)))
+
+    assert _SpyRapidOCR.instances[0].kwargs == {
+        "det_use_dml": True,
+        "cls_use_dml": True,
+        "rec_use_dml": True,
+    }
+
+
+def test_run_ocr_no_gpu_flags_when_dml_disabled(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ocr.use_dml off, RapidOCR is constructed with defaults (CPU)."""
+    _SpyRapidOCR.instances.clear()
+    monkeypatch.setattr("rapidocr_onnxruntime.RapidOCR", _SpyRapidOCR)
+    config.ocr.use_dml = False
+    module = PerceptionModule(config)
+
+    module._run_ocr(Image.new("RGB", (100, 100)))
+
+    assert _SpyRapidOCR.instances[0].kwargs == {}

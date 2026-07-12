@@ -380,6 +380,48 @@ def patch_windows_mcp(locate=None) -> str:
     return patch_windows_mcp_tree(service_path)
 
 
+def _probe_dml_provider() -> bool:
+    """Return True if the venv's onnxruntime exposes the DirectML provider."""
+    out = subprocess.run(
+        [
+            str(PYTHON_EXE),
+            "-c",
+            "import onnxruntime as ort; "
+            "print('DmlExecutionProvider' in ort.get_available_providers())",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return out.returncode == 0 and out.stdout.strip().endswith("True")
+
+
+def ensure_onnxruntime_dml(probe=None, run_cmd=None, is_windows=None) -> str:
+    """Swap CPU onnxruntime for onnxruntime-directml so OCR can run on GPU.
+
+    rapidocr-onnxruntime declares plain ``onnxruntime`` as a dependency, so a
+    fresh install always lands the CPU build; the DirectML build must replace
+    it afterwards (the two distributions share the ``onnxruntime`` package
+    directory). Returns "installed" | "already_ok" | "skipped" | "failed".
+    Best-effort: any failure leaves CPU OCR working — rapidocr falls back to
+    the CPU provider at runtime when DML is unavailable.
+    """
+    if is_windows is None:
+        is_windows = sys.platform == "win32"
+    if not is_windows:
+        return "skipped"
+    run_cmd = run_cmd or run
+    try:
+        has_dml = probe() if probe is not None else _probe_dml_provider()
+        if has_dml:
+            return "already_ok"
+        run_cmd([str(PIP_EXE), "uninstall", "-y", "onnxruntime"])
+        run_cmd([str(PIP_EXE), "install", "onnxruntime-directml"])
+        return "installed"
+    except Exception:
+        return "failed"
+
+
 def install_playwright_browser() -> None:
     log("Checking Playwright Chromium...")
     try:
@@ -540,6 +582,15 @@ def main() -> int:
         elif patch_status == "unknown_layout":
             log("WARNING: windows-mcp tree/service.py has an unexpected layout; "
                 "skipped the tree_node patch (upstream may have changed).")
+
+        dml_status = ensure_onnxruntime_dml()
+        if dml_status == "installed":
+            log("Installed onnxruntime-directml (GPU OCR via DirectML, "
+                "replacing CPU onnxruntime).")
+        elif dml_status == "failed":
+            log("WARNING: onnxruntime-directml install failed; OCR will run "
+                "on CPU. You can retry: pip uninstall onnxruntime && "
+                "pip install onnxruntime-directml")
 
         copy_config()
 

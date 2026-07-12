@@ -212,3 +212,46 @@ def test_patch_windows_mcp_tree_unknown_layout_untouched(tmp_path: Path) -> None
 
 def test_patch_windows_mcp_not_installed() -> None:
     assert setup.patch_windows_mcp(locate=lambda: None) == "not_installed"
+
+
+class TestEnsureOnnxruntimeDml:
+    """setup.py post-install swap: CPU onnxruntime -> onnxruntime-directml."""
+
+    def test_skips_off_windows(self):
+        assert setup.ensure_onnxruntime_dml(
+            probe=lambda: False, run_cmd=lambda cmd: None, is_windows=False
+        ) == "skipped"
+
+    def test_already_ok_when_dml_present(self):
+        calls: list[list[str]] = []
+        status = setup.ensure_onnxruntime_dml(
+            probe=lambda: True, run_cmd=calls.append, is_windows=True
+        )
+        assert status == "already_ok"
+        assert calls == []
+
+    def test_installs_when_dml_missing(self):
+        calls: list[list[str]] = []
+        status = setup.ensure_onnxruntime_dml(
+            probe=lambda: False, run_cmd=calls.append, is_windows=True
+        )
+        assert status == "installed"
+        flat = [" ".join(c) for c in calls]
+        assert any("uninstall" in c and "onnxruntime" in c for c in flat)
+        assert any("install" in c and "onnxruntime-directml" in c for c in flat)
+
+    def test_pip_failure_is_best_effort(self):
+        def boom(cmd: list[str]) -> None:
+            raise RuntimeError("pip died")
+
+        assert setup.ensure_onnxruntime_dml(
+            probe=lambda: False, run_cmd=boom, is_windows=True
+        ) == "failed"
+
+    def test_probe_failure_is_best_effort(self):
+        def boom_probe() -> bool:
+            raise RuntimeError("no python")
+
+        assert setup.ensure_onnxruntime_dml(
+            probe=boom_probe, run_cmd=lambda cmd: None, is_windows=True
+        ) == "failed"
