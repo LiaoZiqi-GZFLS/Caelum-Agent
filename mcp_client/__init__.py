@@ -49,6 +49,18 @@ _TB_HEADER = "Traceback (most recent call last):"
 # Safety valve against an unterminated block growing without bound.
 _MAX_TB_LINES = 500
 
+# fastmcp logs every tool failure to stderr as a rich-rendered record: a
+# header line at column 0 ("[ts] Error calling tool 'X'" or "WARNING Invalid
+# arguments for tool 'X'") followed by a fully indented traceback/dump. The
+# error is already returned to the model as the tool result and shown by the
+# presenter, so the whole record is redundant terminal noise.
+_TOOL_ERROR_RECORD = re.compile(
+    r"Error calling tool|Invalid arguments for tool", re.IGNORECASE
+)
+# Safety valve: a record ends at the first non-indented line; cap its length
+# in case upstream output never de-indents.
+_MAX_RECORD_LINES = 300
+
 
 class _UpstreamNoiseFilter:
     """Line-buffered stderr wrapper that drops known windows-mcp upstream noise.
@@ -67,6 +79,11 @@ class _UpstreamNoiseFilter:
     any line in it matched a noise pattern — otherwise the user would see an
     orphaned traceback skeleton (header + ``^^^^^`` carets) whose error lines
     were filtered out. Chained tracebacks are judged block by block.
+
+    fastmcp tool-error records (``Error calling tool`` / ``Invalid arguments
+    for tool`` header + indented rich traceback) are dropped unconditionally:
+    the error is already delivered as the tool result and shown by the
+    presenter, so the stderr copy is pure noise.
     """
 
     SUMMARY_INTERVAL = 60.0  # seconds between "suppressed N lines" summaries
@@ -80,12 +97,16 @@ class _UpstreamNoiseFilter:
         self._log = summary_logger or logger
         self._buf = ""
         self._suppressed = 0
+        self._suppressed_records = 0
         self._last_report = time.monotonic()
         self._lock = threading.Lock()
         # Pending traceback block (None when not inside one) and whether any
         # line in it matched a noise pattern.
         self._tb_buffer: list[str] | None = None
         self._tb_noise = False
+        # Inside a fastmcp tool-error record (header seen, indented body
+        # being swallowed); counts lines so a runaway record self-terminates.
+        self._record_lines = 0
         # OS pipe backing fileno(); created lazily so unit tests (which drive
         # write()/flush() directly) pay no cost and spawn no thread.
         self._read_fd: int | None = None
@@ -98,14 +119,25 @@ class _UpstreamNoiseFilter:
 
     def _maybe_report(self) -> None:
         now = time.monotonic()
-        if self._suppressed and (now - self._last_report) >= self.SUMMARY_INTERVAL:
-            n = self._suppressed
+        if (self._suppressed or self._suppressed_records) and (
+            now - self._last_report
+        ) >= self.SUMMARY_INTERVAL:
+            parts = []
+            if self._suppressed:
+                parts.append(
+                    f"{self._suppressed} tree_node noise line(s) "
+                    "(docs/windows_mcp/upstream-tree-node-issue.md)"
+                )
+            if self._suppressed_records:
+                parts.append(
+                    f"{self._suppressed_records} tool-error traceback block(s) "
+                    "(already shown as tool results)"
+                )
             self._suppressed = 0
+            self._suppressed_records = 0
             self._last_report = now
             self._log.info(
-                "Suppressed %d windows-mcp upstream noise line(s) "
-                "(tree_node traversal bug); see docs/windows_mcp/upstream-tree-node-issue.md",
-                n,
+                "Suppressed windows-mcp stderr noise: %s", "; ".join(parts)
             )
 
     def write(self, s: str) -> int:
@@ -133,9 +165,24 @@ class _UpstreamNoiseFilter:
             ):
                 self._resolve_traceback()
             return
+        if self._record_lines:
+            # Inside a fastmcp tool-error record: swallow the indented body.
+            # Blank lines count as body (rich pads with them); the first
+            # non-indented line ends the record and is processed normally.
+            self._record_lines += 1
+            deindented = bool(line) and line[0] not in " \t"
+            if deindented or self._record_lines >= _MAX_RECORD_LINES:
+                self._record_lines = 0
+                if deindented:
+                    self._process_line(line)
+            return
         if line.startswith(_TB_HEADER):
             self._tb_buffer = [line]
             self._tb_noise = False
+            return
+        if _TOOL_ERROR_RECORD.search(line):
+            self._suppressed_records += 1
+            self._record_lines = 1
             return
         if self._is_noise(line):
             self._suppressed += 1
@@ -215,6 +262,7 @@ class _UpstreamNoiseFilter:
             # its skeleton is not silently stuck in the buffer.
             if self._tb_buffer is not None:
                 self._resolve_traceback()
+            self._record_lines = 0
         write_fd = self._write_fd
         read_fd = self._read_fd
         self._write_fd = None

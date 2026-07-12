@@ -271,6 +271,74 @@ def test_upstream_noise_filter_chained_traceback_resolves_each_block():
     assert filt._suppressed == 3
 
 
+_RICH_CLICK_ERROR = (
+    "[07/13/26 02:14:06] Error calling tool 'Click'\n"
+    "                    +----------- Traceback (most recent call last) ----+\n"
+    "                    | E:\\code\\windows_mcp\\tools\\input.py:27 in _resolve |\n"
+    "                    +-----------------------------------------------------+\n"
+    "                    ValueError: Failed to find element with label 2445:\n"
+    "                    Label 2445 out of range\n"
+)
+
+
+def test_upstream_noise_filter_suppresses_rich_tool_error_block():
+    """fastmcp logs every tool exception as a rich-rendered, fully indented
+    traceback block to stderr. The same error is already returned as the
+    tool result (and shown by the presenter), so the whole block must be
+    dropped instead of flooding the terminal."""
+    filt, downstream = _make_filter()
+    filt.write(_RICH_CLICK_ERROR)
+    filt.write("Snapshot ok\n")  # next record starts at column 0
+    filt.flush()
+
+    assert downstream.getvalue() == "Snapshot ok\n"
+    assert filt._suppressed_records == 1
+
+
+def test_upstream_noise_filter_suppresses_invalid_arguments_record():
+    """fastmcp's multi-line 'Invalid arguments for tool' warning (pydantic
+    validation dump) is likewise redundant with the tool result."""
+    filt, downstream = _make_filter()
+    filt.write(
+        "[07/13/26 02:19:22] WARNING  Invalid arguments for tool 'Click':\n"
+        "                             [{'type': 'unexpected_keyword_argument',\n"
+        "                               'loc': ('times',)}]\n"
+    )
+    filt.write("next line\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "next line\n"
+    assert filt._suppressed_records == 1
+
+
+def test_upstream_noise_filter_tool_error_split_across_writes():
+    filt, downstream = _make_filter()
+    filt.write("[07/13/26 02:14:06] Error calling tool 'Cli")
+    filt.write("ck'\n                    | frame |\n")
+    filt.write("                    ValueError: nope\n")
+    filt.write("real line\n")
+    filt.flush()
+
+    assert downstream.getvalue() == "real line\n"
+    assert filt._suppressed_records == 1
+
+
+def test_upstream_noise_filter_tool_error_summary(caplog):
+    filt, downstream = _make_filter()
+    filt._last_report = time.monotonic() - (filt.SUMMARY_INTERVAL + 1)
+
+    with caplog.at_level(logging.INFO, logger="caelum.mcp"):
+        filt.write(_RICH_CLICK_ERROR)
+        filt.write("done\n")
+        filt.flush()
+
+    assert any(
+        "Suppressed" in rec.message and "tool-error" in rec.message
+        for rec in caplog.records
+    )
+    assert filt._suppressed_records == 0
+
+
 def test_upstream_noise_filter_fileno_created_lazily():
     filt, _ = _make_filter()
     try:
