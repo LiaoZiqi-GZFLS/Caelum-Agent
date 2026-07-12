@@ -112,6 +112,27 @@ async def test_upload_rejects_oversized_file(tmp_path: Path, monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_upload_rejects_oversized_source_before_compression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source files over 300 MB are rejected up front — no ffmpeg run."""
+    monkeypatch.setattr(media_mod, "MAX_SOURCE_BYTES", 10)
+    calls = 0
+
+    async def fake_compressor(src: Path, dst: Path) -> Path:
+        nonlocal calls
+        calls += 1
+        return dst
+
+    video = tmp_path / "huge.mp4"
+    video.write_bytes(b"x" * 20)  # 20 bytes > 10-byte patched cap
+
+    with pytest.raises(ValueError, match="300 MB"):
+        await _uploader(tmp_path, video_compressor=fake_compressor).upload(video)
+    assert calls == 0  # rejected before compression even started
+
+
+@pytest.mark.asyncio
 async def test_image_over_4k_downscaled(tmp_path: Path) -> None:
     http = _FakeHTTP()
     img = tmp_path / "huge.png"

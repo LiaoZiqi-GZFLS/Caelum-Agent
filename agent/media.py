@@ -6,7 +6,8 @@ reference, which Kimi renders natively as an ``image_url`` / ``video_url``
 content part. The model never sees bytes — it sees the actual picture/video.
 
 Constraints enforced here:
-- 100 MB hard cap on every uploaded artifact.
+- 300 MB source-file pre-check (rejected before any compression work).
+- 100 MB hard cap on every uploaded artifact (the API's per-file quota).
 - Images larger than 4K (3840x2160) are downscaled into the 4K box first.
 - Videos are re-encoded with ffmpeg to 15fps / 1080p (downscale-only) before
   upload; the compressed file is cached by sha256 so re-uploads are free.
@@ -38,6 +39,7 @@ VIDEO_EXTENSIONS = {
 }
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB hard cap for every upload
+MAX_SOURCE_BYTES = 300 * 1024 * 1024  # reject huge sources before any work
 MAX_IMAGE_WIDTH = 3840   # 4K UHD bounding box
 MAX_IMAGE_HEIGHT = 2160
 VIDEO_FPS = 15
@@ -122,6 +124,15 @@ class MediaUploader:
             )
         if not p.is_file():
             raise FileNotFoundError(f"File not found: {p}")
+
+        # Coarse pre-check: a >300 MB source would waste minutes in ffmpeg /
+        # Pillow before the real 100 MB upload cap can even be evaluated.
+        source_size = p.stat().st_size
+        if source_size > MAX_SOURCE_BYTES:
+            raise ValueError(
+                f"Source file is {source_size / 1024 / 1024:.1f} MB, exceeding "
+                "the 300 MB source limit. Trim or downscale it locally first."
+            )
 
         artifact = self._prepare_image(p) if kind == "image" else await self._prepare_video(p)
         size = artifact.stat().st_size
