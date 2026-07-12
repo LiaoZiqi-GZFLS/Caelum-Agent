@@ -60,6 +60,13 @@ class APIBreakerTripped(Exception):
 # client-side with an actionable error that points the model at Snapshot first.
 _POSITIONAL_WINDOWS_TOOLS = frozenset({"Click", "Type", "Scroll", "Move"})
 
+# Local function tools that must pass the security guard before execution.
+# Formula tools (cloud-side) and the other local tools are intentionally
+# ungated: the former cannot touch the machine, the latter are the agent's
+# own control surface. CodeRunner executes model-generated code locally, so
+# it is held to the same standard as MCP write operations.
+_LOCAL_TOOL_SECURITY = {"CodeRunner": "write_risky"}
+
 # Loop budget: a task starts with 10 perception-action loops. Each time the
 # budget is exhausted without completing, a reflection checkpoint asks the
 # model whether its approach is fundamentally sound; a YES extends the budget
@@ -72,6 +79,12 @@ _MAX_LOOP_LIMIT = 50
 # reminder. By loop 5 a task has clearly become multi-step, and a salient plan
 # matters more as the context grows.
 _TASK_LIST_NUDGE_LOOP = 5
+
+# Argument keys whose values must never reach the audit log in clear text
+# (e.g. a password typed via windows/Type).
+_SENSITIVE_ARG_KEYS = frozenset(
+    {"password", "passwd", "secret", "token", "api_key", "text"}
+)
 
 # Matches when the ENTIRE assistant text is a parroted tool call, e.g.
 #   CompleteTask(answer='你好！')
@@ -880,7 +893,6 @@ class AgentOrchestrator:
                 await self.state.transition("STUCK", task_id=self.task_id)
                 return f"{reason}; agent is stuck."
 
-            previous_perception = self._last_perception
             current_perception = perception
             self._last_perception = perception
 
@@ -1069,7 +1081,23 @@ class AgentOrchestrator:
             name = call.function.name
             args = json.loads(call.function.arguments)
             if name in llm_tools:
-                # Built-in Formula tool handled by LLM client.
+                # Built-in Formula or local function tool handled by LLM client.
+                local_level = _LOCAL_TOOL_SECURITY.get(name)
+                if local_level is not None:
+                    approval = self.security.check(
+                        local_level,
+                        {"server": "local", "tool": name, "args": args},
+                    )
+                    if not approval.allowed:
+                        self.consecutive_action_failures += 1
+                        self._round_tool_failed = True
+                        results.append({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": f"[blocked] {approval.reason}",
+                        })
+                        succeeded.append(False)
+                        continue
                 outputs = await self.llm.execute_tool_calls([call])
                 results.extend(outputs)
                 succeeded.extend([True] * len(outputs))
@@ -1135,7 +1163,7 @@ class AgentOrchestrator:
             self.memory.audit(
                 level=level,
                 actor=f"mcp:{server}",
-                action=f"{tool_name}({json.dumps(args, ensure_ascii=False)})",
+                action=f"{tool_name}({json.dumps(self._redact_args(args), ensure_ascii=False)})",
                 result=content[:500],
             )
             self.last_action_summary = f"{server}/{tool_name}: {content[:200]}"
@@ -1154,6 +1182,16 @@ class AgentOrchestrator:
         self._last_batch_signature = sig
         self._last_batch_all_succeeded = bool(succeeded) and all(succeeded)
         return results
+
+    @staticmethod
+    def _redact_args(args: dict[str, Any]) -> dict[str, Any]:
+        """Mask sensitive argument values before they reach the audit log."""
+        if not isinstance(args, dict):
+            return args
+        return {
+            k: ("***" if k.lower() in _SENSITIVE_ARG_KEYS else v)
+            for k, v in args.items()
+        }
 
     def _resolve_mcp_tool(self, name: str) -> tuple[str | None, str | None]:
         for tool in self.mcp.all_tools():

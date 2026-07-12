@@ -2059,3 +2059,87 @@ async def test_run_task_no_nudge_when_task_list_exists(config, eventbus, killswi
         and "UpdateTaskList" in str(m.get("content", ""))
     ]
     assert nudges == []
+
+
+# ---------------------------------------------------------------------------
+# Local tool security gating (CodeRunner -> write_risky)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_coderunner_blocked_when_confirmation_denied(
+    config, eventbus, killswitch
+):
+    llm = FakeLLM(tool_names=["CodeRunner"])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.security.confirm_callback = lambda summary, action: False
+
+    results = await agent._execute_tool_calls(
+        [_tool_call("CodeRunner", {"code": "print(1)"})]
+    )
+
+    assert "[blocked]" in results[0]["content"]
+    assert llm.calls == []  # never dispatched to the LLM client
+
+
+@pytest.mark.asyncio
+async def test_coderunner_auto_approved_with_yes(config, eventbus, killswitch):
+    llm = FakeLLM(tool_names=["CodeRunner"])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.security.auto_approve = True
+
+    results = await agent._execute_tool_calls(
+        [_tool_call("CodeRunner", {"code": "print(1)"})]
+    )
+
+    assert "[blocked]" not in results[0]["content"]
+    assert llm.calls  # dispatched to the LLM client
+
+
+@pytest.mark.asyncio
+async def test_other_local_tools_stay_ungated(config, eventbus, killswitch):
+    llm = FakeLLM(tool_names=["UpdateTaskList"])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.security.confirm_callback = lambda summary, action: False
+
+    results = await agent._execute_tool_calls(
+        [_tool_call("UpdateTaskList", {"tasks": []})]
+    )
+
+    assert "[blocked]" not in results[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_audit_log_redacts_sensitive_args(config, eventbus, killswitch):
+    mcp = FakeMCP([{"server": "windows", "name": "Type", "description": "", "schema": {}}])
+    mcp.set_result("windows", "Type", ToolResult(success=True, content="typed"))
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), mcp, killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    audited: list[dict[str, Any]] = []
+    agent.memory.audit = lambda **kw: audited.append(kw)
+
+    await agent._execute_tool_calls(
+        [_tool_call("windows__Type", {"label": "3", "text": "hunter2"})]
+    )
+
+    assert audited
+    assert "hunter2" not in audited[0]["action"]
+    assert "***" in audited[0]["action"]
+
+
+def test_redact_args_masks_only_sensitive_keys():
+    redacted = AgentOrchestrator._redact_args(
+        {"text": "secret", "label": "3", "Password": "pw"}
+    )
+    assert redacted == {"text": "***", "label": "3", "Password": "***"}

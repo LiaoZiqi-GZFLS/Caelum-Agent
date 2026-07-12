@@ -285,6 +285,11 @@ class MCPClient:
             raise
         except Exception:
             pass
+        # Release the upstream-noise filter's pipe/thread if one is installed;
+        # fileno() lazily recreates it on the next connect, so this is safe
+        # across reconnects.
+        if isinstance(self._errlog, _UpstreamNoiseFilter):
+            self._errlog.close()
 
     async def reconnect(self) -> bool:
         acquired_here = False

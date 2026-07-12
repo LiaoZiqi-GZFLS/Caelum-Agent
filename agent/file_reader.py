@@ -65,7 +65,13 @@ class FileExtractor:
         self.cache_dir = Path(cache_dir)
         # When no client is injected (tests inject a fake), share nothing and
         # own a private one — but production passes llm.http to reuse the pool.
+        self._owns_http = http is None
         self.http = http if http is not None else httpx.AsyncClient(timeout=120.0)
+
+    async def aclose(self) -> None:
+        """Close the httpx client if this extractor owns it (no-op otherwise)."""
+        if self._owns_http:
+            await self.http.aclose()
 
     def _cache_path(self, path: Path) -> Path:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()

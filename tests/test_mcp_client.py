@@ -219,3 +219,16 @@ def test_upstream_noise_filter_reads_from_pipe():
         assert filt._suppressed == 1
     finally:
         filt.close()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_closes_noise_filter():
+    client = MCPClient("windows", MCPServerConfig(command="echo", args=[]))
+    assert isinstance(client._errlog, _UpstreamNoiseFilter)
+    client._errlog.fileno()  # create the pipe + reader thread
+    assert client._errlog._write_fd is not None
+
+    await client.disconnect()
+
+    assert client._errlog._write_fd is None
+    assert client._errlog._read_fd is None

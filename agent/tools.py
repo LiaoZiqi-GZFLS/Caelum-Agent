@@ -155,7 +155,16 @@ class UnsafeCodeError(Exception):
 
 
 class CodeRunner:
-    """Local sandboxed code execution tool."""
+    """Local sandboxed code execution tool.
+
+    The Python sandbox (AST validation + restricted builtins + import
+    whitelist in a subprocess) is a best-effort boundary, NOT a hard
+    security guarantee: dunder attribute traversal (e.g. via ``__class__``)
+    can potentially regain dangerous modules. Treat all model-generated code
+    as untrusted; the subprocess timeout and cwd isolation are the real
+    containment. JavaScript has no sandbox at all and is gated behind
+    --yes/--yes-all (see ``allow_javascript``).
+    """
 
     def __init__(
         self,

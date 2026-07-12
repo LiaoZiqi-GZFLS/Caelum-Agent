@@ -326,3 +326,19 @@ async def test_sweep_list_failure_returns_zero(tmp_path: Path) -> None:
 
     assert deleted == 0
     assert http.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_aclose_only_closes_owned_client(tmp_path: Path) -> None:
+    owned = FileExtractor(
+        base_url="https://api.moonshot.cn/v1",
+        api_key="sk-test",
+        cache_dir=tmp_path / "file_extract",
+    )  # no http injected -> owns its client
+    await owned.aclose()
+    assert owned.http.is_closed
+
+    injected = _FakeHTTP()
+    shared = _extractor(tmp_path, injected)
+    await shared.aclose()  # must NOT close the injected client
+    assert not hasattr(injected, "is_closed") or not injected.is_closed
