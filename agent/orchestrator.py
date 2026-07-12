@@ -74,6 +74,11 @@ _STALE_LABEL_RE = re.compile(
     r"Label \d+ out of range|Failed to find element with label", re.IGNORECASE
 )
 
+# DesktopInteract target mode: if the top two verified candidates share a
+# verdict and their scores differ by less than this, do not guess — ask the
+# model to disambiguate by label.
+AMBIGUITY_SCORE_MARGIN = 0.1
+
 # Local function tools that must pass the security guard before execution.
 # Formula tools (cloud-side) and the other local tools are intentionally
 # ungated: the former cannot touch the machine, the latter are the agent's
@@ -404,21 +409,30 @@ class AgentOrchestrator:
             logger.warning("Failed to restore orchestrator state: %s", exc)
 
     async def _desktop_interact_impl(
-        self, label: int, action: str, text: str | None = None
+        self,
+        action: str,
+        target: str | None = None,
+        label: int | None = None,
+        text: str | None = None,
     ) -> str:
-        """Convert a SoM label to screen coordinates and execute the action.
+        """Locate a UI element with GUI-Actor pointing and execute the action.
 
-        Look up the label in the most recent perception's som_annotations,
-        convert normalized coordinates to screen pixels, then call the
-        appropriate Windows-MCP tool.
+        Preferred call style is ``target=<short visual description>``: the
+        description is handed to GUI-Actor as the pointing query, the verifier
+        re-ranks the top-k candidates, and the best one is executed right away.
+        When the top two candidates tie (same verdict, scores within
+        AMBIGUITY_SCORE_MARGIN), no guess is made: the annotated screenshot is
+        stashed and the model is asked to retry with ``label=<number>``.
+        ``label`` without ``target`` keeps the legacy marker-picking behavior.
         """
-        # Refresh SoM from the latest screenshot so labels map to the current
-        # screen. This is the single on-demand vision entry point; in lazy mode
-        # it is also what triggers model loading on first use.
+        # Refresh SoM from the latest screenshot so candidates map to the
+        # current screen. This is the single on-demand vision entry point; in
+        # lazy mode it is also what triggers model loading on first use. The
+        # pointing query is the model's target description when given — far
+        # more precise than the whole task instruction.
+        query = (target or "").strip() or self.current_instruction
         if self.ui_detector is not None and self.config.ui_detector.enabled:
-            self._last_perception = await self.perception.perceive_with_vision(
-                self.current_instruction
-            )
+            self._last_perception = await self.perception.perceive_with_vision(query)
             # In lazy mode the main-loop perceptions carry no SoM annotations,
             # so without this the model picks DesktopInteract labels blind.
             # Stash the fresh vision perception; _think_and_act appends its
@@ -429,15 +443,41 @@ class AgentOrchestrator:
         if perception is None:
             return "[error] No perception data available. Run perception first."
 
-        # Find the annotation with the matching label.
-        match = None
-        for ann in perception.som_annotations:
-            if ann.get("label") == label:
-                match = ann
-                break
-        if match is None:
-            available = [a.get("label") for a in perception.som_annotations]
-            return f"[error] SoM label {label} not found. Available labels: {available}"
+        anns = perception.som_annotations
+        if label is not None:
+            # Explicit label: legacy marker picking (also the disambiguation
+            # path after an [ambiguous] response).
+            match = next((a for a in anns if a.get("label") == label), None)
+            if match is None:
+                available = [a.get("label") for a in anns]
+                return f"[error] SoM label {label} not found. Available labels: {available}"
+        else:
+            # Target mode: let the verifier's ranking pick, unless ambiguous.
+            if not anns:
+                self._pending_som_followup = perception
+                return (
+                    f"[error] No candidate passed verification for target "
+                    f"{query!r}. Look at the annotated screenshot, then retry "
+                    "DesktopInteract with a more specific visual description."
+                )
+            top = anns[0]
+            second = anns[1] if len(anns) > 1 else None
+            top_score = float(top.get("verify_score", top.get("score", 0.0)))
+            if second is not None and second.get("verdict") == top.get("verdict"):
+                second_score = float(second.get("verify_score", second.get("score", 0.0)))
+                if top_score - second_score < AMBIGUITY_SCORE_MARGIN:
+                    self._pending_som_followup = perception
+                    listing = "; ".join(
+                        f"label {a.get('label')} "
+                        f"(score {float(a.get('verify_score', a.get('score', 0.0))):.2f})"
+                        for a in anns
+                    )
+                    return (
+                        f"[ambiguous] Multiple candidates match {query!r}: {listing}. "
+                        "Look at the annotated screenshot and call DesktopInteract "
+                        "again with label=<the correct number>."
+                    )
+            match = top
 
         # Convert normalized [0,1] to screen pixel coordinates.
         sw = perception.screen_width or 1920
@@ -537,13 +577,17 @@ class AgentOrchestrator:
             self._desktop_interact_impl,
             schema=DESKTOP_INTERACT_SCHEMA,
             description=(
-                "Interact with a UI element identified by a SoM (Set-of-Mark) label number "
-                "from the annotated screenshot (numbered red circles on detected elements). "
-                "This is VISION-based: it works on ANY app, including ones whose UIA tree is "
-                "missing, empty, or inaccurate (Qt apps like WeChat/QQ, Electron apps, games, "
-                "custom-drawn controls). PREFER this over windows__Click/Type whenever a SoM "
-                "marker is visible on your target, and fall back to it when windows__Snapshot "
-                "shows no usable element or label-based clicks land wrong. "
+                "Interact with a UI element located by VISION: give target= a "
+                "short, concrete visual description (e.g. 'the red Send button "
+                "right of the message input') and the vision model points at it; "
+                "the best verified candidate is used automatically, or you get "
+                "an [ambiguous] reply with candidate labels to choose from via "
+                "label=. Works on ANY app, including ones whose UIA tree is "
+                "missing, empty, or inaccurate (Qt apps like WeChat/QQ, Electron "
+                "apps, games, custom-drawn controls). PREFER this over "
+                "windows__Click/Type whenever a SoM marker is visible on your "
+                "target, and fall back to it when windows__Snapshot shows no "
+                "usable element or label-based clicks land wrong. "
                 "Actions: click, double_click, right_click, type (needs text=), scroll_down/up."
             ),
         )
@@ -638,7 +682,9 @@ class AgentOrchestrator:
                 )
             )
             text_parts.append(
-                "To interact with an element, call DesktopInteract(label=<number>, action=<action>). "
+                "To interact with an element, call DesktopInteract(action=<action>, "
+                "target=<short visual description of the element>) — or with "
+                "label=<number> to pick a specific marker. "
                 "Actions: click, double_click, right_click, type (needs text=), scroll_down, scroll_up."
             )
 
@@ -862,10 +908,15 @@ class AgentOrchestrator:
             "Always explain your reasoning briefly before acting.\n\n"
             "## Working with the SoM (Set-of-Mark) screenshot\n"
             "The screenshot contains numbered red circle markers on detected UI elements. "
-            "Each marker has a number (1, 2, 3, ...). To interact with a marked element:\n"
-            "- Use DesktopInteract(label=N, action='click') to click marker N\n"
-            "- Use DesktopInteract(label=N, action='type', text='...') to type into an input field\n"
-            "- Use DesktopInteract(label=N, action='scroll_down') to scroll at marker N\n"
+            "Each marker has a number (1, 2, 3, ...). To interact with an element:\n"
+            "- PREFERRED: DesktopInteract(action='click', target='<short visual description of "
+            "the element, e.g. \"the Send button right of the message input\">') — the vision "
+            "model locates it from your description and the best verified candidate is used "
+            "automatically. Write a concrete visual description, NOT the whole task.\n"
+            "- If the reply is [ambiguous] with candidate labels, look at the markers and "
+            "call DesktopInteract(action=..., label=N) to pick one.\n"
+            "- Use DesktopInteract(action='type', target='...', text='...') to type into an input field\n"
+            "- Use DesktopInteract(action='scroll_down', target='...') to scroll at an element\n"
             "- For browser elements with refs (like e12), use playwright__browser_click(target='e12') instead.\n"
             "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n\n"
             "## Working with desktop (Windows-MCP) tools\n"
@@ -879,7 +930,7 @@ class AgentOrchestrator:
             "and custom-drawn controls. If Snapshot shows no element matching your target, its "
             "labels look wrong (clicking a label hits the wrong element), or a label expires "
             "('out of range') after re-snapshotting, STOP fighting UIA and use "
-            "DesktopInteract(label=N, ...) with the SoM marker on your target instead — it is "
+            "DesktopInteract(action=..., target='<visual description of your target>') instead — it is "
             "vision-based and works on any app. If you cannot see inside the app at all (empty "
             "tree AND no clear screenshot), call CaptureWindow(title) to view it directly.\n\n"
             "## Working files\n"

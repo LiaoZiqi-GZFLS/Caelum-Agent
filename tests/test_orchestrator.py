@@ -2577,3 +2577,103 @@ async def test_windows_loc_passes_through_without_dimensions(config, eventbus, k
 
     clicks = [c for c in mcp.calls if c[0] == "windows" and c[1] == "Click"]
     assert clicks[0][2]["loc"] == [640, 360]
+
+
+# ---------------------------------------------------------------------------
+# DesktopInteract target mode (LLM-written pointing query + verifier auto-pick)
+# ---------------------------------------------------------------------------
+
+def _candidate(label: int, x: float, y: float, verify_score: float, verdict: str = "pass") -> dict[str, Any]:
+    return {
+        "label": label,
+        "center_x": x,
+        "center_y": y,
+        "score": verify_score,
+        "verify_score": verify_score,
+        "verdict": verdict,
+        "normalized": True,
+    }
+
+
+def _perception_with_candidates(cands: list[dict[str, Any]]) -> Perception:
+    return Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=cands,
+        screen_width=1000,
+        screen_height=1000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_target_mode_auto_executes_confident(config, eventbus, killswitch):
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = _perception_with_candidates([
+        _candidate(1, 0.5, 0.5, 0.90),
+        _candidate(2, 0.2, 0.2, 0.70),
+    ])
+
+    result = await agent._desktop_interact_impl(action="click", target="发送按钮")
+
+    assert "OK" in result
+    server, tool, args = mcp.calls[-1]
+    assert (server, tool) == ("windows", "Click")
+    assert args["loc"] == [500, 500]
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_target_mode_ambiguous_returns_candidates(config, eventbus, killswitch):
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = _perception_with_candidates([
+        _candidate(1, 0.5, 0.5, 0.80),
+        _candidate(2, 0.2, 0.2, 0.77),
+    ])
+
+    result = await agent._desktop_interact_impl(action="click", target="按钮")
+
+    assert result.startswith("[ambiguous]")
+    assert "label" in result
+    assert not mcp.calls
+    assert agent._pending_som_followup is not None
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_target_mode_verdict_dominance(config, eventbus, killswitch):
+    # pass beats uncertain even when the scores are within the margin.
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = _perception_with_candidates([
+        _candidate(1, 0.5, 0.5, 0.88, verdict="pass"),
+        _candidate(2, 0.2, 0.2, 0.86, verdict="uncertain"),
+    ])
+
+    result = await agent._desktop_interact_impl(action="click", target="按钮")
+
+    assert "OK" in result
+    assert mcp.calls[-1][2]["loc"] == [500, 500]
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_target_mode_no_candidates(config, eventbus, killswitch):
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = _perception_with_candidates([])
+
+    result = await agent._desktop_interact_impl(action="click", target="不存在的元素")
+
+    assert result.startswith("[error]")
+    assert "target" in result
+    assert not mcp.calls
+    assert agent._pending_som_followup is not None
+
+
+def test_desktop_interact_schema_requires_only_action():
+    from agent.tools import DESKTOP_INTERACT_SCHEMA
+
+    assert DESKTOP_INTERACT_SCHEMA["required"] == ["action"]
+    assert "target" in DESKTOP_INTERACT_SCHEMA["properties"]
+    assert "label" in DESKTOP_INTERACT_SCHEMA["properties"]

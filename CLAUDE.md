@@ -141,7 +141,7 @@ Beyond MCP tools, the orchestrator registers these local tools on the LLM client
 | Tool | Module | Purpose |
 |------|--------|---------|
 | `CodeRunner` | `tools.py` | Sandboxed local Python; JavaScript only with `--yes`/`--yes-all` |
-| `DesktopInteract` | `orchestrator.py` | SoM label → GUI-Actor coordinates → click/type/scroll |
+| `DesktopInteract` | `orchestrator.py` | Vision-based interaction for any app: preferred call is `target=<short visual description>` — the LLM-written query is handed to GUI-Actor pointing (top-k candidates), the verifier re-ranks, and the best candidate executes immediately; ties (same verdict, scores within `AMBIGUITY_SCORE_MARGIN=0.1`) return `[ambiguous]` + annotated screenshot for `label=` disambiguation |
 | `UpgradeVision` | `orchestrator.py` + `perception.py` | Raise screenshot cap from 720p to 1080p (`screenshot.upgraded_max_*`) for the rest of the task when the model can't read small text; injects a fresh 1080p perception immediately; reset per task |
 | `CompleteTask` | `orchestrator.py` | Model-decided fast path: finish without verification |
 | `RequestHumanHelp` | `orchestrator.py` + `choice_menu.py` | Interactive TTY question with selectable options |
@@ -281,6 +281,8 @@ Screenshot
 ```
 
 Vision (GUI-Actor SoM) is lazy by default — it runs only for `DesktopInteract`. As an automatic compensation (`ui_detector.auto_compensate`, default true), `perceive()` also runs one vision pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable SoM markers without having to discover `DesktopInteract` itself.
+
+GUI-Actor runs in **instruction-conditioned pointing mode**, not full-screen detection: one inference returns top-k (default 3, `ui_detector.topk`) candidate points for the given query; the verifier crops 224×224 around each, re-scores with the same model (pass ≥0.55 / reject ≤0.25 / uncertain), and rejects are dropped from the annotations. The query is the `DesktopInteract(target=...)` description when provided, else the whole task instruction (auto-compensation fallback).
 
 Coordinate contract: the model only ever sees the **compressed** screenshot (720p, or 1080p after `UpgradeVision`) and is told by the perception description to give `loc` coordinates in that image's space. The orchestrator rescales them to native screen pixels at execution time (`_rescale_loc_args`, using `Perception.screen_width/height` vs `screenshot_width/height`) — the model never does scaling math. Skipped when `screenshot.crop_to_active_window` is on (image is then window-relative).
 

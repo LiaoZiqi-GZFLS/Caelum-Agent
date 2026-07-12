@@ -26,11 +26,21 @@ logger = logging.getLogger("caelum.tools")
 DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "target": {
+            "type": "string",
+            "description": (
+                "A short, concrete VISUAL description of the element to interact "
+                "with (e.g. 'the red Send button right of the message input', "
+                "'the search box at the top'). This text is given directly to "
+                "the vision model as the pointing query — be specific about "
+                "appearance and position, do NOT repeat the whole task."
+            ),
+        },
         "label": {
             "type": "integer",
             "description": (
-                "The number on the SoM (Set-of-Mark) marker overlay to interact with. "
-                "Look at the screenshot: each red circle has a number. Use that number."
+                "SoM marker number to interact with. Only needed to disambiguate "
+                "after an [ambiguous] response listed candidate labels."
             ),
         },
         "action": {
@@ -43,7 +53,7 @@ DESKTOP_INTERACT_SCHEMA: dict[str, Any] = {
             "description": "Text to type. Required when action is 'type'.",
         },
     },
-    "required": ["label", "action"],
+    "required": ["action"],
 }
 
 
