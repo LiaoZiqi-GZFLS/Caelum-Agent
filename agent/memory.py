@@ -76,12 +76,32 @@ class MemoryStore:
         # crash onnxruntime natively with an access violation (0xc0000005).
         # Reproduced by scripts/repro_dml_crash.py --dml-embedding. The
         # all-MiniLM-L6-v2 model is tiny, so CPU embedding costs ~nothing.
-        self.skill_collection = self.chroma.get_or_create_collection(
-            "skills",
-            embedding_function=ONNXMiniLM_L6_V2(
-                preferred_providers=["CPUExecutionProvider"]
-            ),
+        embedding_function = ONNXMiniLM_L6_V2(
+            preferred_providers=["CPUExecutionProvider"]
         )
+        try:
+            self.skill_collection = self.chroma.get_or_create_collection(
+                "skills",
+                embedding_function=embedding_function,
+            )
+        except ValueError as exc:
+            # One-time migration: collections created before the CPU pin
+            # persist the "default" (DML-capable) EF and ChromaDB refuses to
+            # open them with an explicit EF. The collection is just a cache
+            # of skills/**/*.md — drop and recreate; sync_skills() below
+            # repopulates it.
+            if "Embedding function conflict" not in str(exc):
+                raise
+            logger.warning(
+                "Recreating skills collection with CPU-pinned embedding "
+                "function (previous collection used the default/DML-capable "
+                "one); skills will be re-indexed"
+            )
+            self.chroma.delete_collection("skills")
+            self.skill_collection = self.chroma.get_or_create_collection(
+                "skills",
+                embedding_function=embedding_function,
+            )
         self.sync_skills()
 
     def _now(self) -> str:

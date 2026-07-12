@@ -159,3 +159,65 @@ def test_skill_embedding_function_pinned_to_cpu(tmp_path: Path, monkeypatch):
 
     assert isinstance(ef, ONNXMiniLM_L6_V2)
     assert getattr(ef, "_preferred_providers", None) == ["CPUExecutionProvider"]
+
+
+def test_skill_collection_recreated_on_legacy_ef_conflict(tmp_path: Path, monkeypatch):
+    """Pre-fix collections persist the 'default' (DML-capable) EF; opening
+    them with the pinned EF raises an EF-conflict ValueError. The store must
+    drop and recreate the collection — sync_skills() repopulates it from
+    skills/**/*.md right after, so nothing is lost."""
+    calls = {"get": 0, "delete": 0}
+
+    class FakeCollection:
+        def upsert(self, **kwargs: Any) -> None: ...
+        def query(self, **kwargs: Any) -> dict[str, list]:
+            return {"ids": [[]], "documents": [[]]}
+
+    class FakePersistentClient:
+        def __init__(self, path: str) -> None: ...
+        def get_or_create_collection(self, name, embedding_function=None, **kwargs):
+            calls["get"] += 1
+            if calls["get"] == 1:
+                raise ValueError(
+                    "An embedding function already exists in the collection "
+                    "configuration, and a new one is provided. Embedding "
+                    "function conflict: new: onnx_mini_lm_l6_v2 vs persisted: default"
+                )
+            return FakeCollection()
+
+        def delete_collection(self, name) -> None:
+            calls["delete"] += 1
+
+    import chromadb
+
+    monkeypatch.setattr(chromadb, "PersistentClient", FakePersistentClient)
+
+    MemoryStore(
+        db_path=tmp_path / "memory.db",
+        skills_dir=tmp_path / "skills",
+        vector_dir=tmp_path / "chroma",
+    )
+
+    assert calls["delete"] == 1
+    assert calls["get"] == 2
+
+
+def test_skill_collection_unrelated_value_error_propagates(tmp_path: Path, monkeypatch):
+    """A ValueError that is NOT an embedding-function conflict must not be
+    swallowed by the migration handler."""
+
+    class FakePersistentClient:
+        def __init__(self, path: str) -> None: ...
+        def get_or_create_collection(self, name, embedding_function=None, **kwargs):
+            raise ValueError("disk on fire")
+
+    import chromadb
+
+    monkeypatch.setattr(chromadb, "PersistentClient", FakePersistentClient)
+
+    with pytest.raises(ValueError, match="disk on fire"):
+        MemoryStore(
+            db_path=tmp_path / "memory.db",
+            skills_dir=tmp_path / "skills",
+            vector_dir=tmp_path / "chroma",
+        )
