@@ -2189,3 +2189,22 @@ def test_load_state_never_restores_history(config, eventbus, killswitch):
     assert agent.history == []
     assert agent.current_instruction == "old task"
     assert agent.consecutive_action_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_run_task_writes_history_archive(config, eventbus, killswitch):
+    llm = FakeLLM([_message("done."), _message("YES"), _message("finished.")])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.run_task("archive me")
+
+    archives = list((config.cache_dir_absolute().parent / "archives").glob("*.jsonl"))
+    assert len(archives) == 1
+    first_line = archives[0].read_text(encoding="utf-8").splitlines()[0]
+    import json as _json
+    meta = _json.loads(first_line)
+    assert meta["instruction"] == "archive me"
+    assert meta["outcome"] == "finished."

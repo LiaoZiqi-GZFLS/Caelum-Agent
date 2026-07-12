@@ -17,6 +17,7 @@ import openai
 from agent.config import Config
 from agent.content_writer import register_draft_content
 from agent.file_reader import register_read_document
+from agent.history_archive import HistoryArchiver
 from agent.kill_switch import KillSwitch
 from agent.kimi_memory import KimiMemoryClient
 from agent.llm_client import LLMClient
@@ -672,7 +673,26 @@ class AgentOrchestrator:
         return len(self._recent_hashes) >= self.config.kill_switch.same_ui_loop_threshold
 
     async def run_task(self, user_input: str, task_id: str | None = None) -> str:
-        self.task_id = task_id or "task-0"
+        """Run one task and archive its history to data/archives/ on exit."""
+        tid = task_id or "task-0"
+        outcome = "ok"
+        try:
+            outcome = await self._run_task_impl(user_input, tid)
+            return outcome
+        finally:
+            try:
+                archives_dir = self.config.cache_dir_absolute().parent / "archives"
+                HistoryArchiver(archives_dir, _SENSITIVE_ARG_KEYS).archive(
+                    task_id=self.task_id,
+                    instruction=user_input,
+                    outcome=str(outcome)[:500],
+                    history=self.history,
+                )
+            except Exception as exc:  # archiving must never break the agent
+                logger.warning("Failed to archive history: %s", exc)
+
+    async def _run_task_impl(self, user_input: str, task_id: str) -> str:
+        self.task_id = task_id
         self.current_instruction = user_input
         self._cancel_event.clear()
         self.consecutive_action_failures = 0
