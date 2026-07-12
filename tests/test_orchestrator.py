@@ -1125,28 +1125,70 @@ async def test_desktop_interact_uses_screen_dimension_fallback(config, eventbus,
 
 
 @pytest.mark.asyncio
-async def test_desktop_interact_warns_on_uncertain_verdict(config, eventbus, killswitch):
-    """DesktopInteract appends warning when matched element has verdict=uncertain."""
+async def test_desktop_interact_requires_label(config, eventbus, killswitch):
+    """Label-only mode: calling without label returns a helpful error."""
     mcp = FakeMCP()
-    llm = FakeLLM()
-    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch)
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
     agent._last_perception = Perception(
         screenshot_path=Path("/tmp/test.jpg"),
         description="test",
         ocr_text="",
         ui_tree={},
-        som_annotations=[
-            {"label": 1, "center_x": 0.5, "center_y": 0.5, "verdict": "uncertain"},
-        ],
-        screen_width=1920,
-        screen_height=1080,
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+    )
+
+    result = await agent._desktop_interact_impl(action="click")
+
+    assert result.startswith("[error]")
+    assert "label" in result
+    assert not mcp.calls
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_no_annotations_error(config, eventbus, killswitch):
+    """No YOLO annotations -> error pointing at the other locator tools."""
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={"snapshot": "some tree"},
+        som_annotations=[],
     )
 
     result = await agent._desktop_interact_impl(label=1, action="click")
 
-    assert result.startswith("[uncertain]")
+    assert result.startswith("[error]")
+    assert "no YOLO annotations" in result
+    assert "Snapshot" in result
+    assert "PreviewPoints" in result
+    assert not mcp.calls
+
+
+@pytest.mark.asyncio
+async def test_desktop_interact_type_focuses_then_types(config, eventbus, killswitch):
+    """type action clicks the label's center to focus, then types."""
+    mcp = FakeMCP()
+    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[{"label": 1, "center_x": 0.5, "center_y": 0.5}],
+        screen_width=1920,
+        screen_height=1080,
+    )
+
+    result = await agent._desktop_interact_impl(label=1, action="type", text="hello")
+
     assert "OK" in result
-    assert "Verifier was unsure" in result
+    assert len(mcp.calls) == 2
+    assert mcp.calls[0][1] == "Click"
+    assert mcp.calls[0][2]["loc"] == [960, 540]
+    assert mcp.calls[1][1] == "Type"
+    assert mcp.calls[1][2]["text"] == "hello"
 
 
 # ---------------------------------------------------------------------------
@@ -1493,14 +1535,12 @@ async def test_pure_filesystem_task_skips_vision(
 
 
 @pytest.mark.asyncio
-async def test_desktop_interact_triggers_vision_and_clicks(
+async def test_desktop_interact_uses_last_perception_without_detection(
     config, eventbus, killswitch, monkeypatch
 ):
-    # DesktopInteract refreshes SoM on demand, then clicks the resolved coords.
-    annotations = [
-        {"label": 2, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
-    ]
-    spy = _SpyDetector(annotations)
+    # Label-only DesktopInteract resolves against the LAST perception's SoM
+    # annotations; it must NOT run a detection pass of its own.
+    spy = _SpyDetector()
     perception = _PerceptionModule(config, ui_detector=spy)
     _patch_perception_capture(perception, monkeypatch)
 
@@ -1509,135 +1549,26 @@ async def test_desktop_interact_triggers_vision_and_clicks(
 
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch, perception=perception)
     agent.ui_detector = spy
-    agent.current_instruction = "click the OK button"
+    agent._last_perception = Perception(
+        screenshot_path=Path("/tmp/test.jpg"),
+        description="test",
+        ocr_text="",
+        ui_tree={},
+        som_annotations=[
+            {"label": 2, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
+        ],
+        screen_width=100,
+        screen_height=100,
+    )
 
     result = await agent._desktop_interact_impl(label=2, action="click")
 
-    assert spy.calls == 1
+    assert spy.calls == 0  # no detection refresh
     assert result.startswith("OK: click")
     click_calls = [c for c in mcp.calls if c[0] == "windows" and c[1] == "Click"]
     assert len(click_calls) == 1
     # 0.5 * 100x100 screenshot -> (50, 50)
     assert click_calls[0][2] == {"loc": [50, 50]}
-
-
-class _DispatchingLLM(FakeLLM):
-    """FakeLLM that routes DesktopInteract calls to the orchestrator's real impl.
-
-    The shared FakeLLM returns canned tool results without invoking local
-    handlers; the SoM follow-up behaviour lives in the real impl, so dispatch.
-    """
-
-    def __init__(
-        self, chat_responses: list[Any], agent_holder: dict[str, Any]
-    ) -> None:
-        super().__init__(chat_responses=chat_responses, tool_names=["DesktopInteract"])
-        self._holder = agent_holder
-
-    async def execute_tool_calls(self, calls: list[Any]) -> list[dict[str, Any]]:
-        results = []
-        for call in calls:
-            args = json.loads(call.function.arguments)
-            output = await self._holder["agent"]._desktop_interact_impl(**args)
-            results.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": output,
-            })
-        return results
-
-
-def _som_followup_agent(
-    config: Any,
-    eventbus: Any,
-    killswitch: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    annotations: list[dict[str, Any]],
-) -> AgentOrchestrator:
-    """Wire an agent whose LLM dispatches DesktopInteract to the real impl."""
-    spy = _SpyDetector(annotations)
-    perception = _PerceptionModule(config, ui_detector=spy)
-    _patch_perception_capture(perception, monkeypatch)
-
-    holder: dict[str, Any] = {}
-    llm = _DispatchingLLM(
-        [
-            _message(
-                "Clicking.",
-                tool_calls=[_tool_call("DesktopInteract", {"label": 1, "action": "click"})],
-            ),
-            _message("Clicked the OK button."),
-        ],
-        holder,
-    )
-    mcp = FakeMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
-    mcp.set_result("windows", "Click", ToolResult(success=True, content="clicked"))
-
-    agent = AgentOrchestrator(config, eventbus, llm, mcp, killswitch, perception=perception)
-    holder["agent"] = agent
-    agent.ui_detector = spy
-    agent.current_instruction = "click the OK button"
-    agent.history = [{"role": "system", "content": "sys"}]
-    return agent
-
-
-@pytest.mark.asyncio
-async def test_lazy_mode_appends_som_image_after_desktop_interact(
-    config, eventbus, killswitch, monkeypatch
-):
-    """Lazy mode: the SoM-annotated image is appended to history right after
-    the DesktopInteract tool result, so the model sees the markers."""
-    agent = _som_followup_agent(
-        config, eventbus, killswitch, monkeypatch,
-        annotations=[
-            {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
-        ],
-    )
-
-    await agent._think_and_act()
-
-    roles = [m["role"] for m in agent.history]
-    assert roles == ["system", "assistant", "tool", "user", "assistant"]
-    content = agent.history[3]["content"]
-    assert isinstance(content, list)
-    assert any(item.get("type") == "image_url" for item in content)
-    text = next(item["text"] for item in content if item.get("type") == "text")
-    assert "[1]" in text
-
-
-@pytest.mark.asyncio
-async def test_eager_mode_does_not_append_som_followup(
-    config, eventbus, killswitch, monkeypatch
-):
-    """Eager mode already sends the annotated image with every perception, so
-    DesktopInteract must not append a duplicate follow-up message."""
-    config.ui_detector.lazy = False
-    agent = _som_followup_agent(
-        config, eventbus, killswitch, monkeypatch,
-        annotations=[
-            {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9, "normalized": True},
-        ],
-    )
-
-    await agent._think_and_act()
-
-    roles = [m["role"] for m in agent.history]
-    assert roles == ["system", "assistant", "tool", "assistant"]
-
-
-@pytest.mark.asyncio
-async def test_no_som_followup_when_detection_empty(
-    config, eventbus, killswitch, monkeypatch
-):
-    """No annotations -> no follow-up image message."""
-    agent = _som_followup_agent(
-        config, eventbus, killswitch, monkeypatch, annotations=[],
-    )
-
-    await agent._think_and_act()
-
-    roles = [m["role"] for m in agent.history]
-    assert roles == ["system", "assistant", "tool", "assistant"]
 
 
 @pytest.mark.asyncio
@@ -2632,106 +2563,6 @@ async def test_windows_loc_passes_through_without_dimensions(config, eventbus, k
 
 
 # ---------------------------------------------------------------------------
-# DesktopInteract target mode (LLM-written pointing query + verifier auto-pick)
-# ---------------------------------------------------------------------------
-
-def _candidate(label: int, x: float, y: float, verify_score: float, verdict: str = "pass") -> dict[str, Any]:
-    return {
-        "label": label,
-        "center_x": x,
-        "center_y": y,
-        "score": verify_score,
-        "verify_score": verify_score,
-        "verdict": verdict,
-        "normalized": True,
-    }
-
-
-def _perception_with_candidates(cands: list[dict[str, Any]]) -> Perception:
-    return Perception(
-        screenshot_path=Path("/tmp/test.jpg"),
-        description="test",
-        ocr_text="",
-        ui_tree={},
-        som_annotations=cands,
-        screen_width=1000,
-        screen_height=1000,
-    )
-
-
-@pytest.mark.asyncio
-async def test_desktop_interact_target_mode_auto_executes_confident(config, eventbus, killswitch):
-    mcp = FakeMCP()
-    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
-    agent._last_perception = _perception_with_candidates([
-        _candidate(1, 0.5, 0.5, 0.90),
-        _candidate(2, 0.2, 0.2, 0.70),
-    ])
-
-    result = await agent._desktop_interact_impl(action="click", target="发送按钮")
-
-    assert "OK" in result
-    server, tool, args = mcp.calls[-1]
-    assert (server, tool) == ("windows", "Click")
-    assert args["loc"] == [500, 500]
-
-
-@pytest.mark.asyncio
-async def test_desktop_interact_target_mode_ambiguous_returns_candidates(config, eventbus, killswitch):
-    mcp = FakeMCP()
-    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
-    agent._last_perception = _perception_with_candidates([
-        _candidate(1, 0.5, 0.5, 0.80),
-        _candidate(2, 0.2, 0.2, 0.77),
-    ])
-
-    result = await agent._desktop_interact_impl(action="click", target="按钮")
-
-    assert result.startswith("[ambiguous]")
-    assert "label" in result
-    assert not mcp.calls
-    assert agent._pending_som_followup is not None
-
-
-@pytest.mark.asyncio
-async def test_desktop_interact_target_mode_verdict_dominance(config, eventbus, killswitch):
-    # pass beats uncertain even when the scores are within the margin.
-    mcp = FakeMCP()
-    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
-    agent._last_perception = _perception_with_candidates([
-        _candidate(1, 0.5, 0.5, 0.88, verdict="pass"),
-        _candidate(2, 0.2, 0.2, 0.86, verdict="uncertain"),
-    ])
-
-    result = await agent._desktop_interact_impl(action="click", target="按钮")
-
-    assert "OK" in result
-    assert mcp.calls[-1][2]["loc"] == [500, 500]
-
-
-@pytest.mark.asyncio
-async def test_desktop_interact_target_mode_no_candidates(config, eventbus, killswitch):
-    mcp = FakeMCP()
-    agent = AgentOrchestrator(config, eventbus, FakeLLM(), mcp, killswitch)
-    agent._last_perception = _perception_with_candidates([])
-
-    result = await agent._desktop_interact_impl(action="click", target="不存在的元素")
-
-    assert result.startswith("[error]")
-    assert "target" in result
-    assert not mcp.calls
-    assert agent._pending_som_followup is not None
-
-
-def test_desktop_interact_schema_requires_only_action():
-    from agent.tools import DESKTOP_INTERACT_SCHEMA
-
-    assert DESKTOP_INTERACT_SCHEMA["required"] == ["action"]
-    assert "target" in DESKTOP_INTERACT_SCHEMA["properties"]
-    assert "label" in DESKTOP_INTERACT_SCHEMA["properties"]
-
-
-# ---------------------------------------------------------------------------
 # PreviewPoints (coordinate preview before raw-coordinate clicking)
 # ---------------------------------------------------------------------------
 
@@ -2751,6 +2582,14 @@ def _perception_with_real_screenshot(tmp_path: Path) -> Perception:
         screenshot_width=200,
         screenshot_height=200,
     )
+
+
+def test_desktop_interact_schema_is_label_only():
+    from agent.tools import DESKTOP_INTERACT_SCHEMA
+
+    assert "target" not in DESKTOP_INTERACT_SCHEMA["properties"]
+    assert "label" in DESKTOP_INTERACT_SCHEMA["properties"]
+    assert DESKTOP_INTERACT_SCHEMA["required"] == ["label"]
 
 
 @pytest.mark.asyncio

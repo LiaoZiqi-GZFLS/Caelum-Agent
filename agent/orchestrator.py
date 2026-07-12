@@ -76,11 +76,6 @@ _STALE_LABEL_RE = re.compile(
     r"Label \d+ out of range|Failed to find element with label", re.IGNORECASE
 )
 
-# DesktopInteract target mode: if the top two verified candidates share a
-# verdict and their scores differ by less than this, do not guess — ask the
-# model to disambiguate by label.
-AMBIGUITY_SCORE_MARGIN = 0.1
-
 # Local function tools that must pass the security guard before execution.
 # Formula tools (cloud-side) and the other local tools are intentionally
 # ungated: the former cannot touch the machine, the latter are the agent's
@@ -219,12 +214,6 @@ class AgentOrchestrator:
         # sys.stdin.isatty(); piped/one-shot scripted runs get False so the
         # system prompt can steer the model away from human-in-the-loop tools.
         self._interactive: bool = True
-        # Lazy-mode SoM follow-up: _desktop_interact_impl stashes the vision
-        # perception it refreshed here; _think_and_act appends its annotated
-        # screenshot to history right after the tool result so the model can
-        # see the markers it is choosing among (main-loop perceptions carry no
-        # SoM in lazy mode). Cleared after each append and at task start.
-        self._pending_som_followup: Any | None = None
         # PreviewPoints: the tool stashes (annotated_path, points) here;
         # _think_and_act appends the marked screenshot to history right after
         # the tool result so the model can verify/adjust its coordinate guess
@@ -419,82 +408,45 @@ class AgentOrchestrator:
 
     async def _desktop_interact_impl(
         self,
-        action: str,
-        target: str | None = None,
         label: int | None = None,
+        action: str = "click",
         text: str | None = None,
     ) -> str:
-        """Locate a UI element with GUI-Actor pointing and execute the action.
+        """Execute an action on a YOLO-annotated element by its marker label.
 
-        Preferred call style is ``target=<short visual description>``: the
-        description is handed to GUI-Actor as the pointing query, the verifier
-        re-ranks the top-k candidates, and the best one is executed right away.
-        When the top two candidates tie (same verdict, scores within
-        AMBIGUITY_SCORE_MARGIN), no guess is made: the annotated screenshot is
-        stashed and the model is asked to retry with ``label=<number>``.
-        ``label`` without ``target`` keeps the legacy marker-picking behavior.
+        Labels come from the latest perception's SoM annotations — the
+        numbered red boxes on the annotated screenshot the model just saw.
+        No detection pass runs here: the label space is exactly what the
+        last perception produced (YOLO runs automatically on UIA-less
+        frames, and ZoomRegion produces its own annotated view).
         """
-        # Refresh SoM from the latest screenshot so candidates map to the
-        # current screen. This is the single on-demand vision entry point; in
-        # lazy mode it is also what triggers model loading on first use. The
-        # pointing query is the model's target description when given — far
-        # more precise than the whole task instruction.
-        query = (target or "").strip() or self.current_instruction
-        if self.ui_detector is not None and self.config.ui_detector.enabled:
-            self._last_perception = await self.perception.perceive_with_vision(query)
-            # In lazy mode the main-loop perceptions carry no SoM annotations,
-            # so without this the model picks DesktopInteract labels blind.
-            # Stash the fresh vision perception; _think_and_act appends its
-            # annotated screenshot to history right after this tool's result.
-            if self.config.ui_detector.lazy:
-                self._pending_som_followup = self._last_perception
         perception = getattr(self, "_last_perception", None)
         if perception is None:
             return "[error] No perception data available. Run perception first."
-
         anns = perception.som_annotations
-        if label is not None:
-            # Explicit label: legacy marker picking (also the disambiguation
-            # path after an [ambiguous] response).
-            match = next((a for a in anns if a.get("label") == label), None)
-            if match is None:
-                available = [a.get("label") for a in anns]
-                return f"[error] SoM label {label} not found. Available labels: {available}"
-        else:
-            # Target mode: let the verifier's ranking pick, unless ambiguous.
-            if not anns:
-                self._pending_som_followup = perception
-                return (
-                    f"[error] No candidate passed verification for target "
-                    f"{query!r}. Look at the annotated screenshot, then retry "
-                    "DesktopInteract with a more specific visual description."
-                )
-            top = anns[0]
-            second = anns[1] if len(anns) > 1 else None
-            top_score = float(top.get("verify_score", top.get("score", 0.0)))
-            if second is not None and second.get("verdict") == top.get("verdict"):
-                second_score = float(second.get("verify_score", second.get("score", 0.0)))
-                if top_score - second_score < AMBIGUITY_SCORE_MARGIN:
-                    self._pending_som_followup = perception
-                    listing = "; ".join(
-                        f"label {a.get('label')} "
-                        f"(score {float(a.get('verify_score', a.get('score', 0.0))):.2f})"
-                        for a in anns
-                    )
-                    return (
-                        f"[ambiguous] Multiple candidates match {query!r}: {listing}. "
-                        "Look at the annotated screenshot and call DesktopInteract "
-                        "again with label=<the correct number>."
-                    )
-            match = top
+        if not anns:
+            return (
+                "[error] The latest perception has no YOLO annotations (the "
+                "UIA tree was usable, so no detection ran). Use a "
+                "windows__Snapshot label instead, or PreviewPoints for raw "
+                "coordinates."
+            )
+        if label is None:
+            available = [a.get("label") for a in anns]
+            return (
+                "[error] DesktopInteract requires label=<marker number> from "
+                f"the annotated screenshot. Available labels: {available}"
+            )
+        match = next((a for a in anns if a.get("label") == label), None)
+        if match is None:
+            available = [a.get("label") for a in anns]
+            return f"[error] SoM label {label} not found. Available labels: {available}"
 
         # Convert normalized [0,1] to screen pixel coordinates.
         sw = perception.screen_width or 1920
         sh = perception.screen_height or 1080
         screen_x = int(round(match.get("center_x", 0) * sw))
         screen_y = int(round(match.get("center_y", 0) * sh))
-
-        is_uncertain = match.get("verdict") == "uncertain"
 
         if action in ("click", "double_click", "right_click"):
             mcp_action = "Click"
@@ -516,10 +468,7 @@ class AgentOrchestrator:
                 return "[error] Task cancelled by kill switch."
             type_result = await self.mcp.call("windows", "Type", {"text": text or ""})
             if type_result.success:
-                msg = f"OK: typed text at ({screen_x}, {screen_y}) — {type_result.content[:200]}"
-                if is_uncertain:
-                    msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
-                return msg
+                return f"OK: typed text at ({screen_x}, {screen_y}) — {type_result.content[:200]}"
             return f"[error] {type_result.content}"
         elif action in ("scroll_down", "scroll_up"):
             direction = "down" if action == "scroll_down" else "up"
@@ -530,10 +479,7 @@ class AgentOrchestrator:
                 "direction": direction,
             })
             if scroll_result.success:
-                msg = f"OK: {action} at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}"
-                if is_uncertain:
-                    msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
-                return msg
+                return f"OK: {action} at ({screen_x}, {screen_y}) — {scroll_result.content[:200]}"
             return f"[error] {scroll_result.content}"
         else:
             return f"[error] Unknown action: {action}"
@@ -542,10 +488,7 @@ class AgentOrchestrator:
             return "[error] Task cancelled by kill switch."
         result = await self.mcp.call("windows", mcp_action, mcp_args)
         if result.success:
-            msg = f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
-            if is_uncertain:
-                msg = "[uncertain] " + msg + " (Verifier was unsure about this element; verify the result.)"
-            return msg
+            return f"OK: {action} at ({screen_x}, {screen_y}) — {result.content[:200]}"
         return f"[error] {result.content}"
 
     async def _upgrade_vision_impl(self) -> str:
@@ -585,18 +528,18 @@ class AgentOrchestrator:
             self._desktop_interact_impl,
             schema=DESKTOP_INTERACT_SCHEMA,
             description=(
-                "Interact with a UI element located by VISION: give target= a "
-                "short, concrete visual description (e.g. 'the red Send button "
-                "right of the message input') and the vision model points at it; "
-                "the best verified candidate is used automatically, or you get "
-                "an [ambiguous] reply with candidate labels to choose from via "
-                "label=. Works on ANY app, including ones whose UIA tree is "
-                "missing, empty, or inaccurate (Qt apps like WeChat/QQ, Electron "
-                "apps, games, custom-drawn controls). PREFER this over "
-                "windows__Click/Type whenever a SoM marker is visible on your "
-                "target, and fall back to it when windows__Snapshot shows no "
-                "usable element or label-based clicks land wrong. "
-                "Actions: click, double_click, right_click, type (needs text=), scroll_down/up."
+                "Interact with a UI element by its marker label: label=<number> "
+                "from the annotated screenshot (numbered red boxes on detected "
+                "elements). Works on ANY app, including ones whose UIA tree is "
+                "missing, empty, or inaccurate (Qt apps like WeChat/QQ, "
+                "Electron apps, games, custom-drawn controls) — on those "
+                "screens the annotated image is attached automatically. PREFER "
+                "this over raw coordinates whenever a marker sits on your "
+                "target, and use it when windows__Snapshot shows no usable "
+                "element or label-based clicks land wrong. When no marker fits "
+                "your target, use PreviewPoints for coordinate guesses. "
+                "Actions: click (default), double_click, right_click, type "
+                "(needs text=), scroll_down/up."
             ),
         )
 
@@ -758,9 +701,8 @@ class AgentOrchestrator:
                 )
             )
             text_parts.append(
-                "To interact with an element, call DesktopInteract(action=<action>, "
-                "target=<short visual description of the element>) — or with "
-                "label=<number> to pick a specific marker. "
+                "To interact with a marked element, call "
+                "DesktopInteract(label=<number>, action=<action>). "
                 "Actions: click, double_click, right_click, type (needs text=), scroll_down, scroll_up."
             )
 
@@ -797,53 +739,6 @@ class AgentOrchestrator:
             })
 
         return content
-
-    @staticmethod
-    def _format_som_followup(perception: Any) -> list[dict[str, Any]] | None:
-        """Build the lazy-mode SoM follow-up message for DesktopInteract.
-
-        DesktopInteract refreshes vision perception internally; in lazy mode
-        the main loop never sends the annotated image, so the model would pick
-        labels blind. This message — appended right after the tool result —
-        carries the annotated screenshot plus the label list so subsequent
-        DesktopInteract calls are visually grounded. Returns None when there
-        is nothing worth showing (no annotations or no readable image).
-        """
-        if not perception.som_annotations:
-            return None
-        image_path: Path | None = None
-        for candidate in (
-            perception.annotated_screenshot_path,
-            perception.screenshot_path,
-        ):
-            if candidate is not None and candidate.exists():
-                image_path = candidate
-                break
-        if image_path is None:
-            return None
-        try:
-            b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
-        except Exception:
-            return None
-        labels = "\n".join(
-            f"  [{a.get('label', '?')}] at ({a.get('center_x', 0):.3f}, "
-            f"{a.get('center_y', 0):.3f})"
-            for a in perception.som_annotations
-        )
-        return [
-            {
-                "type": "text",
-                "text": (
-                    "SoM-annotated screenshot from the DesktopInteract detection "
-                    "pass (numbered red markers = detected candidates):\n"
-                    f"{labels}\n"
-                    "Use these label numbers for subsequent DesktopInteract "
-                    "calls. Each call re-detects, so after the screen changes "
-                    "rely on the latest annotated image."
-                ),
-            },
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-        ]
 
     @staticmethod
     def _format_preview_followup(
@@ -1015,19 +910,15 @@ class AgentOrchestrator:
             "Use the provided tools to interact with the browser and desktop. "
             "Always explain your reasoning briefly before acting.\n\n"
             "## Working with the SoM (Set-of-Mark) screenshot\n"
-            "The screenshot contains numbered red circle markers on detected UI elements. "
-            "Each marker has a number (1, 2, 3, ...). To interact with an element:\n"
-            "- PREFERRED: DesktopInteract(action='click', target='<short visual description of "
-            "the element, e.g. \"the Send button right of the message input\">') — the vision "
-            "model locates it from your description and the best verified candidate is used "
-            "automatically. Write a concrete visual description, NOT the whole task.\n"
-            "- If the reply is [ambiguous] with candidate labels, look at the markers and "
-            "call DesktopInteract(action=..., label=N) to pick one.\n"
-            "- Use DesktopInteract(action='type', target='...', text='...') to type into an input field\n"
-            "- Use DesktopInteract(action='scroll_down', target='...') to scroll at an element\n"
+            "When the UI tree is unavailable (Qt/Electron/custom-drawn apps), "
+            "an annotated copy of the screenshot is attached: numbered red "
+            "boxes on detected UI elements. To interact with an element:\n"
+            "- PREFERRED when a marker sits on your target: "
+            "DesktopInteract(label=N, action='click') — actions: click, "
+            "double_click, right_click, type (needs text=), scroll_down/up.\n"
             "- For browser elements with refs (like e12), use playwright__browser_click(target='e12') instead.\n"
             "- For unmarked elements, use the raw MCP tools with explicit coordinates or refs.\n"
-            "- LAST RESORT — when neither UIA labels nor DesktopInteract can locate the target: "
+            "- LAST RESORT — when neither UIA labels nor DesktopInteract markers locate the target: "
             "PreviewPoints(points=[[x, y], ...]) draws your coordinate guesses as numbered markers "
             "on the screenshot and shows them back; adjust until a marker sits on the target, then "
             "click with windows__Click(loc=[x, y]).\n\n"
@@ -1041,9 +932,9 @@ class AgentOrchestrator:
             "which is often missing, empty, or inaccurate for Qt apps (WeChat/QQ), Electron apps, "
             "and custom-drawn controls. If Snapshot shows no element matching your target, its "
             "labels look wrong (clicking a label hits the wrong element), or a label expires "
-            "('out of range') after re-snapshotting, STOP fighting UIA and use "
-            "DesktopInteract(action=..., target='<visual description of your target>') instead — it is "
-            "vision-based and works on any app. If you cannot see inside the app at all (empty "
+            "('out of range') after re-snapshotting, STOP fighting UIA: on such screens the "
+            "annotated screenshot's numbered markers work on any app — pick the marker on your "
+            "target with DesktopInteract(label=N). If you cannot see inside the app at all (empty "
             "tree AND no clear screenshot), call CaptureWindow(title) to view it directly.\n\n"
             "## Working files\n"
             f"Save every intermediate or scratch file (page snapshots, scraped "
@@ -1089,7 +980,6 @@ class AgentOrchestrator:
         ]
         self._recent_hashes.clear()
         self._last_perception: Any | None = None
-        self._pending_som_followup = None
         self._pending_preview = None
         self._pending_media_parts = []
         self._upgrade_requested = False
@@ -1335,13 +1225,10 @@ class AgentOrchestrator:
 
             tool_results = await self._execute_tool_calls(tool_calls)
             self.history.extend(tool_results)
-            # Post-tool user turn, merging two follow-up sources into a single
+            # Post-tool user turn, merging follow-up sources into a single
             # message (Kimi rejects consecutive same-role turns):
             # 1. ViewMedia ms:// media parts — the model sees the actual media.
-            # 2. Lazy-mode SoM follow-up — the annotated screenshot from the
-            #    DesktopInteract detection pass (stashed by
-            #    _desktop_interact_impl), so the model sees the markers it is
-            #    choosing among.
+            # 2. UpgradeVision fresh perception / PreviewPoints markers.
             followup_parts: list[dict[str, Any]] = []
             if self._pending_media_parts:
                 followup_parts.extend(self._pending_media_parts)
@@ -1367,12 +1254,6 @@ class AgentOrchestrator:
                     "text": "[UpgradeVision] The perception above was captured "
                             "at the original resolution.",
                 })
-            som_followup = self._pending_som_followup
-            if som_followup is not None:
-                self._pending_som_followup = None
-                som_content = self._format_som_followup(som_followup)
-                if som_content is not None:
-                    followup_parts.extend(som_content)
             preview = self._pending_preview
             if preview is not None:
                 self._pending_preview = None
