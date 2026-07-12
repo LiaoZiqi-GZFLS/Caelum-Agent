@@ -54,6 +54,34 @@ class YoloDetector:
 - 检测输入 = 压缩后的模型可见图（1440p），框与标注图像素一致，无需二次换算
 - 单元测试全 mock ultralytics（FakeYoloDetector 喂假框）
 
+## 区域放大感知：ZoomRegion 工具
+
+某个区域看不清时，模型可以某点为中心截取**原图**区域并跑全套感知：
+
+- 参数：`label=N`（YOLO 标注号）或 `loc=[x,y]`（当前模型可见图坐标）二选一；
+  `size` 档位 `small` / `medium` / `large` = 原图 480 / 960 / 1680 像素边长
+  （方形，越界自动平移回屏幕内），由模型按需要自选
+- 用 **mss 截全屏原图后裁剪**——不走 windows-mcp `Screenshot`/`Snapshot`，
+  避免作废模型手上可能仍要使用的 UIA label
+- 区域全套感知：YOLO 必跑（无论 UIA 是否可用）+ OCR（区域图）
+  + UIA 树复用最近一次感知结果、按 bbox 与区域相交过滤（不重新 Snapshot）
+- 返回区域双图（原图 + 标注图）+ 文字描述；区域感知覆盖 `_last_perception`
+- **坐标换算自动化**：`Perception` 增加 `image_origin_x/y`（原图像素，全屏为 0,0），
+  `_rescale_loc_args` 与 DesktopInteract 的 label→坐标换算统一为
+  `屏幕 = origin + 图坐标 × 区域原图尺寸 / 图尺寸`；模型始终只在"它看到的图"
+  坐标系里给坐标，零换算负担
+- 下一轮常规 perceive() 自然回到全屏（origin 归零）
+
+## 邻近标签：NearbyLabels 工具
+
+模型认为没有标注命中目标点时，主动查询目标点附近的标注：
+
+- 参数：`label=N`（以该标注中心为查询点）或 `loc=[x,y]` 二选一；`k` 默认 6
+- 返回按距离升序的 k 个标注：label、中心坐标（当前图坐标系）、距离
+- 模型随后 `DesktopInteract(label=M)` 点最近的，或拿邻近标注坐标去
+  PreviewPoints 反复标注精化
+- 当前帧无 YOLO 标注 → `[error]` 提示改用 Snapshot label / ZoomRegion / PreviewPoints
+
 ## 感知流程（perceive）
 
 ```
@@ -109,6 +137,8 @@ yolo:
 ```
 UIA label (windows__Snapshot/Click)
   → YOLO 自动标注 + DesktopInteract(label=N)   ← 本次替换
+  → NearbyLabels（查目标点附近的标注）           ← 新增
+  → ZoomRegion（区域原图全套感知，坐标自动换算）  ← 新增
   → UpgradeVision（原画）/ CaptureWindow
   → PreviewPoints 反复标注视觉伺服              ← 兜底，不动
 ```
@@ -128,5 +158,7 @@ UIA label (windows__Snapshot/Click)
 - YOLO 对壁纸花纹有误检框（spike 实测），Kimi 看图可忽略；conf 可调
 - `docs/designs/desktop_agent_v8.agent.final.md`（设计 spec）的同步
   更新不在本次范围，另行处理；CLAUDE.md 本次更新
-- 坐标契约不变：模型给压缩图坐标系，orchestrator `_rescale_loc_args`
-  换算屏幕像素
+- 坐标契约不变：模型给当前可见图坐标系，orchestrator `_rescale_loc_args`
+  换算屏幕像素（ZoomRegion 引入 origin 偏移后换算规则不变，仅多一项偏移）
+- ZoomRegion 的 UIA 过滤基于最近一次感知的树，区域感知不刷新 UIA label
+  空间（模型手上的 Snapshot label 仍然有效）
