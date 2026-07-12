@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import json
 import logging
@@ -27,6 +28,7 @@ from agent.memory import MemoryStore
 from agent.perception import PerceptionModule
 from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
+from agent.self_window import register_self_window
 from agent.skills import SkillLearner
 from agent.state_machine import AgentStateMachine
 from agent.task_list import TaskList, register_task_list
@@ -228,6 +230,7 @@ class AgentOrchestrator:
         # task-end finally block fire-and-forgets their remote sweeps.
         self.file_extractor: Any | None = None
         self.media_uploader: Any | None = None
+        self.self_window: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
     def set_human_confirmation_callback(self, callback: Any) -> None:
@@ -308,6 +311,10 @@ class AgentOrchestrator:
             self.config.cache_dir_absolute(),
             uploader=self.media_uploader,
         )
+        self.self_window = register_self_window(self.llm)
+        # Guardrail: a hidden console must never outlive the process, or the
+        # user is left with an invisible agent they cannot see or stop.
+        atexit.register(self._restore_console)
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
 
@@ -583,6 +590,9 @@ class AgentOrchestrator:
                 "[unavailable] No human is present to answer. End the task and "
                 "explain what the user must do manually."
             )
+        # The human is about to be asked something: the console must be visible
+        # even if the model hid it with SelfWindow earlier.
+        self._restore_console()
         await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
         try:
             answer = callback(question, options)
@@ -754,6 +764,20 @@ class AgentOrchestrator:
             self._recent_hashes.append(ui_hash)
         return len(self._recent_hashes) >= self.config.kill_switch.same_ui_loop_threshold
 
+    def _restore_console(self) -> None:
+        """Guardrail: make the agent's own console visible again.
+
+        Called when a task ends, before asking the human anything, and via
+        atexit — hiding the console (SelfWindow) must always be reversible.
+        """
+        win = self.self_window
+        if win is None:
+            return
+        try:
+            win.show()
+        except Exception:
+            pass
+
     async def run_task(self, user_input: str, task_id: str | None = None) -> str:
         """Run one task and archive its history to data/archives/ on exit."""
         tid = task_id or "task-0"
@@ -772,6 +796,8 @@ class AgentOrchestrator:
                 )
             except Exception as exc:  # archiving must never break the agent
                 logger.warning("Failed to archive history: %s", exc)
+            # Guardrail: never leave the console hidden after a task.
+            self._restore_console()
             # Task-end quota sweep: ms:// media references are only valid for
             # this task's history, and file-extract leftovers are throwaway,
             # so all remote uploads are stale once the task is done.

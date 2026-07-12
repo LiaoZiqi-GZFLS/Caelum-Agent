@@ -2423,3 +2423,60 @@ async def test_new_task_resets_vision_upgrade(config, eventbus, killswitch):
     await agent.run_task("fresh task")
 
     assert perception.max_size_override is None
+
+
+# ---------------------------------------------------------------------------
+# SelfWindow guardrails (console auto-restore)
+# ---------------------------------------------------------------------------
+
+class _FakeSelfWindow:
+    def __init__(self) -> None:
+        self.show_calls = 0
+
+    def show(self) -> dict[str, Any]:
+        self.show_calls += 1
+        return {"state": "normal"}
+
+
+@pytest.mark.asyncio
+async def test_self_window_registered_on_initialize(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.initialize()
+
+    assert agent.self_window is not None
+    assert "SelfWindow" in agent.llm.tool_names()
+
+
+@pytest.mark.asyncio
+async def test_self_window_restored_on_task_end(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("done.")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    fake = _FakeSelfWindow()
+    agent.self_window = fake
+
+    await agent.run_task("x")
+
+    assert fake.show_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_request_human_help_restores_console_first(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    fake = _FakeSelfWindow()
+    agent.self_window = fake
+    agent.set_human_question_callback(lambda q, o: "ok")
+    await agent.state.transition("PLANNING", task_id="t1")
+    await agent.state.transition("EXECUTING", task_id="t1")
+
+    await agent._request_human_help_impl("q", ["a", "b"])
+
+    assert fake.show_calls >= 1
