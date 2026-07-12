@@ -336,6 +336,17 @@ class PerceptionModule:
                     "cls_use_dml": True,
                     "rec_use_dml": True,
                 }
+            # rapidocr's OrtInferSession logger installs its own DEBUG-level
+            # StreamHandler on the FIRST get_logger() call (lru-cached) and
+            # prints one INFO line per model during construction. Prime the
+            # cache and raise the level BEFORE building, so even the first
+            # construction is quiet; the DML-unavailable CPU-fallback WARNING
+            # stays visible.
+            from rapidocr_onnxruntime.utils.logger import (
+                get_logger as _rapidocr_get_logger,
+            )
+
+            _rapidocr_get_logger("OrtInferSession").setLevel(logging.WARNING)
             self._ocr = RapidOCR(**ocr_kwargs)
         # Inverse-DPI normalization with a 1080p floor: Windows display
         # scaling enlarges text physically (125%+), which hurts RapidOCR, so

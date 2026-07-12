@@ -449,3 +449,24 @@ def test_run_ocr_no_gpu_flags_when_dml_disabled(
     module._run_ocr(Image.new("RGB", (100, 100)))
 
     assert _SpyRapidOCR.instances[0].kwargs == {}
+
+
+def test_run_ocr_silences_ort_session_info_logs(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rapidocr's OrtInferSession logger installs its own DEBUG StreamHandler
+    and prints one INFO line per model on construction; _run_ocr must raise
+    it to WARNING (keeping the DML-unavailable fallback warning visible)."""
+    import logging
+
+    _SpyRapidOCR.instances.clear()
+    monkeypatch.setattr("rapidocr_onnxruntime.RapidOCR", _SpyRapidOCR)
+    # Simulate rapidocr's own lru-cached configuration having run.
+    monkeypatch.setattr(
+        logging.getLogger("OrtInferSession"), "level", logging.DEBUG
+    )
+    module = PerceptionModule(config)
+
+    module._run_ocr(Image.new("RGB", (100, 100)))
+
+    assert logging.getLogger("OrtInferSession").level == logging.WARNING
