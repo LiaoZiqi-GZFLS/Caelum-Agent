@@ -43,6 +43,12 @@ _NOISE_PATTERNS = [
     re.compile(r"UI services may be loading", re.IGNORECASE),
 ]
 
+# Python traceback framing: a block starts at this header, its frames are
+# indented, and it ends at the first non-indented line (the "ErrorType: msg").
+_TB_HEADER = "Traceback (most recent call last):"
+# Safety valve against an unterminated block growing without bound.
+_MAX_TB_LINES = 500
+
 
 class _UpstreamNoiseFilter:
     """Line-buffered stderr wrapper that drops known windows-mcp upstream noise.
@@ -55,6 +61,12 @@ class _UpstreamNoiseFilter:
     ``errlog`` for the windows client: matching lines are counted and dropped,
     everything else is forwarded unchanged, and a periodic summary is logged so
     the user knows the upstream issue is still present.
+
+    Suppression is traceback-aware: a ``Traceback (most recent call last):``
+    block is buffered until its final error line, then dropped *as a whole* if
+    any line in it matched a noise pattern — otherwise the user would see an
+    orphaned traceback skeleton (header + ``^^^^^`` carets) whose error lines
+    were filtered out. Chained tracebacks are judged block by block.
     """
 
     SUMMARY_INTERVAL = 60.0  # seconds between "suppressed N lines" summaries
@@ -70,6 +82,10 @@ class _UpstreamNoiseFilter:
         self._suppressed = 0
         self._last_report = time.monotonic()
         self._lock = threading.Lock()
+        # Pending traceback block (None when not inside one) and whether any
+        # line in it matched a noise pattern.
+        self._tb_buffer: list[str] | None = None
+        self._tb_noise = False
         # OS pipe backing fileno(); created lazily so unit tests (which drive
         # write()/flush() directly) pay no cost and spawn no thread.
         self._read_fd: int | None = None
@@ -99,12 +115,48 @@ class _UpstreamNoiseFilter:
             self._buf += s
             while "\n" in self._buf:
                 line, self._buf = self._buf.split("\n", 1)
-                if self._is_noise(line):
-                    self._suppressed += 1
-                else:
-                    self._downstream.write(line + "\n")
+                self._process_line(line)
             self._maybe_report()
         return len(s)
+
+    def _process_line(self, line: str) -> None:
+        if self._tb_buffer is not None:
+            self._tb_buffer.append(line)
+            if self._is_noise(line):
+                self._tb_noise = True
+            # A new header means the previous block never got its final error
+            # line (truncated/interleaved output): keep buffering — chained
+            # blocks share one buffer and are judged together by the last
+            # block's final line.
+            if not line.startswith(_TB_HEADER) and (
+                self._is_tb_final(line) or len(self._tb_buffer) >= _MAX_TB_LINES
+            ):
+                self._resolve_traceback()
+            return
+        if line.startswith(_TB_HEADER):
+            self._tb_buffer = [line]
+            self._tb_noise = False
+            return
+        if self._is_noise(line):
+            self._suppressed += 1
+        else:
+            self._downstream.write(line + "\n")
+
+    @staticmethod
+    def _is_tb_final(line: str) -> bool:
+        # Traceback frames are indented; the first non-indented line after the
+        # header is the final "ErrorType: message" line that closes the block.
+        return bool(line) and line[0] not in " \t"
+
+    def _resolve_traceback(self) -> None:
+        lines = self._tb_buffer or []
+        if self._tb_noise:
+            self._suppressed += len(lines)
+        else:
+            for line in lines:
+                self._downstream.write(line + "\n")
+        self._tb_buffer = None
+        self._tb_noise = False
 
     def flush(self) -> None:
         # Keep any partial line buffered until the next write completes it, so
@@ -158,6 +210,11 @@ class _UpstreamNoiseFilter:
 
     def close(self) -> None:
         """Release the backing pipe (test/shutdown hygiene); optional in prod."""
+        with self._lock:
+            # Resolve a traceback block that never got its final error line so
+            # its skeleton is not silently stuck in the buffer.
+            if self._tb_buffer is not None:
+                self._resolve_traceback()
         write_fd = self._write_fd
         read_fd = self._read_fd
         self._write_fd = None

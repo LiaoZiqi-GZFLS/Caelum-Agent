@@ -192,6 +192,85 @@ def test_upstream_noise_filter_periodic_summary(caplog):
     assert filt._suppressed == 0
 
 
+def test_upstream_noise_filter_suppresses_whole_traceback():
+    filt, downstream = _make_filter()
+    filt.write("Traceback (most recent call last):\n")
+    filt.write('  File "tree/service.py", line 598, in walk\n')
+    filt.write("    control_type=tree_node.control_type,\n")
+    filt.write("                ^^^^^^^^^\n")
+    filt.write("UnboundLocalError: cannot access local variable 'tree_node'\n")
+    filt.flush()
+
+    # The whole block is dropped — no orphaned "Traceback" header or carets.
+    assert downstream.getvalue() == ""
+    assert filt._suppressed == 5
+
+
+def test_upstream_noise_filter_passes_real_traceback():
+    filt, downstream = _make_filter()
+    tb = (
+        "Traceback (most recent call last):\n"
+        '  File "app.py", line 10, in main\n'
+        "    do_thing()\n"
+        "ValueError: bad arg\n"
+    )
+    filt.write(tb)
+    filt.flush()
+
+    assert downstream.getvalue() == tb
+    assert filt._suppressed == 0
+
+
+def test_upstream_noise_filter_traceback_split_across_writes():
+    filt, downstream = _make_filter()
+    filt.write("Traceback (most recent call last):\n  File \"x.py\"")
+    filt.write(", line 1\n    tree_node\n")
+    filt.write("UnboundLocalError: tree_node\n")
+    filt.flush()
+
+    assert downstream.getvalue() == ""
+    assert filt._suppressed == 4
+
+
+def test_upstream_noise_filter_pending_traceback_resolved_on_close():
+    filt, downstream = _make_filter()
+    filt.write("Traceback (most recent call last):\n")
+    filt.write("    tree_node\n")
+    # No final error line yet; close() must not leak the skeleton nor hang.
+    filt.close()
+
+    assert downstream.getvalue() == ""
+    assert filt._suppressed == 2
+
+
+def test_upstream_noise_filter_chained_traceback_resolves_each_block():
+    filt, downstream = _make_filter()
+    filt.write("Traceback (most recent call last):\n")
+    filt.write("    walk()\n")
+    filt.write("RuntimeError: boom\n")
+    filt.write("\n")
+    filt.write(
+        "During handling of the above exception, another exception occurred:\n"
+    )
+    filt.write("\n")
+    filt.write("Traceback (most recent call last):\n")
+    filt.write("    tree_node\n")
+    filt.write("UnboundLocalError: tree_node\n")
+    filt.flush()
+
+    # Each block is judged independently: block 1 (real RuntimeError) passes,
+    # block 2 (upstream tree_node noise) is suppressed as a whole.
+    assert downstream.getvalue() == (
+        "Traceback (most recent call last):\n"
+        "    walk()\n"
+        "RuntimeError: boom\n"
+        "\n"
+        "During handling of the above exception, another exception occurred:\n"
+        "\n"
+    )
+    assert filt._suppressed == 3
+
+
 def test_upstream_noise_filter_fileno_created_lazily():
     filt, _ = _make_filter()
     try:
