@@ -18,6 +18,7 @@ import openai
 from agent.config import Config
 from agent.content_writer import register_draft_content
 from agent.file_reader import register_read_document
+from agent.focus_guard import register_focus_guard
 from agent.history_archive import HistoryArchiver
 from agent.image_gen import register_generate_image
 from agent.kill_switch import KillSwitch
@@ -231,6 +232,7 @@ class AgentOrchestrator:
         self.file_extractor: Any | None = None
         self.media_uploader: Any | None = None
         self.self_window: Any | None = None
+        self.focus_guard: Any | None = None
         self.eventbus.subscribe("KillSwitchTriggered", self._on_kill_switch)
 
     def set_human_confirmation_callback(self, callback: Any) -> None:
@@ -315,6 +317,7 @@ class AgentOrchestrator:
         # Guardrail: a hidden console must never outlive the process, or the
         # user is left with an invisible agent they cannot see or stop.
         atexit.register(self._restore_console)
+        self.focus_guard = register_focus_guard(self.llm)
         if self.config.ui_detector.enabled:
             from ui_detector import UIDetector
 
@@ -796,8 +799,14 @@ class AgentOrchestrator:
                 )
             except Exception as exc:  # archiving must never break the agent
                 logger.warning("Failed to archive history: %s", exc)
-            # Guardrail: never leave the console hidden after a task.
+            # Guardrails: never leave the console hidden or the focus watchdog
+            # running after a task — it would fight the user for focus.
             self._restore_console()
+            if self.focus_guard is not None:
+                try:
+                    await self.focus_guard.stop()
+                except Exception as exc:
+                    logger.debug("Failed to stop focus guard: %s", exc)
             # Task-end quota sweep: ms:// media references are only valid for
             # this task's history, and file-extract leftovers are throwaway,
             # so all remote uploads are stale once the task is done.

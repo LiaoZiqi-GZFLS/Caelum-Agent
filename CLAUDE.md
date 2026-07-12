@@ -86,6 +86,8 @@ desktop-agent/
 │   ├── task_list.py           # Model-managed task list tool for long-task coherence
 │   ├── history_archive.py     # Flight recorder: per-task JSONL history archive
 │   ├── choice_menu.py         # msvcrt keyboard choice menu (RequestHumanHelp)
+│   ├── self_window.py         # Own console window hide/show (SelfWindow)
+│   ├── focus_guard.py         # Foreground focus watchdog (FocusGuard)
 │   └── cli_presenter.py       # CLI output presenter
 ├── ui_detector/               # GUI-Actor-3B model, verifier, SoM
 │   ├── __init__.py
@@ -147,6 +149,8 @@ Beyond MCP tools, the orchestrator registers these local tools on the LLM client
 | `ReadDocument` | `file_reader.py` | Binary docs (PDF/DOCX/PPTX/EPUB/XLSX) via Kimi Files API `file-extract`, paginated, sha256-cached; returns a `doc:<sha8>` ref |
 | `DraftContent` | `content_writer.py` | Writer subagent for long-form content (persona + Partial Mode prefill), writes `data/cache/drafts/*.md`; accepts a `doc_ref` to write from a document without loading it into main context |
 | `ViewMedia` | `media.py` | Local images/videos uploaded with `purpose=image`/`video` and rendered natively via `ms://` refs. Images >4K downscaled to 3840x2160; videos re-encoded to 15fps/1080p (ffmpeg from PATH, falling back to the bundled `imageio-ffmpeg` binary); source files >300MB rejected up front, 100MB cap after compression |
+| `SelfWindow` | `self_window.py` | Hide/show/minimize/status for the agent's OWN console window (`GetConsoleWindow` + `ShowWindow`) so it stays out of screenshots and the UIA tree during desktop operation; auto-restored at task end, before RequestHumanHelp, and via atexit |
+| `FocusGuard` | `focus_guard.py` | In-process asyncio watchdog (no subprocess) that pins the foreground to a target window, polling ~0.4s and re-focusing on drift via the AttachThreadInput recipe (plain `SetForegroundWindow` is blocked when a fullscreen game holds focus — see `scripts/spike_focus_guard.py`); stopped automatically at task end |
 | `GenerateImage` | `image_gen.py` | Image-generation subagent: LLM writes SVG → CairoSVG renders PNG → uploaded for LLM visual self-review against the requirement → revises with feedback, max 5 rounds; returns `data/cache/generated/*.png` path (registered only when media upload is enabled; CairoSVG needs the native cairo library) |
 | `CaptureWindow` | `window_capture.py` | Capture a window by title via `PrintWindow(PW_RENDERFULLCONTENT)` and show it to the model — works for occluded windows, Qt/DirectComposition apps with no UIA tree, and display-affinity filtered windows that mss misses (registered only when media upload is enabled) |
 

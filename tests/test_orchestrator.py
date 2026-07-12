@@ -2480,3 +2480,43 @@ async def test_request_human_help_restores_console_first(config, eventbus, kills
     await agent._request_human_help_impl("q", ["a", "b"])
 
     assert fake.show_calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# FocusGuard guardrails (watchdog auto-stop)
+# ---------------------------------------------------------------------------
+
+class _FakeFocusGuard:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    async def stop(self) -> str:
+        self.stop_calls += 1
+        return "[focus_guard] stopped."
+
+
+@pytest.mark.asyncio
+async def test_focus_guard_registered_on_initialize(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM(), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+
+    await agent.initialize()
+
+    assert agent.focus_guard is not None
+    assert "FocusGuard" in agent.llm.tool_names()
+
+
+@pytest.mark.asyncio
+async def test_focus_guard_stopped_on_task_end(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("done.")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    fake = _FakeFocusGuard()
+    agent.focus_guard = fake
+
+    await agent.run_task("x")
+
+    assert fake.stop_calls >= 1
