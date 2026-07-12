@@ -36,6 +36,7 @@ from agent.tools import (
     REQUEST_HUMAN_HELP_SCHEMA,
     register_all,
 )
+from agent.window_capture import register_capture_window
 from eventbus import EventBus
 from eventbus.events import (
     KillSwitchTriggered,
@@ -291,6 +292,12 @@ class AgentOrchestrator:
         # GenerateImage reuses the media uploader for its visual self-review;
         # it is unavailable (not registered) when media upload is disabled.
         register_generate_image(
+            self.llm,
+            self.config.llm,
+            self.config.cache_dir_absolute(),
+            uploader=self.media_uploader,
+        )
+        register_capture_window(
             self.llm,
             self.config.llm,
             self.config.cache_dir_absolute(),
