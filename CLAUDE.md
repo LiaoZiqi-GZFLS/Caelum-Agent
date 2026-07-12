@@ -77,8 +77,16 @@ desktop-agent/
 │   ├── snapshot_parser.py     # Accessibility tree parsers
 │   ├── logging_config.py      # Structured logging
 │   ├── memory.py              # SQLite + ChromaDB store
+│   ├── kimi_memory.py         # Kimi memory Formula tool client
 │   ├── reflection.py          # Reflection engine
-│   └── skills.py              # AutoSkill learning (SKILL.md generation/merge)
+│   ├── skills.py              # AutoSkill learning (SKILL.md generation/merge)
+│   ├── file_reader.py         # ReadDocument: binary docs via Kimi Files API (file-extract)
+│   ├── media.py               # ViewMedia: image/video upload with native ms:// rendering
+│   ├── content_writer.py      # DraftContent: writer subagent tool (Partial Mode prefill)
+│   ├── task_list.py           # Model-managed task list tool for long-task coherence
+│   ├── history_archive.py     # Flight recorder: per-task JSONL history archive
+│   ├── choice_menu.py         # msvcrt keyboard choice menu (RequestHumanHelp)
+│   └── cli_presenter.py       # CLI output presenter
 ├── ui_detector/               # GUI-Actor-3B model, verifier, SoM
 │   ├── __init__.py
 │   ├── detector.py
@@ -91,7 +99,7 @@ desktop-agent/
 │   └── events.py
 ├── skills/                    # SKILL.md skill library (auto-learned skills go in skills/learned/)
 ├── tests/                     # pytest unit tests
-└── data/                      # Local data (memory.db, cache/)
+└── data/                      # Local data (memory.db, cache/, archives/)
 ```
 
 ## Configuration
@@ -118,10 +126,30 @@ Key sections in `config.yaml`:
 - `llm`: Kimi API key, model (`kimi-k2.6`), optional `reasoning_effort`, and which Formula tools to register.
   - Do **not** set `reasoning_effort="none"` for `kimi-k2.6`; omit it or use `minimal/low/medium/high`.
   - `moonshot/code-runner:latest` (hyphen) is the correct URI and is available; the registered tool name is `code_runner` (underscore). The local `RestrictedCodeRunner` remains the default code execution backend; enable the Formula `code-runner` as an alternative if you prefer Kimi-side execution.
+  - `enable_file_extract` / `enable_media_upload`: toggle the ReadDocument / ViewMedia tools (both default true).
 - `mcp_servers`: commands and arguments for Playwright, Windows, and filesystem MCP servers.
 - `ui_detector`: GUI-Actor-3B model path, device, dtype, verifier settings.
 - `screenshot`: resolution, compression, and cropping strategy.
 - `security`: auto-execute, confirm, and destructive-operation approval levels.
+
+## Local function tools
+
+Beyond MCP tools, the orchestrator registers these local tools on the LLM client (`agent/`):
+
+| Tool | Module | Purpose |
+|------|--------|---------|
+| `CodeRunner` | `tools.py` | Sandboxed local Python; JavaScript only with `--yes`/`--yes-all` |
+| `DesktopInteract` | `orchestrator.py` | SoM label → GUI-Actor coordinates → click/type/scroll |
+| `CompleteTask` | `orchestrator.py` | Model-decided fast path: finish without verification |
+| `RequestHumanHelp` | `orchestrator.py` + `choice_menu.py` | Interactive TTY question with selectable options |
+| `UpdateTaskList` | `task_list.py` | Model-managed pending/in_progress/completed task list; self-clears when done |
+| `ReadDocument` | `file_reader.py` | Binary docs (PDF/DOCX/PPTX/EPUB/XLSX) via Kimi Files API `file-extract`, paginated, sha256-cached; returns a `doc:<sha8>` ref |
+| `DraftContent` | `content_writer.py` | Writer subagent for long-form content (persona + Partial Mode prefill), writes `data/cache/drafts/*.md`; accepts a `doc_ref` to write from a document without loading it into main context |
+| `ViewMedia` | `media.py` | Local images/videos uploaded with `purpose=image`/`video` and rendered natively via `ms://` refs. Images >4K downscaled to 3840x2160; videos re-encoded to 15fps/1080p (requires **ffmpeg** on PATH); source files >300MB rejected up front, 100MB cap after compression |
+
+Kimi Files API notes: uploaded files are kept by the platform **indefinitely** (no TTL; 1000-file/10GB quota). `file-extract` uploads are deleted right after extraction (best-effort) and cached locally by sha256; `image`/`video` uploads must outlive the task that references them. All three purposes are swept at startup **and** after each task ends (fire-and-forget, never raises).
+
+History archive: every `run_task` writes an append-only flight-recorder file `data/archives/<timestamp>-<taskid>.jsonl` (metadata line + sanitized messages; base64 screenshots stripped, sensitive tool args redacted). It is never read back by the agent — post-hoc review only.
 
 ## Development commands
 
