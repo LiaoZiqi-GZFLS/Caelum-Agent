@@ -144,6 +144,8 @@ class AgentOrchestrator:
         self.task_list = TaskList()
         # Whether the one-time "consider a task list" nudge has fired this run.
         self._task_list_nudged = False
+        # Loop-extension confirmation, merged into the next perception message.
+        self._pending_loop_notice: str | None = None
         self.task_id: str | None = None
         self.current_instruction: str = ""
         self.last_action_summary: str = ""
@@ -757,6 +759,7 @@ class AgentOrchestrator:
         self._pending_som_followup = None
         self.task_list.clear()
         self._task_list_nudged = False
+        self._pending_loop_notice = None
         self.action_traces = []
         # Tracks whether this task has invoked any tool that touches the screen
         # (windows/playwright MCP, or the desktop_interact local tool). Pure
@@ -812,17 +815,23 @@ class AgentOrchestrator:
                 with_vision=not self.config.ui_detector.lazy,
             )
             self._last_perception = perception
-            self.history.append({
-                "role": "user",
-                "content": self._format_perception(perception),
-            })
+            perception_content = self._format_perception(perception)
+            # Any extra context for this round (loop-extension notice, task
+            # list render, or the one-time planning nudge) rides as extra text
+            # parts on the SAME user message: Kimi rejects back-to-back
+            # same-role messages, and these paths would otherwise append two
+            # consecutive user turns.
+            if self._pending_loop_notice is not None:
+                perception_content.append(
+                    {"type": "text", "text": self._pending_loop_notice}
+                )
+                self._pending_loop_notice = None
             # Keep the model-managed task list salient: re-inject a compact
             # render every loop so the plan isn't buried under tool results.
             if self.task_list.items:
-                self.history.append({
-                    "role": "user",
-                    "content": self.task_list.render(),
-                })
+                perception_content.append(
+                    {"type": "text", "text": self.task_list.render()}
+                )
             elif (
                 loop >= _TASK_LIST_NUDGE_LOOP
                 and not self._task_list_nudged
@@ -830,14 +839,15 @@ class AgentOrchestrator:
                 # One-time nudge: the task has clearly become multi-step but
                 # the model never planned. Fires once per run_task.
                 self._task_list_nudged = True
-                self.history.append({
-                    "role": "user",
-                    "content": (
+                perception_content.append({
+                    "type": "text",
+                    "text": (
                         "You are several loops into this task without a plan. "
                         "Consider calling UpdateTaskList to break the remaining "
                         "work into concrete steps and track their status."
                     ),
                 })
+            self.history.append({"role": "user", "content": perception_content})
 
             # Check for total rejection by verifier (all candidates blocked).
             if perception.blocked_count > 0 and not perception.som_annotations:
@@ -1334,12 +1344,12 @@ class AgentOrchestrator:
         if not answer.startswith("YES"):
             return current_limit
         new_limit = min(current_limit + _LOOP_LIMIT_INCREMENT, _MAX_LOOP_LIMIT)
-        self.history.append({
-            "role": "user",
-            "content": (
-                f"Approach confirmed sound. You have up to "
-                f"{new_limit - current_limit} more loops. Continue from where "
-                "you left off."
-            ),
-        })
+        # Stash the confirmation for the next perception message instead of
+        # appending it here: the very next thing run_task does is append the
+        # perception user message, and back-to-back user turns are rejected.
+        self._pending_loop_notice = (
+            f"Approach confirmed sound. You have up to "
+            f"{new_limit - current_limit} more loops. Continue from where "
+            "you left off."
+        )
         return new_limit

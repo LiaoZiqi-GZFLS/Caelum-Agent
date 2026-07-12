@@ -1852,9 +1852,11 @@ async def test_extend_loop_limit_extends_on_yes(config, eventbus, killswitch):
     new_limit = await agent._maybe_extend_loop_limit(10)
 
     assert new_limit == 20
-    # History: checkpoint question, the YES answer, then a continuation note.
-    assert agent.history[-2]["content"].upper().startswith("YES")
-    assert "more loops" in agent.history[-1]["content"]
+    # History: checkpoint question, then the YES answer. The confirmation
+    # notice is stashed for the next perception message (avoids back-to-back
+    # user turns, which Kimi rejects).
+    assert agent.history[-1]["content"].upper().startswith("YES")
+    assert "more loops" in agent._pending_loop_notice
 
 
 @pytest.mark.asyncio
@@ -1988,7 +1990,7 @@ async def test_run_task_injects_task_list_each_loop(config, eventbus, killswitch
         if m.get("role") == "user" and "Task list:" in str(m.get("content", ""))
     ]
     assert injections, "task list was never injected into the history"
-    assert "step two" in injections[-1]["content"]
+    assert "step two" in str(injections[-1]["content"])
 
 
 @pytest.mark.asyncio

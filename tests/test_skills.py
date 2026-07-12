@@ -281,3 +281,43 @@ def test_parse_skill_round_trip(tmp_path: Path, learner: SkillLearner) -> None:
     assert parsed["steps"] == ["Step one.", "Step two."]
     assert parsed["version"] == "v0.2.0"
     assert parsed["tags"] == "demo"
+
+
+# ---------------------------------------------------------------------------
+# Path traversal protection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_skill_rejects_path_traversal_name(
+    memory_store: MemoryStore, tmp_path: Path
+) -> None:
+    payload = {**_SKILL_PAYLOAD, "name": "learned/../../../tmp/evil"}
+    llm = _JsonRecordingLLM(payload)
+    learner = SkillLearner(
+        skills_dir=tmp_path / "skills", memory=memory_store, llm_client=llm
+    )
+
+    result = await learner.learn("do thing", ["trace"])
+
+    # The malicious name must be neutralized: file lands inside learned/.
+    path = Path(result["path"])
+    assert path.resolve().is_relative_to((tmp_path / "skills").resolve())
+    assert not (tmp_path / ".." / "evil.md").resolve().exists()
+
+
+@pytest.mark.asyncio
+async def test_write_skill_rejects_absolute_name(
+    memory_store: MemoryStore, tmp_path: Path
+) -> None:
+    payload = {**_SKILL_PAYLOAD, "name": "C:/tmp/evil"}
+    llm = _JsonRecordingLLM(payload)
+    learner = SkillLearner(
+        skills_dir=tmp_path / "skills", memory=memory_store, llm_client=llm
+    )
+
+    result = await learner.learn("do thing", ["trace"])
+
+    assert Path(result["path"]).resolve().is_relative_to(
+        (tmp_path / "skills").resolve()
+    )

@@ -277,7 +277,11 @@ class SkillLearner:
         return step[0].upper() + step[1:]
 
     def _write_skill(self, skill: dict[str, Any]) -> Path:
-        path = self._skill_path(skill["name"])
+        path = self._skill_path(skill["name"]).resolve()
+        root = self.skills_dir.resolve()
+        if root not in path.parents:
+            # Backstop against path traversal via a crafted skill name.
+            raise ValueError(f"Skill path escapes skills_dir: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self._render_skill(skill), encoding="utf-8")
         return path
@@ -364,9 +368,13 @@ class SkillLearner:
         steps = data.get("steps", [])
         if isinstance(steps, str):
             steps = [s.strip() for s in steps.splitlines() if s.strip()]
-        name = data.get("name", "learned-skill")
-        if "/" not in name:
-            name = f"learned/{SkillLearner._slugify(name)}"
+        # The name comes from model-generated JSON, so never trust its path
+        # segments: strip any directory prefix and slugify what remains.
+        # "learned/foo" survives as-is; "../../etc/evil" becomes
+        # "learned/evil". _write_skill additionally asserts containment.
+        name = str(data.get("name", "learned-skill"))
+        leaf = name.split("/")[-1] if name.startswith("learned/") else name
+        name = f"learned/{SkillLearner._slugify(leaf)}"
         return {
             "name": name,
             "description": data.get("description", ""),
