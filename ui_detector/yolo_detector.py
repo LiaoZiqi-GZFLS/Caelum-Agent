@@ -33,48 +33,6 @@ def _get_yolo_cls():
     return _YOLO
 
 
-# Two boxes with IoU above this are considered duplicates of the same widget;
-# only the higher-confidence one survives.
-_OVERLAP_IOU_THRESHOLD = 0.05
-
-
-def _box_area(b: tuple) -> float:
-    return max(0.0, b[3] - b[1]) * max(0.0, b[4] - b[2])
-
-
-def _box_intersection(a: tuple, b: tuple) -> float:
-    x1 = max(a[1], b[1])
-    y1 = max(a[2], b[2])
-    x2 = min(a[3], b[3])
-    y2 = min(a[4], b[4])
-    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
-
-
-def _dedupe_overlaps(boxes: list[tuple]) -> list[tuple]:
-    """Drop lower-score boxes that overlap a kept one with IoU > 5%.
-
-    ``boxes`` is ``[(score, x1, y1, x2, y2), ...]`` sorted by score descending,
-    so any box already in ``kept`` outscores the candidate — the surviving box
-    of each conflicting pair is always the more confident one. Nesting is not
-    exempt: an inner box whose IoU with the outer exceeds the threshold is a
-    duplicate detection and is dropped like any other overlap.
-    """
-    kept: list[tuple] = []
-    for box in boxes:
-        drop = False
-        for other in kept:
-            inter = _box_intersection(box, other)
-            if inter <= 0:
-                continue
-            union = _box_area(box) + _box_area(other) - inter
-            if union > 0 and inter / union > _OVERLAP_IOU_THRESHOLD:
-                drop = True
-                break
-        if not drop:
-            kept.append(box)
-    return kept
-
-
 class YoloDetector:
     """OmniParser icon_detect YOLOv8 wrapper returning SoM-style annotations.
 
@@ -82,6 +40,10 @@ class YoloDetector:
     ``DesktopInteract``: ``{label, center_x, center_y, bbox, score}`` with all
     coordinates normalized to [0, 1] against the input image. Labels start at
     1 and follow confidence-descending order.
+
+    Overlapping boxes are NOT reconciled here — that happens downstream in
+    ``ui_detector.fusion.fuse_annotations``, which merges/dedups YOLO and OCR
+    boxes uniformly.
 
     The model loads lazily on the first ``detect()``. If CUDA inference
     raises, the detector falls back to CPU once and stays there.
@@ -143,7 +105,6 @@ class YoloDetector:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             boxes.append((float(box.conf[0]), x1, y1, x2, y2))
         boxes.sort(key=lambda b: b[0], reverse=True)
-        boxes = _dedupe_overlaps(boxes)
         annotations = []
         for i, (score, x1, y1, x2, y2) in enumerate(boxes, start=1):
             annotations.append(

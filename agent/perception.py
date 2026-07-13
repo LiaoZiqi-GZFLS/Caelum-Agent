@@ -28,6 +28,7 @@ from agent.snapshot_parser import (
     summarize_tree,
     unwrap_windows_snapshot,
 )
+from ui_detector.fusion import fuse_annotations
 
 if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
@@ -109,6 +110,48 @@ class Perception:
     annotated_screenshot_path: Path | None = None
 
 
+def _ocr_box_to_bbox(box: Any) -> list[float] | None:
+    """Convert a RapidOCR 4-point polygon to an axis-aligned [x1,y1,x2,y2]."""
+    try:
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+    except (TypeError, IndexError, ValueError, KeyError):
+        return None
+    if not xs:
+        return None
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _format_marker_list(som_annotations: list[dict[str, Any]]) -> str:
+    """One line per marker: ``[N] "text" icon|text @(cx,cy)``.
+
+    Content comes from the fusion: ``text`` is the OCR string (None for
+    YOLO-only boxes); the trailing kind is ``icon`` when a YOLO detection
+    backs the marker, else ``text``. Beyond _MARKER_LIST_CAP entries the
+    listing truncates — the annotated image still shows every box.
+    """
+    lines = []
+    for a in som_annotations[:_MARKER_LIST_CAP]:
+        label = a.get("label", "?")
+        cx = float(a.get("center_x", 0.0))
+        cy = float(a.get("center_y", 0.0))
+        kind = "icon" if a.get("icon") else "text"
+        text = a.get("text")
+        if text:
+            lines.append(f'[{label}] "{text}" {kind} @({cx:.3f},{cy:.3f})')
+        else:
+            lines.append(f"[{label}] {kind} @({cx:.3f},{cy:.3f})")
+    extra = len(som_annotations) - _MARKER_LIST_CAP
+    if extra > 0:
+        lines.append(f"... (+{extra} more markers)")
+    return "\n".join(lines)
+
+
+# Marker-list cap in the model-facing description: past this, the listing
+# costs more tokens than the grounding is worth.
+_MARKER_LIST_CAP = 100
+
+
 class PerceptionModule:
     def __init__(
         self,
@@ -145,10 +188,12 @@ class PerceptionModule:
         orig_w, orig_h = image.size
 
         # OCR reads the screenshot before the LLM-bound compression (inverse-
-        # DPI normalized inside _run_ocr): any smaller copy would erase small
-        # text, and OCR is local CPU work that costs no tokens. This must run
-        # before _compress(), which resizes the image in place.
-        ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, image)
+        # DPI normalized inside _run_ocr_detailed): any smaller copy would
+        # erase small text, and OCR is local CPU work that costs no tokens.
+        # This must run before _compress(), which resizes the image in place.
+        ocr_text, ocr_boxes, ocr_input_size = await loop.run_in_executor(
+            self._io_executor, self._run_ocr_detailed, image
+        )
 
         image_bytes = await loop.run_in_executor(
             self._io_executor, self._compress, image
@@ -168,7 +213,7 @@ class PerceptionModule:
         # e.g. WeChat/Qt/Electron), run YOLO icon detection so the model gets
         # clickable numbered boxes instead of a dead end. YOLO annotates the
         # COMPRESSED image so normalized coordinates match what the model sees.
-        som_annotations: list[dict[str, Any]] = []
+        yolo_annotations: list[dict[str, Any]] = []
         if (
             self.config.yolo.auto_compensate
             and self._needs_vision_compensation(ui_tree, ocr_text)
@@ -177,7 +222,15 @@ class PerceptionModule:
                 "UIA-less screen detected (empty tree, OCR present); "
                 "running YOLO annotation"
             )
-            som_annotations = await self._run_yolo(image)
+            yolo_annotations = await self._run_yolo(image)
+        # Fuse OCR text boxes with YOLO icon boxes into ONE marker list
+        # (ui_detector.fusion): IoU > 15% merges into a union box carrying
+        # both contents, IoU > 5% keeps only the higher-score box. OCR boxes
+        # are normalized from OCR-input space into the compressed
+        # (model-visible) space inside the fusion.
+        som_annotations = fuse_annotations(
+            ocr_boxes, ocr_input_size, yolo_annotations, image.size
+        )
         # Drop placeholder/invalid annotations so visualize_som never crashes
         # on a missing center_x/center_y.
         valid_annotations = [
@@ -198,7 +251,7 @@ class PerceptionModule:
         )
 
         annotated_screenshot_path: Path | None = None
-        if som_annotations and self.detector is not None:
+        if som_annotations:
             annotated_image = await loop.run_in_executor(
                 self._io_executor, self._generate_annotated,
                 screenshot_path, som_annotations,
@@ -264,7 +317,9 @@ class PerceptionModule:
         crop = full.crop((x1, y1, x2, y2))
         crop_w, crop_h = crop.size
 
-        ocr_text = await loop.run_in_executor(self._io_executor, self._run_ocr, crop)
+        ocr_text, ocr_boxes, ocr_input_size = await loop.run_in_executor(
+            self._io_executor, self._run_ocr_detailed, crop
+        )
         await loop.run_in_executor(
             self._io_executor,
             lambda: crop.save(
@@ -272,7 +327,12 @@ class PerceptionModule:
             ),
         )
 
-        som_annotations = await self._run_yolo(crop)
+        yolo_annotations = await self._run_yolo(crop)
+        # Same fusion as full-screen perception: OCR text boxes + YOLO icon
+        # boxes reconciled into one marker list (see perceive()).
+        som_annotations = fuse_annotations(
+            ocr_boxes, ocr_input_size, yolo_annotations, crop.size
+        )
         som_annotations = [
             a
             for a in som_annotations
@@ -280,7 +340,7 @@ class PerceptionModule:
         ]
 
         annotated_screenshot_path: Path | None = None
-        if som_annotations and self.detector is not None:
+        if som_annotations:
             annotated_image = await loop.run_in_executor(
                 self._io_executor,
                 self._generate_annotated,
@@ -331,7 +391,10 @@ class PerceptionModule:
         if ocr_text:
             parts.append(f"Region OCR text:\n{ocr_text}")
         if som_annotations:
-            parts.append(f"Detected elements: {len(som_annotations)}")
+            parts.append(
+                f"Region markers ({len(som_annotations)} numbered boxes on "
+                "the annotated image):\n" + _format_marker_list(som_annotations)
+            )
         return "\n\n".join(parts)
 
     @staticmethod
@@ -444,8 +507,21 @@ class PerceptionModule:
         return before.ui_hash != after.ui_hash
 
     def _run_ocr(self, image: Image.Image) -> str:
+        """OCR text only (joined lines); see _run_ocr_detailed for boxes."""
+        return self._run_ocr_detailed(image)[0]
+
+    def _run_ocr_detailed(
+        self, image: Image.Image
+    ) -> tuple[str, list[dict[str, Any]], tuple[int, int]]:
+        """OCR with geometry: ``(joined text, boxes, OCR input size)``.
+
+        ``boxes`` are ``{bbox: [x1, y1, x2, y2], text, score}`` in PIXELS of
+        the OCR input image (inverse-DPI normalized); the returned size is
+        that input's size, so callers can normalize boxes into the
+        model-visible coordinate space for SoM fusion.
+        """
         if not self.config.ocr.enabled:
-            return ""
+            return "", [], image.size
         if self._ocr is None:
             from rapidocr_onnxruntime import RapidOCR
 
@@ -492,12 +568,23 @@ class PerceptionModule:
             result, _elapse = self._ocr(tmp_path)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-        texts = []
+        texts: list[str] = []
+        boxes: list[dict[str, Any]] = []
         if result:
             for item in result:
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    texts.append(str(item[1]))
-        return "\n".join(texts)
+                    text = str(item[1])
+                    texts.append(text)
+                    bbox = _ocr_box_to_bbox(item[0])
+                    if bbox is not None:
+                        boxes.append(
+                            {
+                                "bbox": bbox,
+                                "text": text,
+                                "score": float(item[2]) if len(item) >= 3 else 0.0,
+                            }
+                        )
+        return "\n".join(texts), boxes, ocr_image.size
 
     @staticmethod
     def _needs_vision_compensation(ui_tree: dict[str, Any], ocr_text: str) -> bool:
@@ -561,5 +648,9 @@ class PerceptionModule:
         if ui_tree:
             parts.append(f"UI tree:\n{str(ui_tree)[:4000]}")
         if som_annotations:
-            parts.append(f"Detected elements: {len(som_annotations)}")
+            parts.append(
+                f"SoM markers ({len(som_annotations)} numbered boxes on the "
+                "annotated screenshot; DesktopInteract(label=N) clicks marker "
+                "N's center):\n" + _format_marker_list(som_annotations)
+            )
         return "\n\n".join(parts)

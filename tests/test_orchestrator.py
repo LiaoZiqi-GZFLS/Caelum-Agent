@@ -1580,7 +1580,9 @@ def _patch_perception_capture(
     monkeypatch.setattr(
         module, "_capture_screenshot", lambda: _PILImage.new("RGB", (100, 100))
     )
-    monkeypatch.setattr(module, "_run_ocr", lambda img: ocr_text)
+    monkeypatch.setattr(
+        module, "_run_ocr_detailed", lambda img: (ocr_text, [], img.size)
+    )
     monkeypatch.setattr(
         module, "_generate_annotated", lambda path, ann: _PILImage.new("RGB", (10, 10))
     )

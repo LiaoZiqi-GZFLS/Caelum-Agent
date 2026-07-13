@@ -102,6 +102,63 @@ def test_run_ocr_empty_screen_returns_empty_text(config: Config) -> None:
     assert module._run_ocr(Image.new("RGB", (100, 60))) == ""
 
 
+# ---------------------------------------------------------------------------
+# _run_ocr_detailed: text + pixel boxes + scores + OCR input size. Boxes feed
+# the SoM fusion (ui_detector.fusion) so OCR text becomes clickable markers.
+# ---------------------------------------------------------------------------
+
+
+def test_run_ocr_detailed_returns_boxes_scores_and_input_size(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = PerceptionModule(config)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
+    module._ocr = _FakeRapidOCR([
+        ([[10, 20], [50, 20], [50, 40], [10, 40]], "ALPHA", 0.99),
+        ([[5, 60], [30, 60], [30, 75], [5, 75]], "BETA", 0.88),
+    ])
+
+    text, boxes, size = module._run_ocr_detailed(Image.new("RGB", (100, 100)))
+
+    assert text == "ALPHA\nBETA"
+    assert size == (100, 100)  # 100% scaling: OCR input is the image itself
+    assert len(boxes) == 2
+    assert boxes[0]["bbox"] == pytest.approx([10.0, 20.0, 50.0, 40.0])
+    assert boxes[0]["text"] == "ALPHA"
+    assert boxes[0]["score"] == pytest.approx(0.99)
+    assert boxes[1]["bbox"] == pytest.approx([5.0, 60.0, 30.0, 75.0])
+    assert boxes[1]["score"] == pytest.approx(0.88)
+
+
+def test_run_ocr_detailed_reports_ocr_space_when_resized(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Boxes are pixels of the RESIZED OCR input; the reported size is that
+    space (not the original screenshot), so fusion normalizes correctly."""
+    module = PerceptionModule(config)
+    module._ocr = _FakeRapidOCR([([[0, 0], [10, 0], [10, 10], [0, 10]], "X", 0.9)])
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
+
+    _, boxes, size = module._run_ocr_detailed(Image.new("RGB", (2560, 1440)))
+
+    assert size == (2048, 1152)
+    assert boxes[0]["bbox"] == pytest.approx([0.0, 0.0, 10.0, 10.0])
+
+
+def test_run_ocr_detailed_empty_screen_returns_empty_boxes(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = PerceptionModule(config)
+    monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
+    module._ocr = _FakeRapidOCR(None)
+
+    text, boxes, size = module._run_ocr_detailed(Image.new("RGB", (100, 60)))
+
+    assert text == ""
+    assert boxes == []
+    assert size == (100, 60)
+
+
 def test_compute_ui_hash_changes_with_ocr(config: Config) -> None:
     module = PerceptionModule(config)
     image_hash = "img"
@@ -261,7 +318,9 @@ def _patch_capture(module: PerceptionModule, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         module, "_capture_screenshot", lambda: Image.new("RGB", (100, 100))
     )
-    monkeypatch.setattr(module, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(
+        module, "_run_ocr_detailed", lambda img: ("", [], img.size)
+    )
     monkeypatch.setattr(
         module, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
     )
@@ -298,9 +357,12 @@ async def test_perceive_runs_ocr_on_full_resolution_image(
         module, "_capture_screenshot", lambda: Image.new("RGB", (1920, 1080))
     )
     seen_sizes: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        module, "_run_ocr", lambda img: seen_sizes.append(img.size) or ""
-    )
+
+    def _record_ocr(img: Image.Image) -> tuple:
+        seen_sizes.append(img.size)
+        return "", [], img.size
+
+    monkeypatch.setattr(module, "_run_ocr_detailed", _record_ocr)
 
     await module.perceive(instruction="x")
 
@@ -419,14 +481,22 @@ async def test_perceive_compensation_detects_on_compressed_image(
     """YOLO annotates the COMPRESSED (model-visible) image, so normalized
     annotation coordinates line up with the screenshot the model sees."""
     annotations = [
-        {"label": 1, "center_x": 0.5, "center_y": 0.5, "score": 0.9},
+        {
+            "label": 1,
+            "center_x": 0.5,
+            "center_y": 0.5,
+            "bbox": [0.4, 0.4, 0.6, 0.6],
+            "score": 0.9,
+        },
     ]
     spy = _SpyDetector(annotations)
     module = PerceptionModule(config, detector=spy)
     monkeypatch.setattr(
         module, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
-    monkeypatch.setattr(module, "_run_ocr", lambda img: "登录按钮")
+    monkeypatch.setattr(
+        module, "_run_ocr_detailed", lambda img: ("登录按钮", [], img.size)
+    )
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
     module.mcp = None  # empty UI tree -> compensation fires; real _compress runs
 
@@ -434,7 +504,17 @@ async def test_perceive_compensation_detects_on_compressed_image(
 
     assert spy.calls == 1
     assert spy.seen_sizes == [(2048, 1152)]  # 2560x1440 at 125% inverse-DPI
-    assert result.som_annotations == annotations
+    assert result.som_annotations == [
+        {
+            "label": 1,
+            "center_x": 0.5,
+            "center_y": 0.5,
+            "bbox": [0.4, 0.4, 0.6, 0.6],
+            "score": 0.9,
+            "text": None,
+            "icon": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -451,7 +531,7 @@ async def test_perceive_survives_detector_failure(
     monkeypatch.setattr(
         module, "_capture_screenshot", lambda: Image.new("RGB", (100, 100))
     )
-    monkeypatch.setattr(module, "_run_ocr", lambda img: "text")
+    monkeypatch.setattr(module, "_run_ocr_detailed", lambda img: ("text", [], img.size))
     module.mcp = None
 
     result = await module.perceive(instruction="x")
@@ -474,20 +554,27 @@ def _patch_region_capture(
     monkeypatch.setattr(
         module, "_capture_fullscreen", lambda: Image.new("RGB", size)
     )
-    monkeypatch.setattr(module, "_run_ocr", lambda img: ocr_text)
+    monkeypatch.setattr(
+        module, "_run_ocr_detailed", lambda img: (ocr_text, [], img.size)
+    )
 
 
 @pytest.mark.asyncio
 async def test_perceive_region_crops_and_sets_origin(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    spy = _SpyDetector([{"label": 1, "center_x": 0.5, "center_y": 0.5}])
+    spy = _SpyDetector(
+        [{"label": 1, "center_x": 0.5, "center_y": 0.5, "bbox": [0.4, 0.4, 0.6, 0.6], "score": 0.9}]
+    )
     module = PerceptionModule(config, detector=spy)
     _patch_region_capture(module, monkeypatch)
     seen_ocr: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        module, "_run_ocr", lambda img: seen_ocr.append(img.size) or "text"
-    )
+
+    def _record_ocr(img: Image.Image) -> tuple:
+        seen_ocr.append(img.size)
+        return "text", [], img.size
+
+    monkeypatch.setattr(module, "_run_ocr_detailed", _record_ocr)
 
     p = await module.perceive_region(1280, 720, 480)
 
@@ -671,3 +758,163 @@ def test_run_ocr_silences_ort_session_info_logs(
     module._run_ocr(Image.new("RGB", (100, 100)))
 
     assert logging.getLogger("OrtInferSession").level == logging.WARNING
+
+
+# ---------------------------------------------------------------------------
+# Description marker listing: the model must see each marker's number AND its
+# content (OCR text / icon type) so it can pick a label without guessing.
+# ---------------------------------------------------------------------------
+
+
+def _ann(label, cx, cy, text=None, icon=True, score=0.9):
+    return {
+        "label": label,
+        "center_x": cx,
+        "center_y": cy,
+        "bbox": [cx - 0.05, cy - 0.05, cx + 0.05, cy + 0.05],
+        "score": score,
+        "text": text,
+        "icon": icon,
+    }
+
+
+def test_build_description_lists_marker_content() -> None:
+    anns = [
+        _ann(1, 0.73, 0.405, text="搜索", icon=True),   # merged OCR+YOLO
+        _ann(2, 0.12, 0.88, text="视频号", icon=False),  # OCR-only
+        _ann(3, 0.5, 0.1, text=None, icon=True),         # YOLO-only
+    ]
+
+    desc = PerceptionModule._build_description("", {}, anns, (1000, 1000))
+
+    assert '[1] "搜索" icon @(0.730,0.405)' in desc
+    assert '[2] "视频号" text @(0.120,0.880)' in desc
+    assert "[3] icon @(0.500,0.100)" in desc
+
+
+def test_build_description_caps_marker_list_at_100() -> None:
+    anns = [_ann(i, 0.1, 0.1) for i in range(1, 106)]
+
+    desc = PerceptionModule._build_description("", {}, anns, (100, 100))
+
+    assert "[100] icon" in desc
+    assert "[101]" not in desc
+    assert "(+5 more markers)" in desc
+
+
+def test_build_region_description_lists_marker_content() -> None:
+    anns = [_ann(1, 0.3, 0.4, text="确定", icon=True)]
+
+    desc = PerceptionModule._build_region_description(
+        "确定", anns, (1040, 480), (480, 480)
+    )
+
+    assert '[1] "确定" icon @(0.300,0.400)' in desc
+
+
+# ---------------------------------------------------------------------------
+# perceive() fusion integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_perceive_marks_ocr_boxes_without_yolo(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OCR boxes become SoM markers even when no YOLO detector exists — and
+    the annotated screenshot is still generated (it needs no detector)."""
+    module = PerceptionModule(config, detector=None)
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (1000, 1000))
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_ocr_detailed",
+        lambda img: (
+            "搜索",
+            [{"bbox": [100.0, 100.0, 200.0, 150.0], "text": "搜索", "score": 0.99}],
+            img.size,
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
+    )
+
+    p = await module.perceive(instruction="x")
+
+    assert len(p.som_annotations) == 1
+    a = p.som_annotations[0]
+    assert a["text"] == "搜索"
+    assert a["icon"] is False
+    assert a["bbox"] == pytest.approx([0.1, 0.1, 0.2, 0.15])
+    assert p.annotated_screenshot_path is not None
+    assert p.annotated_screenshot_path.exists()
+    assert '[1] "搜索" text @(0.150,0.125)' in p.description
+
+
+@pytest.mark.asyncio
+async def test_perceive_merges_ocr_text_into_yolo_marker(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a UIA-less screen, an OCR box overlapping a YOLO box (IoU > 15%)
+    fuses into ONE marker carrying both the text and the icon flag."""
+    spy = _SpyDetector(
+        [{"label": 1, "center_x": 0.15, "center_y": 0.125,
+          "bbox": [0.1, 0.1, 0.2, 0.15], "score": 0.9}]
+    )
+    module = PerceptionModule(config, detector=spy)
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (1000, 1000))
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_ocr_detailed",
+        lambda img: (
+            "登录",
+            [{"bbox": [110.0, 110.0, 190.0, 140.0], "text": "登录", "score": 0.99}],
+            img.size,
+        ),
+    )
+    module.mcp = None  # empty UI tree + OCR text -> YOLO compensation fires
+
+    p = await module.perceive(instruction="click 登录")
+
+    assert spy.calls == 1
+    assert len(p.som_annotations) == 1
+    a = p.som_annotations[0]
+    assert a["text"] == "登录"
+    assert a["icon"] is True
+    assert a["score"] == pytest.approx(0.99)
+    assert '[1] "登录" icon' in p.description
+
+
+@pytest.mark.asyncio
+async def test_perceive_region_fuses_ocr_and_yolo(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = _SpyDetector(
+        [{"label": 1, "center_x": 0.15, "center_y": 0.15,
+          "bbox": [0.1, 0.1, 0.2, 0.2], "score": 0.9}]
+    )
+    module = PerceptionModule(config, detector=spy)
+    monkeypatch.setattr(
+        module, "_capture_fullscreen", lambda: Image.new("RGB", (2560, 1440))
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_ocr_detailed",
+        lambda img: (
+            "OK",
+            [{"bbox": [48.0, 48.0, 96.0, 96.0], "text": "OK", "score": 0.95}],
+            img.size,
+        ),
+    )
+
+    p = await module.perceive_region(1280, 720, 480)
+
+    assert len(p.som_annotations) == 1
+    a = p.som_annotations[0]
+    assert a["text"] == "OK"
+    assert a["icon"] is True
+    assert a["bbox"] == pytest.approx([0.1, 0.1, 0.2, 0.2])
+    assert '[1] "OK" icon' in p.description

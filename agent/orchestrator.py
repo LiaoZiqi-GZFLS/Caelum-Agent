@@ -761,16 +761,18 @@ class AgentOrchestrator:
             description=(
                 "Interact with a UI element by its marker label: label=<number> "
                 "from the annotated screenshot (numbered red boxes on detected "
-                "elements). Works on ANY app, including ones whose UIA tree is "
-                "missing, empty, or inaccurate (Qt apps like WeChat/QQ, "
-                "Electron apps, games, custom-drawn controls) — on those "
-                "screens the annotated image is attached automatically. PREFER "
-                "this over raw coordinates whenever a marker sits on your "
-                "target, and use it when windows__Snapshot shows no usable "
-                "element or label-based clicks land wrong. When no marker fits "
-                "your target, use PreviewPoints for coordinate guesses. "
-                "Actions: click (default), double_click, right_click, type "
-                "(needs text=), scroll_down/up."
+                "icons AND recognized text; each perception lists every "
+                "marker with its content — pick the label whose text/icon "
+                "matches your target). Works on ANY app, including ones whose "
+                "UIA tree is missing, empty, or inaccurate (Qt apps like "
+                "WeChat/QQ, Electron apps, games, custom-drawn controls) — on "
+                "those screens the annotated image is attached automatically. "
+                "PREFER this over raw coordinates whenever a marker sits on "
+                "your target, and use it when windows__Snapshot shows no "
+                "usable element or label-based clicks land wrong. When no "
+                "marker fits your target, use PreviewPoints for coordinate "
+                "guesses. Actions: click (default), double_click, right_click, "
+                "type (needs text=), scroll_down/up."
             ),
         )
 
@@ -929,14 +931,8 @@ class AgentOrchestrator:
         """
         text_parts = [perception.description]
         if perception.som_annotations:
-            text_parts.append(
-                "SoM annotations (numbered red boxes on the SECOND image):\n"
-                + "\n".join(
-                    f"  [{a.get('label', '?')}] at ({a.get('center_x', 0):.3f}, {a.get('center_y', 0):.3f})"
-                    + (f" score={a.get('score', 0):.2f}" if a.get('score') else "")
-                    for a in perception.som_annotations
-                )
-            )
+            # The description already lists every marker's number and content
+            # (OCR text / icon type) — here we only explain the dual images.
             text_parts.append(
                 "The SECOND image is the annotated copy with numbered red "
                 "boxes; the first is the clean screenshot. To interact with a "

@@ -196,15 +196,17 @@ async def test_perceive_filters_invalid_annotations_and_writes_annotated(
     class SpyDetector:
         def detect(self, image):
             return [
-                {"center_x": 0.5, "center_y": 0.5, "score": 0.9},
-                {"label": 2},  # invalid: missing centers
+                {"center_x": 0.5, "center_y": 0.5, "bbox": [0.4, 0.4, 0.6, 0.6], "score": 0.9},
+                {"label": 2},  # invalid: no bbox -> skipped by the fusion
             ]
 
     pm.detector = SpyDetector()
     pm.mcp = None
     monkeypatch.setattr(pm, "_capture_screenshot", lambda: Image.new("RGB", (100, 100)))
     monkeypatch.setattr(pm, "_compress", lambda img: b"jpeg")
-    monkeypatch.setattr(pm, "_run_ocr", lambda img: "text")  # triggers compensation
+    monkeypatch.setattr(
+        pm, "_run_ocr_detailed", lambda img: ("text", [], img.size)
+    )  # triggers compensation
     monkeypatch.setattr(
         pm, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
     )
@@ -236,13 +238,13 @@ class _SpyDetector:
 
     def detect(self, image):
         self.calls += 1
-        return [{"center_x": 0.5, "center_y": 0.5, "score": 0.9}]
+        return [{"center_x": 0.5, "center_y": 0.5, "bbox": [0.4, 0.4, 0.6, 0.6], "score": 0.9}]
 
 
 def _patch_capture(pm, monkeypatch, ocr_text="登录"):
     monkeypatch.setattr(pm, "_capture_screenshot", lambda: Image.new("RGB", (100, 100)))
     monkeypatch.setattr(pm, "_compress", lambda img: b"jpeg")
-    monkeypatch.setattr(pm, "_run_ocr", lambda img: ocr_text)
+    monkeypatch.setattr(pm, "_run_ocr_detailed", lambda img: (ocr_text, [], img.size))
     monkeypatch.setattr(
         pm, "_generate_annotated", lambda path, ann: Image.new("RGB", (10, 10))
     )
@@ -316,7 +318,7 @@ async def test_perceive_records_compressed_dimensions(pm, monkeypatch):
     monkeypatch.setattr(
         pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
-    monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(pm, "_run_ocr_detailed", lambda img: ("", [], img.size))
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
     pm.mcp = None  # real _compress runs: 2560x1440 at 125% -> 2048x1152
 
@@ -332,7 +334,7 @@ async def test_description_declares_coordinate_space(pm, monkeypatch):
     monkeypatch.setattr(
         pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
-    monkeypatch.setattr(pm, "_run_ocr", lambda img: "")
+    monkeypatch.setattr(pm, "_run_ocr_detailed", lambda img: ("", [], img.size))
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
     pm.mcp = None
 
