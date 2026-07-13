@@ -486,11 +486,14 @@ class PerceptionModule:
             ocr_image.save(tmp.name, format="PNG")
             tmp_path = tmp.name
         try:
-            result = self._ocr(tmp_path)
+            # RapidOCR.__call__ returns (items, elapse): items are
+            # [box, text, score] entries, elapse is per-stage timings that
+            # must NOT leak into the text.
+            result, _elapse = self._ocr(tmp_path)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         texts = []
-        if result and isinstance(result, (list, tuple)):
+        if result:
             for item in result:
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
                     texts.append(str(item[1]))

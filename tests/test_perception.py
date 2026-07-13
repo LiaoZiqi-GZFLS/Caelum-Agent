@@ -53,6 +53,55 @@ def test_compute_image_hash_is_deterministic(config: Config) -> None:
     assert len(h1) == 64
 
 
+# ---------------------------------------------------------------------------
+# _run_ocr result unpacking: RapidOCR.__call__ returns (items, elapse), where
+# items are [box, text, score] entries and elapse is per-stage timings. The
+# timings must never leak into the OCR text the model sees.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRapidOCR:
+    """Stand-in returning the real RapidOCR (items, elapse) tuple shape."""
+
+    def __init__(self, items, elapse=(0.05, 0.17, 0.06)):
+        self._items = items
+        self._elapse = elapse
+
+    def __call__(self, path):
+        return (self._items, list(self._elapse))
+
+
+def test_run_ocr_extracts_every_text_line(config: Config) -> None:
+    module = PerceptionModule(config)
+    module._ocr = _FakeRapidOCR([
+        ([[0, 0], [10, 0], [10, 10], [0, 10]], "ALPHA", 0.99),
+        ([[0, 20], [10, 20], [10, 30], [0, 30]], "BRAVO", 0.95),
+        ([[0, 40], [10, 40], [10, 50], [0, 50]], "CHARLIE", 0.90),
+    ])
+
+    text = module._run_ocr(Image.new("RGB", (100, 60)))
+
+    assert text == "ALPHA\nBRAVO\nCHARLIE"
+
+
+def test_run_ocr_single_line_returns_its_text(config: Config) -> None:
+    module = PerceptionModule(config)
+    module._ocr = _FakeRapidOCR([
+        ([[0, 0], [10, 0], [10, 10], [0, 10]], "ONLY", 0.99),
+    ])
+
+    assert module._run_ocr(Image.new("RGB", (100, 60))) == "ONLY"
+
+
+def test_run_ocr_empty_screen_returns_empty_text(config: Config) -> None:
+    # No detections: items is None and only the elapse timings come back —
+    # the OCR text must be empty, never the timing floats.
+    module = PerceptionModule(config)
+    module._ocr = _FakeRapidOCR(None)
+
+    assert module._run_ocr(Image.new("RGB", (100, 60))) == ""
+
+
 def test_compute_ui_hash_changes_with_ocr(config: Config) -> None:
     module = PerceptionModule(config)
     image_hash = "img"
@@ -262,10 +311,11 @@ def _record_ocr_input_size(module: PerceptionModule) -> list[tuple[int, int]]:
     """Install a fake OCR engine that records the temp image's dimensions."""
     seen: list[tuple[int, int]] = []
 
-    def fake_ocr(path: str) -> list:
+    def fake_ocr(path: str) -> tuple:
         with Image.open(path) as img:
             seen.append(img.size)
-        return []
+        # Real RapidOCR returns (items, elapse), not a bare list.
+        return ([], [0.0, 0.0, 0.0])
 
     module._ocr = fake_ocr
     return seen
@@ -565,8 +615,9 @@ class _SpyRapidOCR:
         self.kwargs = kwargs
         _SpyRapidOCR.instances.append(self)
 
-    def __call__(self, path: str) -> list:
-        return []
+    def __call__(self, path: str) -> tuple:
+        # Real RapidOCR returns (items, elapse), not a bare list.
+        return ([], [0.0, 0.0, 0.0])
 
 
 def test_run_ocr_passes_dml_flags_when_enabled(
