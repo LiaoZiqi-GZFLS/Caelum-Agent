@@ -1446,6 +1446,12 @@ class AgentOrchestrator:
                     # assistant messages, which Kimi rejects with HTTP 400.
                     await self.state.transition("PLANNING", task_id=self.task_id)
             except TransientAPIError as exc:
+                logger.warning(
+                    "LLM call failed (%d/%d); retrying: %s",
+                    self.consecutive_api_failures,
+                    self.config.kill_switch.api_failure_threshold,
+                    exc,
+                )
                 await self.reflection.record(
                     task_summary=user_input,
                     failure_reason=str(exc),

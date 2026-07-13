@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -712,6 +713,33 @@ async def test_api_breaker_exit_queues_pending_learning(config, eventbus, killsw
     assert rows[0]["instruction"] == "list files"
     assert rows[0]["reason"] == "api_breaker"
     assert rows[0]["traces"]
+
+
+@pytest.mark.asyncio
+async def test_transient_api_failure_logs_visible_retry(config, eventbus, killswitch, caplog):
+    """A transient LLM failure must surface on the CLI: one WARNING log per
+    retry, showing the current failure count vs. the breaker threshold."""
+    llm = FakeLLM([
+        asyncio.TimeoutError("request timed out"),
+        _message("All done."),
+        _message("YES"),
+        _message("Task complete."),
+    ])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 5),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="caelum.orchestrator"):
+        result = await agent.run_task("do something")
+
+    assert result == "Task complete."
+    retry_logs = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "retrying" in r.message.lower()
+    ]
+    assert len(retry_logs) == 1, "transient LLM failure should log one visible retry warning"
+    assert "1/5" in retry_logs[0].message
 
 
 @pytest.mark.asyncio
