@@ -88,7 +88,8 @@ desktop-agent/
 │   ├── choice_menu.py         # msvcrt keyboard choice menu (RequestHumanHelp)
 │   ├── self_window.py         # Own console window hide/show (SelfWindow)
 │   ├── focus_guard.py         # Foreground focus watchdog (FocusGuard)
-│   └── cli_presenter.py       # CLI output presenter
+│   ├── cli_presenter.py       # CLI output presenter
+│   └── pending_learning.py    # LearningSettler: settle interrupted-task records at startup
 ├── ui_detector/               # OmniParser YOLO detection + SoM visualization
 │   ├── __init__.py
 │   ├── yolo_detector.py       # YoloDetector: ultralytics icon_detect wrapper
@@ -357,11 +358,15 @@ Auto circuit breaker: pause and switch to local mode after 5 consecutive API fai
 
 ## Data storage
 
-Planned SQLite tables: `user_preferences`, `reflections`, `skills`, `audit_log`, `state_persistence`. ChromaDB for vector search.
+Planned SQLite tables: `user_preferences`, `reflections`, `skills`, `audit_log`, `state_persistence`, `pending_learning`. ChromaDB for vector search.
 
 ### AutoSkill learning
 
 `agent/skills.py` (`SkillLearner`) generates new `SKILL.md` files from successful task trajectories. After each completed task, the orchestrator calls `SkillLearner.learn(task, action_traces)`. The learner searches existing skills by vector similarity; if the best match exceeds the configured cosine-similarity threshold (default 0.85), it merges the new trace and bumps the patch version. Otherwise it creates a new skill under `skills/learned/<name>.md`. LLM generation is used when a client is available; a deterministic template is used as fallback. `MemoryStore.sync_skills()` recursively indexes all `**/*.md` files under `skills/`.
+
+### Interrupted-task settlement
+
+When a task is interrupted — the kill switch fires or the API circuit breaker trips (5 consecutive LLM failures) — and action traces exist, the orchestrator queues the trajectory into the `pending_learning` SQLite table (`instruction`, `reason`, `traces_json`, `attempts`, `created_at`) instead of dropping it. On the **next startup** (first `run_task`, scheduled as a background task drained by shutdown's 45s wait), `agent/pending_learning.py` (`LearningSettler`) settles each queued row: the LLM judges the trajectory's completion degree (`{"completed": true|false, "summary", "lesson"}`) — completed rows go through the normal `SkillLearner.learn()` path (success memory), incomplete rows become `reflection.record()` entries (failure reflection). A judge failure bumps `attempts` and keeps the row for the next startup; after `MAX_ATTEMPTS = 3` failures the row is settled as a plain fallback reflection and deleted, so records can never become zombies.
 
 ## Key configuration
 

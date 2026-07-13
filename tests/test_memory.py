@@ -221,3 +221,45 @@ def test_skill_collection_unrelated_value_error_propagates(tmp_path: Path, monke
             skills_dir=tmp_path / "skills",
             vector_dir=tmp_path / "chroma",
         )
+
+
+# ---------------------------------------------------------------------------
+# pending_learning: interrupted-task queue settled at the next startup
+# ---------------------------------------------------------------------------
+
+def test_pending_learning_round_trip(memory_store):
+    rid = memory_store.add_pending_learning(
+        "open notepad", "kill_switch", ["click A", "type B"]
+    )
+    assert rid > 0
+
+    rows = memory_store.list_pending_learning()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == rid
+    assert row["instruction"] == "open notepad"
+    assert row["reason"] == "kill_switch"
+    assert row["traces"] == ["click A", "type B"]
+    assert row["attempts"] == 0
+
+    memory_store.delete_pending_learning(rid)
+    assert memory_store.list_pending_learning() == []
+
+
+def test_pending_learning_attempts_bump(memory_store):
+    rid = memory_store.add_pending_learning("task", "api_breaker", ["a"])
+
+    assert memory_store.bump_pending_learning_attempts(rid) == 1
+    assert memory_store.bump_pending_learning_attempts(rid) == 2
+
+    rows = memory_store.list_pending_learning()
+    assert rows[0]["attempts"] == 2
+
+
+def test_pending_learning_listed_in_insert_order(memory_store):
+    memory_store.add_pending_learning("first", "kill_switch", ["a"])
+    memory_store.add_pending_learning("second", "api_breaker", ["b"])
+
+    rows = memory_store.list_pending_learning()
+
+    assert [r["instruction"] for r in rows] == ["first", "second"]

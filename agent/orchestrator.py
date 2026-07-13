@@ -32,6 +32,7 @@ from agent.reflection import ReflectionEngine
 from agent.security import SecurityGuard
 from agent.self_window import register_self_window
 from agent.skills import SkillLearner
+from agent.pending_learning import LearningSettler
 from agent.snapshot_parser import unwrap_windows_snapshot
 from agent.state_machine import AgentStateMachine
 from agent.task_list import TaskList, register_task_list
@@ -237,6 +238,9 @@ class AgentOrchestrator:
         # Fire-and-forget background tasks (currently skill learning). Tracked so
         # they are not garbage-collected and so shutdown() can drain them.
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        # Startup settlement of interrupted-task records (agent/pending_learning.py)
+        # is scheduled once, at the top of the first run_task.
+        self._settlement_scheduled = False
         self._human_confirm_callback: Any | None = None
         self._human_question_callback: Any | None = None
         # Whether a human is at the keyboard (TTY). main.py sets this from
@@ -1082,6 +1086,7 @@ class AgentOrchestrator:
 
     async def run_task(self, user_input: str, task_id: str | None = None) -> str:
         """Run one task and archive its history to data/archives/ on exit."""
+        self._schedule_pending_settlement()
         tid = task_id or "task-0"
         outcome = "ok"
         try:
@@ -1293,6 +1298,7 @@ class AgentOrchestrator:
                 try:
                     new_limit = await self._maybe_extend_loop_limit(loop_limit)
                 except APIBreakerTripped as exc:
+                    self._record_interruption("api_breaker")
                     await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
                     return str(exc)
                 if new_limit > loop_limit:
@@ -1307,6 +1313,7 @@ class AgentOrchestrator:
                 return "Agent reached the loop limit without completing the task."
             loop += 1
             if self._check_cancelled():
+                self._record_interruption("kill_switch")
                 await self.state.transition("IDLE", task_id=self.task_id)
                 return "Task cancelled by kill switch."
 
@@ -1315,6 +1322,7 @@ class AgentOrchestrator:
                 return "Too many consecutive action failures; waiting for human guidance."
 
             if self.consecutive_api_failures >= self.config.kill_switch.api_failure_threshold:
+                self._record_interruption("api_breaker")
                 await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
                 return "Too many consecutive API failures; switched to local-only mode."
 
@@ -1387,6 +1395,7 @@ class AgentOrchestrator:
                     return response
 
                 if self._check_cancelled():
+                    self._record_interruption("kill_switch")
                     await self.state.transition("IDLE", task_id=self.task_id)
                     return "Task cancelled by kill switch."
 
@@ -1445,6 +1454,7 @@ class AgentOrchestrator:
                 await self.state.transition("PLANNING", task_id=self.task_id)
                 continue
             except APIBreakerTripped as exc:
+                self._record_interruption("api_breaker")
                 await self.state.transition("WAITING_HUMAN", task_id=self.task_id)
                 return str(exc)
             except Exception as exc:
@@ -1951,6 +1961,45 @@ class AgentOrchestrator:
         if self.skill_learner is None:
             return
         task = asyncio.create_task(self._learn_skill())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    def _record_interruption(self, reason: str) -> None:
+        """Queue this task's trajectory for learning settlement at the next
+        startup (see agent/pending_learning.py).
+
+        Called on the kill-switch and API-breaker exits: the task ends
+        without a verdict, so instead of learning nothing we defer the
+        success/failure judgment to the next run. Best-effort — queuing must
+        never block or break the interruption exit.
+        """
+        if not self.action_traces or not self.current_instruction:
+            return
+        try:
+            self.memory.add_pending_learning(
+                self.current_instruction, reason, list(self.action_traces)
+            )
+        except Exception as exc:
+            logger.warning("Failed to queue interrupted-task learning: %s", exc)
+
+    def _schedule_pending_settlement(self) -> None:
+        """Settle queued interrupted-task records from previous runs (once).
+
+        Scheduled at the top of the first run_task (the earliest point with a
+        running event loop — effectively "on startup"). Runs in the background
+        and is drained by shutdown() like skill learning; settlement never
+        touches the live task's history or state.
+        """
+        if self._settlement_scheduled:
+            return
+        self._settlement_scheduled = True
+        settler = LearningSettler(
+            memory=self.memory,
+            llm=self.llm,
+            skill_learner=self.skill_learner,
+            reflection=self.reflection,
+        )
+        task = asyncio.create_task(settler.settle_all())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,14 @@ CREATE TABLE IF NOT EXISTS state_persistence (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pending_learning (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instruction TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    traces_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -205,6 +214,51 @@ class MemoryStore:
     def delete_state(self, key: str) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM state_persistence WHERE key = ?", (key,))
+
+    def add_pending_learning(
+        self, instruction: str, reason: str, traces: list[str]
+    ) -> int:
+        """Queue an interrupted task's trajectory for learning settlement at
+        the next startup (see agent/pending_learning.py)."""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO pending_learning "
+                "(instruction, reason, traces_json, attempts, created_at) "
+                "VALUES (?, ?, ?, 0, ?)",
+                (instruction, reason, json.dumps(traces, ensure_ascii=False), self._now()),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def list_pending_learning(self) -> list[dict[str, Any]]:
+        """All queued interruptions, oldest first; traces parsed from JSON."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM pending_learning ORDER BY id ASC"
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["traces"] = json.loads(item.pop("traces_json"))
+            items.append(item)
+        return items
+
+    def delete_pending_learning(self, row_id: int) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM pending_learning WHERE id = ?", (row_id,))
+
+    def bump_pending_learning_attempts(self, row_id: int) -> int:
+        """Increment the settlement-attempt counter; returns the new count."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE pending_learning SET attempts = attempts + 1 WHERE id = ?",
+                (row_id,),
+            )
+            row = conn.execute(
+                "SELECT attempts FROM pending_learning WHERE id = ?", (row_id,)
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def sync_skills(self) -> None:
         if not self.skills_dir.exists():

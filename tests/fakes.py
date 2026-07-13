@@ -327,6 +327,7 @@ class FakeMemoryStore:
         self._prefs: dict[str, str] = {}
         self.reflections: list[dict[str, Any]] = []
         self.audits: list[tuple[str, str, str, str | None]] = []
+        self.pending: list[dict[str, Any]] = []
         self.sync_skills_calls = 0
 
     def set_preference(self, key: str, value: str) -> None:
@@ -376,3 +377,29 @@ class FakeMemoryStore:
 
     def search_skills(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
         return []
+
+    def add_pending_learning(
+        self, instruction: str, reason: str, traces: list[str]
+    ) -> int:
+        self.pending.append({
+            "id": len(self.pending) + 1,
+            "instruction": instruction,
+            "reason": reason,
+            "traces": list(traces),
+            "attempts": 0,
+            "created_at": "",
+        })
+        return len(self.pending)
+
+    def list_pending_learning(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.pending]
+
+    def delete_pending_learning(self, row_id: int) -> None:
+        self.pending = [r for r in self.pending if r["id"] != row_id]
+
+    def bump_pending_learning_attempts(self, row_id: int) -> int:
+        for row in self.pending:
+            if row["id"] == row_id:
+                row["attempts"] += 1
+                return row["attempts"]
+        return 0

@@ -620,6 +620,138 @@ async def test_kill_switch_cancels_remaining_tool_calls(config, eventbus, killsw
     assert "cancelled" in result.lower()
 
 
+# ---------------------------------------------------------------------------
+# Interrupted-task learning: queue on kill switch / API breaker, settle on
+# the next startup (agent/pending_learning.py)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_record_interruption_queues_traces(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.current_instruction = "open notepad"
+    agent.action_traces = ["click A", "type B"]
+
+    agent._record_interruption("kill_switch")
+
+    rows = agent.memory.list_pending_learning()
+    assert len(rows) == 1
+    assert rows[0]["instruction"] == "open notepad"
+    assert rows[0]["reason"] == "kill_switch"
+    assert rows[0]["traces"] == ["click A", "type B"]
+
+
+@pytest.mark.asyncio
+async def test_record_interruption_skips_empty_traces(config, eventbus, killswitch):
+    agent = AgentOrchestrator(
+        config, eventbus, FakeLLM([_message("x")]), FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+    )
+    agent.current_instruction = "task"
+    agent.action_traces = []
+
+    agent._record_interruption("api_breaker")
+
+    assert agent.memory.list_pending_learning() == []
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_exit_queues_pending_learning(config, eventbus, killswitch):
+    """Kill switch mid-tool: the completed action's trace must be queued."""
+
+    class TriggeringMCP(FakeMCP):
+        async def call(self, server, tool_name, arguments):
+            if len(self.calls) == 0:
+                await killswitch.trigger()
+            return await super().call(server, tool_name, arguments)
+
+    llm = FakeLLM([
+        _message("Clicking.", tool_calls=[_tool_call("windows__Click", {"loc": [10, 10]})]),
+    ])
+    mcp = TriggeringMCP([{"server": "windows", "name": "Click", "description": "", "schema": {}}])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([_blank_perception()] * 5),
+    )
+    agent.set_human_confirmation_callback(lambda summary, action: True)
+
+    result = await agent.run_task("click the button")
+
+    assert "cancelled" in result.lower()
+    rows = agent.memory.list_pending_learning()
+    assert len(rows) == 1
+    assert rows[0]["instruction"] == "click the button"
+    assert rows[0]["reason"] == "kill_switch"
+    assert rows[0]["traces"]  # the completed action left a trace
+
+
+@pytest.mark.asyncio
+async def test_api_breaker_exit_queues_pending_learning(config, eventbus, killswitch):
+    """One successful action, then 5 consecutive API failures -> breaker."""
+    llm = FakeLLM([
+        _message("Listing.", tool_calls=[_tool_call("filesystem__list_directory", {"path": "."})]),
+        RuntimeError("API down"),
+        RuntimeError("API down"),
+        RuntimeError("API down"),
+        RuntimeError("API down"),
+        RuntimeError("API down"),
+    ])
+    mcp = FakeMCP([{"server": "filesystem", "name": "list_directory", "description": "", "schema": {}}])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, mcp, killswitch,
+        perception=FakePerception([_blank_perception()] * 10),
+    )
+
+    result = await agent.run_task("list files")
+
+    assert "api failures" in result.lower()
+    rows = agent.memory.list_pending_learning()
+    assert len(rows) == 1
+    assert rows[0]["instruction"] == "list files"
+    assert rows[0]["reason"] == "api_breaker"
+    assert rows[0]["traces"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_pending_settlement_settles_queue(config, eventbus, killswitch):
+    """Startup settlement: a queued record is judged and settled in the
+    background (success -> skill learner)."""
+    llm = FakeLLM([
+        _message('{"completed": true, "summary": "done", "lesson": "how"}'),
+    ])
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()]),
+        skill_learner=FakeSkillLearner(),
+        reflection=FakeReflection(),
+    )
+    agent.memory.add_pending_learning("past task", "kill_switch", ["step 1"])
+
+    agent._schedule_pending_settlement()
+    await asyncio.gather(*agent._background_tasks)
+
+    assert agent.skill_learner.calls == [("past task", ["step 1"])]
+    assert agent.reflection.recorded == []
+    assert agent.memory.list_pending_learning() == []
+
+
+@pytest.mark.asyncio
+async def test_run_task_schedules_settlement_once(config, eventbus, killswitch):
+    llm = FakeLLM([_message("Done.")], default_chat=_message("Done."))
+    agent = AgentOrchestrator(
+        config, eventbus, llm, FakeMCP(), killswitch,
+        perception=FakePerception([_blank_perception()] * 5),
+    )
+    assert agent._settlement_scheduled is False
+
+    await agent.run_task("anything")
+    await asyncio.gather(*agent._background_tasks)
+
+    assert agent._settlement_scheduled is True
+
+
 @pytest.mark.asyncio
 async def test_run_task_action_failure_threshold(config, eventbus, killswitch):
     llm = FakeLLM(
