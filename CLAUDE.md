@@ -388,4 +388,5 @@ The user-editable config is `config.yaml` (gitignored). `config.py` validates it
 - Playwright MCP research: `docs/playwright/playwright-mcp-research.md`
 - Windows-MCP research: `docs/windows_mcp/windows_mcp.agent.final.md`
 - Kimi Formula tools guide: `docs/kimi_api/kimi_tools_guide.agent.final.md`
+- Kimi API usage in this project (chat/Formula/Files/Partial Mode/JSON Mode/breaker/quotas): `docs/kimi_api/kimi_api_usage.md`
 - License: `LICENSE`
