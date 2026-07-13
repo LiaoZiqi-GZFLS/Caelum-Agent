@@ -1,5 +1,6 @@
 cairosvg==2.9.0
 chromadb==1.5.9
+einops==0.8.2
 httpx==0.28.1
 imageio-ffmpeg==0.6.0
 mcp==1.28.1
@@ -10,8 +11,10 @@ pynput==1.8.2
 pywinauto==0.6.9
 pyyaml==6.0.3
 rapidocr-onnxruntime==1.4.4
+timm==1.0.28
 torch==2.13.0
 torchvision==0.28.0
+transformers==4.51.3
 ultralytics==8.4.92
 windows-mcp==0.8.2
 rich>=13.7,<15

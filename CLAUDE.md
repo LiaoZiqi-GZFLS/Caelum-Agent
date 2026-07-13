@@ -39,6 +39,7 @@ The v8 design doc specifies the following stack:
 | Desktop control | Windows-MCP (`windows-mcp serve`, official CursorTouch package) |
 | Filesystem control | `@modelcontextprotocol/server-filesystem` (`npx -y ... <allowed-dir>`) |
 | UI detection | OmniParser `icon_detect` YOLOv8 (ultralytics) + SoM annotation |
+| Icon captioning | OmniParser `icon_caption` Florence-2 base fine-tune (transformers) |
 | OCR | RapidOCR (ONNXRuntime, DirectML GPU with CPU fallback) |
 | Screenshots | mss + Pillow compression/cropping |
 | Local memory | Kimi memory tool + local SQLite backup |
@@ -91,6 +92,7 @@ desktop-agent/
 ├── ui_detector/               # OmniParser YOLO detection + SoM visualization
 │   ├── __init__.py
 │   ├── yolo_detector.py       # YoloDetector: ultralytics icon_detect wrapper
+│   ├── icon_captioner.py      # IconCaptioner: Florence-2 captions for YOLO icons
 │   ├── fusion.py              # fuse_annotations: OCR+YOLO box merge/dedup
 │   └── visualizer.py          # visualize_som: numbered boxes on screenshots
 ├── mcp_client/                # MCP multi-server stdio client
@@ -130,6 +132,7 @@ Key sections in `config.yaml`:
   - `enable_file_extract` / `enable_media_upload`: toggle the ReadDocument / ViewMedia tools (both default true).
 - `mcp_servers`: commands and arguments for Playwright, Windows, and filesystem MCP servers.
 - `yolo`: OmniParser YOLO model path, device, confidence, image size, auto-compensation.
+- `icon_caption`: Florence-2 icon captioning — model path, processor path (`processor_path`, the Florence-2-base-ft repo supplying the processor + remote modeling code), device, per-frame icon cap (`max_icons`), batch size, `max_new_tokens`.
 - `screenshot`: resolution, compression, and cropping strategy.
 - `security`: auto-execute, confirm, and destructive-operation approval levels.
 
@@ -216,13 +219,13 @@ $env:PLAYWRIGHT_DOWNLOAD_HOST = "https://npmmirror.com/mirrors/playwright"
 python setup.py
 ```
 
-To download the YOLO vision weights from the GitHub Release mirror (recommended for China):
+To download the vision weights (YOLO icon_detect + Florence-2 icon_caption):
 
 ```powershell
 python setup.py --download-weights
 ```
 
-The mirror is maintained at `LiaoZiqi-GZFLS/omniparser-weights` (release asset `icon_detect.zip`, ~40MB). The download is idempotent (skipped when a plausible `model.pt` already exists) and best-effort (a failure only disables vision SoM; UIA automation still works).
+The YOLO mirror is maintained at `LiaoZiqi-GZFLS/omniparser-weights` (release asset `icon_detect.zip`, ~40MB); Florence-2 comes from HuggingFace (if direct HF access fails, try `$env:HF_ENDPOINT = "https://hf-mirror.com"` — note newer `huggingface_hub` versions can reject the mirror's HEAD responses with `FileMetadataError: Distant resource does not seem to be on huggingface.co`; direct access is preferred when available). Both downloads are idempotent and best-effort (a failure only disables vision SoM/captions; UIA automation still works).
 
 ### Running the agent
 
@@ -254,7 +257,7 @@ when blocked).
 python setup.py --download-weights
 ```
 
-Downloads `icon_detect.zip` from the `LiaoZiqi-GZFLS/omniparser-weights` GitHub Release into `models/omniparser/icon_detect/` (`model.pt` + `model.yaml` + `train_args.yaml`). The zip layout (nested folder or root-level files) is detected automatically.
+Downloads two OmniParser models: `icon_detect.zip` (YOLOv8, ~40MB) from the `LiaoZiqi-GZFLS/omniparser-weights` GitHub Release into `models/omniparser/icon_detect/`, and the `icon_caption` Florence-2 fine-tune (~1GB) from `microsoft/OmniParser-v2.0` on HuggingFace into `models/omniparser/icon_caption/` (if direct HF access fails, try `$env:HF_ENDPOINT = "https://hf-mirror.com"` — note newer `huggingface_hub` versions can reject the mirror's HEAD responses; direct access is preferred when available). The zip layout (nested folder or root-level files) is detected automatically.
 
 ## Core architecture
 
@@ -287,6 +290,8 @@ OCR input is **inverse-DPI normalized**: `_run_ocr` reads the Windows display sc
 Vision (YOLO SoM) runs as automatic compensation (`yolo.auto_compensate`, default true): `perceive()` runs one detection pass when the UI tree comes back empty but OCR found text (UIA-less apps such as WeChat/Qt/Electron), so the model gets clickable icon markers without having to discover `DesktopInteract` itself. `ZoomRegion` always runs YOLO on its crop.
 
 **SoM fusion** (`ui_detector/fusion.py`): OCR text boxes (`_run_ocr_detailed` returns text + pixel boxes + scores + OCR-input size) and YOLO icon boxes are reconciled into ONE marker list every round, processed in score-descending order: **IoU > 15% merges** into a union box carrying both contents (joined OCR text + `icon` flag, higher score survives); **IoU > 5% dedups** (lower-score box dropped); below 5% both live on. OCR boxes are normalized from OCR-input space into the model-visible space inside the fusion — the two spaces differ only under `UpgradeVision` (compress skips resizing while OCR still normalizes). Each fused marker is `{label, center_x, center_y, bbox, score, text, icon}`; the perception description lists every marker's number and content (`[1] "搜索" icon @(0.730,0.405)`, capped at 100 entries) so the model picks labels by content instead of guessing from the image alone.
+
+**Icon captioning** (`ui_detector/icon_captioner.py`, OmniParser's `icon_caption` step): YOLO is single-class (`icon`), so after fusion the **bare icon markers** (no OCR text) are cropped by their bbox and captioned with a Florence-2 base fine-tune (`<CAPTION>`), writing the caption into `marker["text"]` — `[12] icon` becomes `[12] "magnifier" icon`. Merged markers keep the OCR text (more precise). Florence-2 has no native transformers support (4.51): the model loads via `AutoModelForCausalLM` with `trust_remote_code=True` (needs `einops`+`timm` for the remote modeling code), and the processor loads separately from `microsoft/Florence-2-base-ft` (`icon_caption.processor_path`) because the OmniParser checkpoint ships no processor files — the same split OmniParser itself uses. Generation decodes with `skip_special_tokens=True` and strips residual `<pad>`/`</s>`; an `"unanswerable"` answer is dropped (bare `icon` marker beats a misleading label). Captioning is capped per frame (`icon_caption.max_icons`, highest score first), batched, lazy-loaded (~1-2s first use), with a one-time CUDA→CPU fallback; failures degrade to uncaptioned markers. Runs on the model-visible image in both `perceive()` and `perceive_region()`.
 
 YOLO (OmniParser `icon_detect` YOLOv8, ~40MB, ultralytics) runs full-frame icon detection on the compressed screenshot: the model loads lazily on the first detection (~200ms) and measures ~50ms/frame on GPU with an automatic one-time CPU fallback. Raw detections (score-sorted, NOT deduped — reconciliation happens in the fusion) feed `fuse_annotations`; the fused markers are drawn by `visualize_som` as red boxes with numbers, and when markers exist the model receives **dual images** — the clean screenshot first, the annotated copy second. `DesktopInteract(label=N)` resolves the label against the LAST perception's annotations (no fresh detection per click).
 

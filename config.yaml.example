@@ -90,6 +90,25 @@ yolo:
   # and only on UIA-less screens.
   auto_compensate: true
 
+# Florence-2 icon captioning (OmniParser icon_caption fine-tune, ~1GB; the
+# same `python setup.py --download-weights` fetches it). Gives YOLO-detected
+# icons a semantic description ("magnifier", "close button") so bare icon
+# markers carry content like OCR text markers do.
+icon_caption:
+  enabled: true
+  model_path: ./models/omniparser/icon_caption
+  # Processor source: the icon_caption checkpoint ships no processor files,
+  # so the tokenizer/processor loads from this HF repo (also hosts the
+  # trust_remote_code modeling code). Point at a local copy to go offline.
+  processor_path: microsoft/Florence-2-base-ft
+  # Inference device; automatically falls back to cpu if cuda inference fails.
+  device: cuda:0
+  # Only bare icon markers (no OCR text after fusion) get captioned, capped
+  # per frame (highest score first) to bound latency.
+  max_icons: 30
+  batch_size: 8
+  max_new_tokens: 20
+
 screenshot:
   # Capture backend: mss (recommended) or PIL
   backend: mss

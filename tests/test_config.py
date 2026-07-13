@@ -47,3 +47,43 @@ def test_load_config_from_yaml(tmp_path: Path):
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     cfg = load_config(config_path)
     assert cfg.llm.api_key == "yaml-test"
+
+
+# ---------------------------------------------------------------------------
+# IconCaptionConfig (Florence-2 icon captioning of YOLO detections)
+# ---------------------------------------------------------------------------
+
+def test_icon_caption_config_defaults():
+    from agent.config import IconCaptionConfig
+
+    cfg = IconCaptionConfig()
+    assert cfg.enabled is True
+    assert cfg.model_path == "./models/omniparser/icon_caption"
+    assert cfg.processor_path == "microsoft/Florence-2-base-ft"
+    assert cfg.device == "cuda:0"
+    assert cfg.max_icons == 30
+    assert cfg.batch_size == 8
+    assert cfg.max_new_tokens == 20
+
+
+def test_config_exposes_icon_caption_section():
+    from agent.config import Config, IconCaptionConfig
+
+    cfg = Config.model_validate({"llm": {"api_key": "test"}})
+    assert isinstance(cfg.icon_caption, IconCaptionConfig)
+    assert cfg.icon_caption.enabled is True
+
+
+def test_icon_caption_config_from_yaml(tmp_path: Path):
+    data = {
+        "llm": {"api_key": "test"},
+        "icon_caption": {"enabled": False, "max_icons": 12, "device": "cpu"},
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    cfg = load_config(config_path)
+
+    assert cfg.icon_caption.enabled is False
+    assert cfg.icon_caption.max_icons == 12
+    assert cfg.icon_caption.device == "cpu"

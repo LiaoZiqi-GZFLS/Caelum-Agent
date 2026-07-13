@@ -918,3 +918,120 @@ async def test_perceive_region_fuses_ocr_and_yolo(
     assert a["icon"] is True
     assert a["bbox"] == pytest.approx([0.1, 0.1, 0.2, 0.2])
     assert '[1] "OK" icon' in p.description
+
+
+# ---------------------------------------------------------------------------
+# Florence-2 icon captioning: bare icon markers get a semantic caption as
+# their text (merged markers keep the more precise OCR text).
+# ---------------------------------------------------------------------------
+
+
+class _SpyCaptioner:
+    """Stand-in for IconCaptioner: records calls, writes canned captions."""
+
+    def __init__(self, boom: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.boom = boom
+
+    def caption_markers(self, image, markers, max_icons):
+        self.calls.append(
+            {"size": image.size, "n": len(markers), "max_icons": max_icons}
+        )
+        if self.boom:
+            raise RuntimeError("florence boom")
+        count = 0
+        for m in markers:
+            if m.get("icon") and not m.get("text"):
+                m["text"] = f"caption-{m['label']}"
+                count += 1
+        return count
+
+
+@pytest.mark.asyncio
+async def test_perceive_captions_bare_icon_markers(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare YOLO icon (no overlapping OCR) gets a Florence-2 caption as its
+    text; a merged marker keeps the OCR text. The caption lands in the
+    model-facing description."""
+    spy = _SpyDetector(
+        [{"label": 1, "center_x": 0.5, "center_y": 0.5,
+          "bbox": [0.4, 0.4, 0.6, 0.6], "score": 0.9}]
+    )
+    captioner = _SpyCaptioner()
+    module = PerceptionModule(config, detector=spy, captioner=captioner)
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (1000, 1000))
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_ocr_detailed",
+        lambda img: (
+            "登录",
+            [{"bbox": [10.0, 10.0, 100.0, 40.0], "text": "登录", "score": 0.99}],
+            img.size,
+        ),
+    )
+    module.mcp = None  # UIA-less -> YOLO compensation fires
+
+    p = await module.perceive(instruction="x")
+
+    assert len(captioner.calls) == 1
+    assert captioner.calls[0]["size"] == (1000, 1000)  # model-visible image
+    assert captioner.calls[0]["max_icons"] == config.icon_caption.max_icons
+    by_label = {a["label"]: a for a in p.som_annotations}
+    assert by_label[1]["text"] == "登录"          # OCR text marker: untouched
+    assert by_label[2]["text"] == "caption-2"     # bare icon: captioned
+    assert '[2] "caption-2" icon' in p.description
+
+
+@pytest.mark.asyncio
+async def test_perceive_caption_failure_degrades_gracefully(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A captioner failure must not break perception: markers keep text=None
+    and the annotated screenshot is still produced."""
+    spy = _SpyDetector(
+        [{"label": 1, "center_x": 0.5, "center_y": 0.5,
+          "bbox": [0.4, 0.4, 0.6, 0.6], "score": 0.9}]
+    )
+    module = PerceptionModule(
+        config, detector=spy, captioner=_SpyCaptioner(boom=True)
+    )
+    monkeypatch.setattr(
+        module, "_capture_screenshot", lambda: Image.new("RGB", (100, 100))
+    )
+    monkeypatch.setattr(
+        module, "_run_ocr_detailed", lambda img: ("text", [], img.size)
+    )
+    module.mcp = None
+
+    p = await module.perceive(instruction="x")
+
+    assert len(p.som_annotations) == 1
+    assert p.som_annotations[0]["text"] is None
+    assert p.annotated_screenshot_path is not None
+
+
+@pytest.mark.asyncio
+async def test_perceive_region_captions_bare_icons(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = _SpyDetector(
+        [{"label": 1, "center_x": 0.5, "center_y": 0.5,
+          "bbox": [0.4, 0.4, 0.6, 0.6], "score": 0.9}]
+    )
+    captioner = _SpyCaptioner()
+    module = PerceptionModule(config, detector=spy, captioner=captioner)
+    monkeypatch.setattr(
+        module, "_capture_fullscreen", lambda: Image.new("RGB", (2560, 1440))
+    )
+    monkeypatch.setattr(
+        module, "_run_ocr_detailed", lambda img: ("", [], img.size)
+    )
+
+    p = await module.perceive_region(1280, 720, 480)
+
+    assert len(captioner.calls) == 1
+    assert captioner.calls[0]["size"] == (480, 480)  # the region crop
+    assert p.som_annotations[0]["text"] == "caption-1"

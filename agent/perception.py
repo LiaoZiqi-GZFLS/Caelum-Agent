@@ -33,6 +33,7 @@ from ui_detector.fusion import fuse_annotations
 if TYPE_CHECKING:
     from mcp_client import MCPMultiplexer
     from ui_detector import YoloDetector
+    from ui_detector.icon_captioner import IconCaptioner
 
 
 logger = logging.getLogger("caelum.perception")
@@ -158,11 +159,13 @@ class PerceptionModule:
         config: Config,
         mcp: MCPMultiplexer | None = None,
         detector: "YoloDetector | None" = None,
+        captioner: "IconCaptioner | None" = None,
         max_io_workers: int = 8,
     ) -> None:
         self.config = config
         self.mcp = mcp
         self.detector = detector
+        self.captioner = captioner
         self._ocr: Any | None = None
         # UpgradeVision: when the model calls UpgradeVision, the orchestrator
         # flips this to True so subsequent screenshots are the ORIGINAL image
@@ -243,6 +246,11 @@ class PerceptionModule:
                 len(som_annotations) - len(valid_annotations),
             )
         som_annotations = valid_annotations
+
+        # Florence-2 captioning: bare icon markers (no OCR text after fusion)
+        # get a semantic caption ("magnifier", "close button") as their text,
+        # so the marker list carries content for every box, not just OCR ones.
+        await self._caption_icons(image, som_annotations)
 
         ui_hash = self._compute_ui_hash(image_hash, ocr_text, ui_tree)
         description = self._build_description(
@@ -338,6 +346,9 @@ class PerceptionModule:
             for a in som_annotations
             if isinstance(a, dict) and "center_x" in a and "center_y" in a
         ]
+
+        # Florence-2 captioning on the region crop (same as perceive()).
+        await self._caption_icons(crop, som_annotations)
 
         annotated_screenshot_path: Path | None = None
         if som_annotations:
@@ -627,6 +638,33 @@ class PerceptionModule:
         except Exception as exc:
             logger.warning("YOLO detection failed: %s", exc, exc_info=True)
             return []
+
+    async def _caption_icons(
+        self, image: Image.Image, som_annotations: list[dict[str, Any]]
+    ) -> None:
+        """Caption bare icon markers with Florence-2 (blocking, IO pool).
+
+        Failures degrade to "no captions" so perception never breaks a task;
+        captioning is skipped entirely when disabled, absent, or there are
+        no markers.
+        """
+        if (
+            self.captioner is None
+            or not self.config.icon_caption.enabled
+            or not som_annotations
+        ):
+            return
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                self._io_executor,
+                self.captioner.caption_markers,
+                image,
+                som_annotations,
+                self.config.icon_caption.max_icons,
+            )
+        except Exception as exc:
+            logger.warning("Icon captioning failed: %s", exc, exc_info=True)
 
     @staticmethod
     def _build_description(

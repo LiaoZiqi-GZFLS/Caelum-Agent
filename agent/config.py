@@ -49,6 +49,26 @@ class MCPConfig(BaseModel):
     filesystem: MCPServerConfig | None = None
 
 
+class IconCaptionConfig(BaseModel):
+    # Florence-2 icon captioning (OmniParser icon_caption fine-tune): gives
+    # YOLO-detected icons a semantic description ("magnifier", "red close
+    # button") so bare icon markers carry content like OCR text markers do.
+    enabled: bool = True
+    model_path: str = "./models/omniparser/icon_caption"
+    # Processor source: the icon_caption checkpoint ships no processor files,
+    # so the tokenizer/processor loads from this repo (which also hosts the
+    # trust_remote_code modeling code). Point at a local copy to go offline.
+    processor_path: str = "microsoft/Florence-2-base-ft"
+    # Inference device; automatically falls back to cpu once if a cuda
+    # generate call raises.
+    device: str = "cuda:0"
+    # Only bare icon markers (no OCR text after fusion) get captioned, capped
+    # per frame (highest score first) to bound latency.
+    max_icons: int = 30
+    batch_size: int = 8
+    max_new_tokens: int = 20
+
+
 class YoloConfig(BaseModel):
     # OmniParser icon_detect YOLOv8 for SoM annotation when the UIA tree is
     # unavailable (WeChat/Qt/Electron): the vision grounding backend.
@@ -134,6 +154,7 @@ class Config(BaseModel):
     llm: LLMConfig
     mcp_servers: MCPConfig = Field(default_factory=MCPConfig)
     yolo: YoloConfig = Field(default_factory=YoloConfig)
+    icon_caption: IconCaptionConfig = Field(default_factory=IconCaptionConfig)
     screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)

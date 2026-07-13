@@ -161,6 +161,7 @@ class AgentOrchestrator:
         self.mcp = mcp
         self.kill_switch = kill_switch
         self.detector: Any | None = None
+        self.captioner: Any | None = None
         # Active CaptureWindow coordinate view (window screen rect + image
         # size). While set, model-given loc values map through THIS view —
         # the model is looking at the captured window image, not the last
@@ -368,6 +369,19 @@ class AgentOrchestrator:
                 imgsz=self.config.yolo.imgsz,
             )
             self.perception.detector = self.detector
+        if self.config.icon_caption.enabled:
+            from ui_detector.icon_captioner import IconCaptioner
+
+            # Florence-2 loads lazily on the first caption (~1-2s), so tasks
+            # without bare icon markers never pay the cost.
+            self.captioner = IconCaptioner(
+                Path(self.config.icon_caption.model_path).expanduser(),
+                device=self.config.icon_caption.device,
+                max_new_tokens=self.config.icon_caption.max_new_tokens,
+                batch_size=self.config.icon_caption.batch_size,
+                processor_path=self.config.icon_caption.processor_path,
+            )
+            self.perception.captioner = self.captioner
         self._load_state()
         self.kill_switch.start()
 
@@ -392,6 +406,8 @@ class AgentOrchestrator:
         self.perception.shutdown()
         if self.detector is not None:
             self.detector.shutdown()
+        if self.captioner is not None:
+            self.captioner.shutdown()
 
     def _save_state(self) -> None:
         # Deliberately excludes `history`: it embeds base64 screenshots (tens

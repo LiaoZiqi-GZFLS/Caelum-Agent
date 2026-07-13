@@ -349,3 +349,114 @@ def test_argparser_keeps_download_weights_but_drops_weights_source() -> None:
     assert not hasattr(args, "weights_source")
     with pytest.raises(SystemExit):
         parser.parse_args(["--weights-source", "github"])
+
+
+# ---------------------------------------------------------------------------
+# Florence-2 icon_caption weight download (OmniParser icon_caption fine-tune)
+# ---------------------------------------------------------------------------
+
+class TestIconCaptionWeightsPresent:
+    def test_missing_dir(self, tmp_path: Path) -> None:
+        assert setup.icon_caption_weights_present(tmp_path / "icon_caption") is False
+
+    def test_config_without_weights_is_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "config.json").write_text("{}")
+        assert setup.icon_caption_weights_present(tmp_path) is False
+
+    def test_config_and_safetensors(self, tmp_path: Path) -> None:
+        (tmp_path / "config.json").write_text("{}")
+        (tmp_path / "model.safetensors").write_bytes(b"x" * 1024)
+        assert setup.icon_caption_weights_present(tmp_path) is True
+
+
+class TestDownloadIconCaptionWeights:
+    def test_skips_when_already_present(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_caption"
+        target.mkdir()
+        (target / "config.json").write_text("{}")
+        (target / "model.safetensors").write_bytes(b"x" * 1024)
+        calls: list = []
+
+        ok = setup.download_icon_caption_weights(
+            target_dir=target,
+            snapshot_download=lambda *a, **k: calls.append((a, k)),
+        )
+
+        assert ok is True
+        assert calls == []
+
+    def test_downloads_snapshot_and_copies_subfolder(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_caption"
+        calls: list[dict] = []
+
+        def fake_snapshot(repo, allow_patterns, local_dir=None):
+            calls.append(
+                {"repo": repo, "allow_patterns": allow_patterns, "local_dir": local_dir}
+            )
+            if local_dir is None:
+                return None  # processor warm-up: goes to the HF cache
+            src = Path(local_dir) / "icon_caption"
+            src.mkdir(parents=True)
+            (src / "config.json").write_text("{}")
+            (src / "model.safetensors").write_bytes(b"w" * 1024)
+            return local_dir
+
+        ok = setup.download_icon_caption_weights(
+            target_dir=target, snapshot_download=fake_snapshot
+        )
+
+        assert ok is True
+        assert calls[0]["repo"] == setup.ICON_CAPTION_REPO
+        assert calls[0]["allow_patterns"] == "icon_caption/*"
+        assert calls[1]["repo"] == setup.ICON_CAPTION_PROCESSOR_REPO
+        assert calls[1]["local_dir"] is None
+        assert (target / "config.json").exists()
+        assert (target / "model.safetensors").read_bytes() == b"w" * 1024
+
+    def test_processor_warmup_failure_still_succeeds(self, tmp_path: Path) -> None:
+        """The main weights matter; a failed processor warm-up only warns —
+        the first caption fetches the processor lazily."""
+        target = tmp_path / "icon_caption"
+
+        def fake_snapshot(repo, allow_patterns, local_dir=None):
+            if local_dir is None:
+                raise RuntimeError("processor repo unreachable")
+            src = Path(local_dir) / "icon_caption"
+            src.mkdir(parents=True)
+            (src / "config.json").write_text("{}")
+            (src / "model.safetensors").write_bytes(b"w" * 1024)
+            return local_dir
+
+        ok = setup.download_icon_caption_weights(
+            target_dir=target, snapshot_download=fake_snapshot
+        )
+
+        assert ok is True
+        assert (target / "model.safetensors").exists()
+
+    def test_download_failure_is_best_effort(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_caption"
+
+        def boom(*a, **k):
+            raise RuntimeError("network down")
+
+        assert (
+            setup.download_icon_caption_weights(
+                target_dir=target, snapshot_download=boom
+            )
+            is False
+        )
+        assert not (target / "config.json").exists()
+
+    def test_snapshot_without_subfolder_is_best_effort(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_caption"
+
+        def fake_snapshot(repo, allow_patterns, local_dir):
+            return local_dir  # nothing downloaded
+
+        assert (
+            setup.download_icon_caption_weights(
+                target_dir=target, snapshot_download=fake_snapshot
+            )
+            is False
+        )

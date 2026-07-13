@@ -509,6 +509,86 @@ def download_yolo_weights(
         return False
 
 
+# ---------------------------------------------------------------------------
+# Florence-2 (OmniParser icon_caption) weight download
+# ---------------------------------------------------------------------------
+
+ICON_CAPTION_REPO = "microsoft/OmniParser-v2.0"
+ICON_CAPTION_SUBDIR = "icon_caption"
+ICON_CAPTION_DIR = PROJECT_ROOT / "models" / "omniparser" / "icon_caption"
+# The icon_caption checkpoint ships no processor files; the processor and the
+# trust_remote_code modeling code both live in this repo. Warm the HF cache
+# with its small files so the first caption works offline afterwards.
+ICON_CAPTION_PROCESSOR_REPO = "microsoft/Florence-2-base-ft"
+ICON_CAPTION_PROCESSOR_PATTERNS = ["*.json", "*.py", "*.txt", "*.model"]
+
+
+def icon_caption_weights_present(dir_path: Path) -> bool:
+    """True when dir_path holds a plausible Florence-2 checkpoint."""
+    return (dir_path / "config.json").exists() and any(dir_path.glob("*.safetensors"))
+
+
+def download_icon_caption_weights(
+    repo: str = ICON_CAPTION_REPO,
+    target_dir: Path = ICON_CAPTION_DIR,
+    snapshot_download=None,
+) -> bool:
+    """Download the OmniParser icon_caption Florence-2 fine-tune (~1GB).
+
+    Idempotent: skips when a plausible checkpoint already exists. Best-effort:
+    any failure logs a warning and returns False — icon captioning is a
+    nicety on top of YOLO markers, not a hard requirement. Honors the
+    HF_ENDPOINT environment variable (e.g. https://hf-mirror.com in China).
+    """
+    if icon_caption_weights_present(target_dir):
+        log("Florence-2 icon_caption weights already present; skipping download.")
+        return True
+    try:
+        if snapshot_download is None:
+            from huggingface_hub import snapshot_download as _snapshot_download
+
+            snapshot_download = _snapshot_download
+        with tempfile.TemporaryDirectory() as tmp:
+            log(
+                f"Downloading Florence-2 icon_caption weights from {repo} "
+                "(honors HF_ENDPOINT for mirrors)..."
+            )
+            local = snapshot_download(
+                repo,
+                allow_patterns=f"{ICON_CAPTION_SUBDIR}/*",
+                local_dir=tmp,
+            )
+            src = Path(local) / ICON_CAPTION_SUBDIR
+            if not src.exists():
+                raise RuntimeError(
+                    f"{ICON_CAPTION_SUBDIR}/ not found in the downloaded snapshot"
+                )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(src, target_dir, dirs_exist_ok=True)
+        if not icon_caption_weights_present(target_dir):
+            raise RuntimeError("icon_caption weights incomplete after download")
+        log(f"Florence-2 icon_caption weights installed to {target_dir}.")
+        # Warm the HF cache with the processor + remote-code files (small);
+        # without them the first caption needs network. Best-effort: a
+        # failure here only defers the fetch to first use.
+        try:
+            snapshot_download(
+                ICON_CAPTION_PROCESSOR_REPO,
+                allow_patterns=ICON_CAPTION_PROCESSOR_PATTERNS,
+            )
+            log(f"Processor files cached from {ICON_CAPTION_PROCESSOR_REPO}.")
+        except Exception as exc:
+            log(f"WARNING: processor warm-up failed (will fetch on first use): {exc}")
+        return True
+    except Exception as exc:
+        log(f"WARNING: icon_caption weight download failed: {exc}")
+        log(
+            "Icon captioning needs models/omniparser/icon_caption; without it "
+            "YOLO markers still work, they just lack semantic captions."
+        )
+        return False
+
+
 def smoke_test_kimi() -> bool:
     log("Running Kimi API smoke test...")
     script = PROJECT_ROOT / "spikes" / "kimi_formula_chain.py"
@@ -580,7 +660,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--download-weights",
         action="store_true",
-        help="Download OmniParser YOLO vision weights (~40MB) after environment setup.",
+        help="Download OmniParser vision weights (YOLO icon_detect ~40MB + Florence-2 icon_caption ~1GB) after environment setup.",
     )
     parser.add_argument(
         "--api-key",
@@ -663,6 +743,7 @@ def main() -> int:
         create_data_dir()
         if args.download_weights:
             download_yolo_weights()
+            download_icon_caption_weights()
         install_playwright_browser()
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
