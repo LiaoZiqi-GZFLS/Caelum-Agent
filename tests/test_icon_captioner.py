@@ -217,9 +217,32 @@ def test_model_loads_with_trust_remote_code_and_processor_path(fake_models):
     assert FakeProcessor.last_trust_remote_code is True
 
 
-def test_default_processor_path_is_florence2_base_ft(fake_models):
+def test_hf_repo_processor_path_is_used_as_is(fake_models):
     FakeProcessor.decodes = ["x"]
-    cap = ic.IconCaptioner("model-dir")
+    cap = ic.IconCaptioner("model-dir", processor_path="microsoft/Florence-2-base-ft")
+
+    cap.caption_crops(_crops(1))
+
+    assert FakeProcessor.last_path == "microsoft/Florence-2-base-ft"
+
+
+def test_existing_local_processor_dir_is_used(fake_models, tmp_path):
+    """setup.py installs the processor from the release zip into a local dir;
+    when it exists it wins over the HF repo (fully offline)."""
+    FakeProcessor.decodes = ["x"]
+    cap = ic.IconCaptioner("model-dir", processor_path=str(tmp_path))
+
+    cap.caption_crops(_crops(1))
+
+    assert FakeProcessor.last_path == str(tmp_path)
+
+
+def test_missing_local_processor_path_falls_back_to_hf_repo(fake_models, tmp_path):
+    """A path-like processor_path that doesn't exist (weights not downloaded)
+    falls back to the HF repo instead of failing with a confusing path error."""
+    FakeProcessor.decodes = ["x"]
+    missing = str(tmp_path / "icon_caption_processor")
+    cap = ic.IconCaptioner("model-dir", processor_path=missing)
 
     cap.caption_crops(_crops(1))
 

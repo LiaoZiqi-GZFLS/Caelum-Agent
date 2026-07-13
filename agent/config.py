@@ -55,10 +55,11 @@ class IconCaptionConfig(BaseModel):
     # button") so bare icon markers carry content like OCR text markers do.
     enabled: bool = True
     model_path: str = "./models/omniparser/icon_caption"
-    # Processor source: the icon_caption checkpoint ships no processor files,
-    # so the tokenizer/processor loads from this repo (which also hosts the
-    # trust_remote_code modeling code). Point at a local copy to go offline.
-    processor_path: str = "microsoft/Florence-2-base-ft"
+    # Processor source: the icon_caption checkpoint ships no processor files.
+    # setup.py --download-weights installs them here from the GitHub Release
+    # mirror; when this dir is missing the captioner falls back to the
+    # microsoft/Florence-2-base-ft HF repo at load time.
+    processor_path: str = "./models/omniparser/icon_caption_processor"
     # Inference device; automatically falls back to cpu once if a cuda
     # generate call raises.
     device: str = "cuda:0"

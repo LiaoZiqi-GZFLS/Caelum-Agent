@@ -59,7 +59,7 @@ def test_icon_caption_config_defaults():
     cfg = IconCaptionConfig()
     assert cfg.enabled is True
     assert cfg.model_path == "./models/omniparser/icon_caption"
-    assert cfg.processor_path == "microsoft/Florence-2-base-ft"
+    assert cfg.processor_path == "./models/omniparser/icon_caption_processor"
     assert cfg.device == "cuda:0"
     assert cfg.max_icons == 30
     assert cfg.batch_size == 8

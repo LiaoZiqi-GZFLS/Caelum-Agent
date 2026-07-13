@@ -24,6 +24,11 @@ logger = logging.getLogger("caelum.ui_detector")
 # answers with terse UI descriptions like "magnifier" / "red close button").
 _CAPTION_PROMPT = "<CAPTION>"
 
+# HF repo hosting the Florence-2 processor + remote modeling code. Used when
+# processor_path points at a local dir that doesn't exist (weights never
+# downloaded) — see IconCaptioner._resolve_processor_path.
+_HF_PROCESSOR_REPO = "microsoft/Florence-2-base-ft"
+
 # Lazy transformers import holders — importing transformers pulls in torch
 # and costs seconds, so it only happens on the first caption. Tests
 # monkeypatch these attributes with fakes.
@@ -54,9 +59,11 @@ class IconCaptioner:
     via ``AutoModelForCausalLM`` with ``trust_remote_code=True`` (the remote
     code is referenced by the checkpoint's auto_map). The OmniParser
     ``icon_caption`` checkpoint ships no processor files, so the processor
-    loads from ``processor_path`` (default ``microsoft/Florence-2-base-ft``,
-    which also hosts the remote modeling code) — the same split OmniParser
-    itself uses.
+    loads from ``processor_path`` — a local dir installed by
+    ``setup.py --download-weights`` (default
+    ``./models/omniparser/icon_caption_processor``, mirrored from the GitHub
+    Release), falling back to the ``microsoft/Florence-2-base-ft`` HF repo
+    when the local dir is missing.
     """
 
     def __init__(
@@ -65,7 +72,7 @@ class IconCaptioner:
         device: str = "cuda:0",
         max_new_tokens: int = 20,
         batch_size: int = 8,
-        processor_path: str = "microsoft/Florence-2-base-ft",
+        processor_path: str = "./models/omniparser/icon_caption_processor",
     ) -> None:
         self.model_path = str(model_path)
         self.device = device
@@ -77,6 +84,31 @@ class IconCaptioner:
         self._dtype = None
         self._fell_back = False
 
+    def _resolve_processor_path(self) -> str:
+        """Resolve the processor source for ``from_pretrained``.
+
+        A local directory wins when it exists (installed by setup.py from the
+        release zip — fully offline). A path-like value that doesn't exist
+        (weights never downloaded) falls back to the HF repo with a warning;
+        anything else is treated as an HF repo id and used as-is.
+        """
+        path = Path(self.processor_path).expanduser()
+        if path.is_dir():
+            return str(path)
+        looks_local = (
+            self.processor_path.startswith((".", "~"))
+            or "\\" in self.processor_path
+            or ":" in self.processor_path
+        )
+        if looks_local:
+            logger.warning(
+                "icon_caption processor dir %s not found; falling back to HF repo %s",
+                self.processor_path,
+                _HF_PROCESSOR_REPO,
+            )
+            return _HF_PROCESSOR_REPO
+        return self.processor_path
+
     def _load(self) -> None:
         if self._model is None:
             import torch
@@ -87,7 +119,7 @@ class IconCaptioner:
                 torch.float16 if str(self.device).startswith("cuda") else torch.float32
             )
             self._processor = processor_cls.from_pretrained(
-                self.processor_path, trust_remote_code=True
+                self._resolve_processor_path(), trust_remote_code=True
             )
             self._model = model_cls.from_pretrained(
                 self.model_path, torch_dtype=self._dtype, trust_remote_code=True

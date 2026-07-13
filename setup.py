@@ -17,8 +17,10 @@ It will:
 4. Copy config.yaml.example -> config.yaml if missing and prompt for your Kimi API key.
 5. Validate config.yaml (parseable and contains a real API key).
 6. Create data/ directory and a minimal SQLite schema.
-7. Optionally download the OmniParser icon_detect YOLO weights (~40MB zip from
-   the GitHub Release mirror) used for SoM vision annotation.
+7. Optionally download the vision weights (YOLO icon_detect ~40MB, Florence-2
+   icon_caption ~1GB, Florence-2 processor ~3MB) — the GitHub Release mirror
+   is tried first, HuggingFace is the fallback. Afterwards the Florence-2
+   config's auto_map is localized so model loading works fully offline.
 8. Install Playwright Chromium if not already present.
 9. Run a smoke test (Kimi API + Windows-MCP tool list + YOLO load).
 
@@ -32,7 +34,7 @@ For Playwright Chromium download behind the Chinese firewall:
     $env:PLAYWRIGHT_DOWNLOAD_HOST = "https://npmmirror.com/mirrors/playwright"
     python setup.py
 
-To download the YOLO vision weights from the GitHub Release mirror:
+To download the vision weights (GitHub Release mirror first, HF fallback):
     python setup.py --download-weights
 """
 
@@ -40,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -464,6 +467,21 @@ def _fetch_url(url: str, dest: Path) -> None:
         shutil.copyfileobj(response, out)
 
 
+def _install_from_zip(zip_path: Path, marker: str, target_dir: Path) -> None:
+    """Extract zip_path and copy the directory containing ``marker`` into
+    target_dir (handles both nested and root-level zip layouts).
+    Raises RuntimeError when the marker file is missing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        extracted = Path(tmp) / "extracted"
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extracted)
+        candidates = sorted(extracted.rglob(marker))
+        if not candidates:
+            raise RuntimeError(f"{marker} not found inside {zip_path.name}")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(candidates[0].parent, target_dir, dirs_exist_ok=True)
+
+
 def download_yolo_weights(
     url: str = YOLO_WEIGHTS_URL,
     target_dir: Path = YOLO_WEIGHTS_DIR,
@@ -482,20 +500,10 @@ def download_yolo_weights(
     fetch = fetch or _fetch_url
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            zip_path = tmp_path / "icon_detect.zip"
+            zip_path = Path(tmp) / "icon_detect.zip"
             log(f"Downloading YOLO weights from {url}...")
             fetch(url, zip_path)
-            extracted = tmp_path / "extracted"
-            with zipfile.ZipFile(zip_path) as zf:
-                zf.extractall(extracted)
-            # The zip may nest the files under icon_detect/ or keep them at
-            # the root — locate model.pt and copy its whole directory.
-            candidates = sorted(extracted.rglob("model.pt"))
-            if not candidates:
-                raise RuntimeError("model.pt not found inside icon_detect.zip")
-            target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(candidates[0].parent, target_dir, dirs_exist_ok=True)
+            _install_from_zip(zip_path, "model.pt", target_dir)
         if not yolo_weights_present(target_dir):
             raise RuntimeError("model.pt missing or too small after extraction")
         log(f"YOLO weights installed to {target_dir}.")
@@ -510,17 +518,27 @@ def download_yolo_weights(
 
 
 # ---------------------------------------------------------------------------
-# Florence-2 (OmniParser icon_caption) weight download
+# Florence-2 (OmniParser icon_caption) weight + processor download
 # ---------------------------------------------------------------------------
 
 ICON_CAPTION_REPO = "microsoft/OmniParser-v2.0"
 ICON_CAPTION_SUBDIR = "icon_caption"
 ICON_CAPTION_DIR = PROJECT_ROOT / "models" / "omniparser" / "icon_caption"
+ICON_CAPTION_WEIGHTS_URL = (
+    "https://github.com/LiaoZiqi-GZFLS/omniparser-weights/"
+    "releases/download/v2.0/icon_caption_florence.zip"
+)
 # The icon_caption checkpoint ships no processor files; the processor and the
-# trust_remote_code modeling code both live in this repo. Warm the HF cache
-# with its small files so the first caption works offline afterwards.
+# trust_remote_code modeling code both live in this HF repo. The release zip
+# mirrors its small files (preferred — GitHub stays reachable where
+# huggingface.co is blocked); the HF cache warm-up is the fallback.
 ICON_CAPTION_PROCESSOR_REPO = "microsoft/Florence-2-base-ft"
 ICON_CAPTION_PROCESSOR_PATTERNS = ["*.json", "*.py", "*.txt", "*.model"]
+ICON_CAPTION_PROCESSOR_URL = (
+    "https://github.com/LiaoZiqi-GZFLS/omniparser-weights/"
+    "releases/download/v2.0/icon_caption_processor.zip"
+)
+ICON_CAPTION_PROCESSOR_DIR = PROJECT_ROOT / "models" / "omniparser" / "icon_caption_processor"
 
 
 def icon_caption_weights_present(dir_path: Path) -> bool:
@@ -529,30 +547,42 @@ def icon_caption_weights_present(dir_path: Path) -> bool:
 
 
 def download_icon_caption_weights(
+    url: str = ICON_CAPTION_WEIGHTS_URL,
     repo: str = ICON_CAPTION_REPO,
     target_dir: Path = ICON_CAPTION_DIR,
+    fetch=None,
     snapshot_download=None,
 ) -> bool:
     """Download the OmniParser icon_caption Florence-2 fine-tune (~1GB).
 
-    Idempotent: skips when a plausible checkpoint already exists. Best-effort:
-    any failure logs a warning and returns False — icon captioning is a
-    nicety on top of YOLO markers, not a hard requirement. Honors the
-    HF_ENDPOINT environment variable (e.g. https://hf-mirror.com in China).
+    Release-first: the GitHub Release zip mirror is tried before HuggingFace
+    (GitHub stays reachable where huggingface.co is blocked). Idempotent:
+    skips when a plausible checkpoint already exists. Best-effort: returns
+    False when both sources fail — icon captioning is a nicety on top of YOLO
+    markers, not a hard requirement. The HF path honors HF_ENDPOINT.
     """
     if icon_caption_weights_present(target_dir):
         log("Florence-2 icon_caption weights already present; skipping download.")
         return True
+    fetch = fetch or _fetch_url
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / "icon_caption_florence.zip"
+            log(f"Downloading Florence-2 icon_caption weights from {url}...")
+            fetch(url, zip_path)
+            _install_from_zip(zip_path, "model.safetensors", target_dir)
+        if not icon_caption_weights_present(target_dir):
+            raise RuntimeError("icon_caption weights incomplete after extraction")
+        log(f"Florence-2 icon_caption weights installed to {target_dir}.")
+        return True
+    except Exception as exc:
+        log(f"WARNING: release download failed ({exc}); trying HuggingFace {repo}...")
     try:
         if snapshot_download is None:
             from huggingface_hub import snapshot_download as _snapshot_download
 
             snapshot_download = _snapshot_download
         with tempfile.TemporaryDirectory() as tmp:
-            log(
-                f"Downloading Florence-2 icon_caption weights from {repo} "
-                "(honors HF_ENDPOINT for mirrors)..."
-            )
             local = snapshot_download(
                 repo,
                 allow_patterns=f"{ICON_CAPTION_SUBDIR}/*",
@@ -568,17 +598,6 @@ def download_icon_caption_weights(
         if not icon_caption_weights_present(target_dir):
             raise RuntimeError("icon_caption weights incomplete after download")
         log(f"Florence-2 icon_caption weights installed to {target_dir}.")
-        # Warm the HF cache with the processor + remote-code files (small);
-        # without them the first caption needs network. Best-effort: a
-        # failure here only defers the fetch to first use.
-        try:
-            snapshot_download(
-                ICON_CAPTION_PROCESSOR_REPO,
-                allow_patterns=ICON_CAPTION_PROCESSOR_PATTERNS,
-            )
-            log(f"Processor files cached from {ICON_CAPTION_PROCESSOR_REPO}.")
-        except Exception as exc:
-            log(f"WARNING: processor warm-up failed (will fetch on first use): {exc}")
         return True
     except Exception as exc:
         log(f"WARNING: icon_caption weight download failed: {exc}")
@@ -587,6 +606,103 @@ def download_icon_caption_weights(
             "YOLO markers still work, they just lack semantic captions."
         )
         return False
+
+
+def icon_caption_processor_present(dir_path: Path) -> bool:
+    """True when dir_path holds the Florence-2 processor essentials."""
+    return (dir_path / "processing_florence2.py").exists() and (
+        dir_path / "tokenizer.json"
+    ).exists()
+
+
+def download_icon_caption_processor(
+    url: str = ICON_CAPTION_PROCESSOR_URL,
+    target_dir: Path = ICON_CAPTION_PROCESSOR_DIR,
+    fetch=None,
+    snapshot_download=None,
+) -> bool:
+    """Download the Florence-2 processor + remote modeling code (~3MB).
+
+    Release zip first (installed into target_dir so the captioner can run
+    fully offline); falls back to warming the HF cache — the captioner
+    resolves a missing local dir to the HF repo id at runtime. Best-effort:
+    returns False when both sources fail (the first caption then needs
+    network, but everything else works).
+    """
+    if icon_caption_processor_present(target_dir):
+        log("Florence-2 processor already present; skipping download.")
+        return True
+    fetch = fetch or _fetch_url
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / "icon_caption_processor.zip"
+            log(f"Downloading Florence-2 processor from {url}...")
+            fetch(url, zip_path)
+            _install_from_zip(zip_path, "processing_florence2.py", target_dir)
+        if not icon_caption_processor_present(target_dir):
+            raise RuntimeError("processor files incomplete after extraction")
+        log(f"Florence-2 processor installed to {target_dir}.")
+        return True
+    except Exception as exc:
+        log(
+            f"WARNING: processor release download failed ({exc}); "
+            "warming the HuggingFace cache instead..."
+        )
+    try:
+        if snapshot_download is None:
+            from huggingface_hub import snapshot_download as _snapshot_download
+
+            snapshot_download = _snapshot_download
+        snapshot_download(
+            ICON_CAPTION_PROCESSOR_REPO,
+            allow_patterns=ICON_CAPTION_PROCESSOR_PATTERNS,
+        )
+        log(f"Processor files cached from {ICON_CAPTION_PROCESSOR_REPO}.")
+        return True
+    except Exception as exc:
+        log(f"WARNING: processor download failed (will fetch on first use): {exc}")
+        return False
+
+
+def localize_florence2_remote_code(
+    icon_caption_dir: Path = ICON_CAPTION_DIR,
+    processor_dir: Path = ICON_CAPTION_PROCESSOR_DIR,
+) -> str:
+    """Rewrite icon_caption/config.json auto_map to local remote-code refs.
+
+    The checkpoint's auto_map points at microsoft/Florence-2-base-ft on HF
+    (``<repo>--<module>.<Class>``), so even with local weights the model load
+    fetches its modeling code from HF. Rewriting the refs to plain
+    ``<module>.<Class>`` (no repo prefix — transformers then resolves the
+    module relative to the model dir) and copying the modules from
+    processor_dir makes the load fully offline. Values already carrying a
+    bare ``--module`` prefix (an earlier broken rewrite) are repaired too.
+    Idempotent. Returns "localized" | "already_local" | "no_config" |
+    "missing_processor_files".
+    """
+    config_path = icon_caption_dir / "config.json"
+    if not config_path.exists():
+        return "no_config"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    auto_map = config.get("auto_map") or {}
+    remote = {
+        key: value
+        for key, value in auto_map.items()
+        if isinstance(value, str) and "--" in value
+    }
+    if not remote:
+        return "already_local"
+    modules = {value.split("--", 1)[1].rsplit(".", 1)[0] for value in remote.values()}
+    if any(not (processor_dir / f"{module}.py").exists() for module in modules):
+        return "missing_processor_files"
+    for module in modules:
+        shutil.copy(processor_dir / f"{module}.py", icon_caption_dir / f"{module}.py")
+    for key, value in remote.items():
+        auto_map[key] = value.split("--", 1)[1]
+    config_path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return "localized"
 
 
 def smoke_test_kimi() -> bool:
@@ -660,7 +776,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--download-weights",
         action="store_true",
-        help="Download OmniParser vision weights (YOLO icon_detect ~40MB + Florence-2 icon_caption ~1GB) after environment setup.",
+        help="Download OmniParser vision weights (YOLO icon_detect ~40MB + Florence-2 icon_caption ~1GB + processor ~3MB; GitHub Release mirror first, HuggingFace fallback) after environment setup.",
     )
     parser.add_argument(
         "--api-key",
@@ -744,6 +860,14 @@ def main() -> int:
         if args.download_weights:
             download_yolo_weights()
             download_icon_caption_weights()
+            download_icon_caption_processor()
+            localize_status = localize_florence2_remote_code()
+            if localize_status == "localized":
+                log("Localized Florence-2 remote code: icon_caption/config.json "
+                    "auto_map now points at local modules (fully offline).")
+            elif localize_status == "missing_processor_files":
+                log("WARNING: processor files missing; skipped Florence-2 auto_map "
+                    "localization (model load will fetch remote code from HF).")
         install_playwright_browser()
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

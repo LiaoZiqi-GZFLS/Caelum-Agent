@@ -352,7 +352,7 @@ def test_argparser_keeps_download_weights_but_drops_weights_source() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Florence-2 icon_caption weight download (OmniParser icon_caption fine-tune)
+# Florence-2 icon_caption weight download (release first, HF fallback)
 # ---------------------------------------------------------------------------
 
 class TestIconCaptionWeightsPresent:
@@ -369,6 +369,17 @@ class TestIconCaptionWeightsPresent:
         assert setup.icon_caption_weights_present(tmp_path) is True
 
 
+def _make_weights_zip(path: Path, nested: bool = True) -> None:
+    if nested:
+        members = {
+            "icon_caption/config.json": b"{}",
+            "icon_caption/model.safetensors": b"w" * 1024,
+        }
+    else:
+        members = {"config.json": b"{}", "model.safetensors": b"w" * 1024}
+    _make_zip(path, members)
+
+
 class TestDownloadIconCaptionWeights:
     def test_skips_when_already_present(self, tmp_path: Path) -> None:
         target = tmp_path / "icon_caption"
@@ -379,48 +390,55 @@ class TestDownloadIconCaptionWeights:
 
         ok = setup.download_icon_caption_weights(
             target_dir=target,
-            snapshot_download=lambda *a, **k: calls.append((a, k)),
+            fetch=lambda url, dest: calls.append("fetch"),
+            snapshot_download=lambda *a, **k: calls.append("snapshot"),
         )
 
         assert ok is True
         assert calls == []
 
-    def test_downloads_snapshot_and_copies_subfolder(self, tmp_path: Path) -> None:
+    def test_release_zip_is_preferred_over_huggingface(self, tmp_path: Path) -> None:
         target = tmp_path / "icon_caption"
-        calls: list[dict] = []
+        fetched: list[str] = []
 
-        def fake_snapshot(repo, allow_patterns, local_dir=None):
-            calls.append(
-                {"repo": repo, "allow_patterns": allow_patterns, "local_dir": local_dir}
-            )
-            if local_dir is None:
-                return None  # processor warm-up: goes to the HF cache
-            src = Path(local_dir) / "icon_caption"
-            src.mkdir(parents=True)
-            (src / "config.json").write_text("{}")
-            (src / "model.safetensors").write_bytes(b"w" * 1024)
-            return local_dir
+        def fake_fetch(url: str, dest: Path) -> None:
+            fetched.append(url)
+            _make_weights_zip(dest)
+
+        def hf_must_not_run(*a, **k):
+            raise AssertionError("HF fallback must not run when the release works")
 
         ok = setup.download_icon_caption_weights(
-            target_dir=target, snapshot_download=fake_snapshot
+            target_dir=target, fetch=fake_fetch, snapshot_download=hf_must_not_run
         )
 
         assert ok is True
-        assert calls[0]["repo"] == setup.ICON_CAPTION_REPO
-        assert calls[0]["allow_patterns"] == "icon_caption/*"
-        assert calls[1]["repo"] == setup.ICON_CAPTION_PROCESSOR_REPO
-        assert calls[1]["local_dir"] is None
+        assert fetched == [setup.ICON_CAPTION_WEIGHTS_URL]
         assert (target / "config.json").exists()
         assert (target / "model.safetensors").read_bytes() == b"w" * 1024
 
-    def test_processor_warmup_failure_still_succeeds(self, tmp_path: Path) -> None:
-        """The main weights matter; a failed processor warm-up only warns —
-        the first caption fetches the processor lazily."""
+    def test_release_root_level_zip_layout(self, tmp_path: Path) -> None:
         target = tmp_path / "icon_caption"
 
-        def fake_snapshot(repo, allow_patterns, local_dir=None):
-            if local_dir is None:
-                raise RuntimeError("processor repo unreachable")
+        def fake_fetch(url: str, dest: Path) -> None:
+            _make_weights_zip(dest, nested=False)
+
+        ok = setup.download_icon_caption_weights(
+            target_dir=target, fetch=fake_fetch, snapshot_download=None
+        )
+
+        assert ok is True
+        assert (target / "model.safetensors").read_bytes() == b"w" * 1024
+
+    def test_falls_back_to_huggingface_when_release_fails(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_caption"
+        calls: list[dict] = []
+
+        def boom_fetch(url: str, dest: Path) -> None:
+            raise RuntimeError("release unreachable")
+
+        def fake_snapshot(repo, allow_patterns, local_dir):
+            calls.append({"repo": repo, "allow_patterns": allow_patterns})
             src = Path(local_dir) / "icon_caption"
             src.mkdir(parents=True)
             (src / "config.json").write_text("{}")
@@ -428,35 +446,246 @@ class TestDownloadIconCaptionWeights:
             return local_dir
 
         ok = setup.download_icon_caption_weights(
-            target_dir=target, snapshot_download=fake_snapshot
+            target_dir=target, fetch=boom_fetch, snapshot_download=fake_snapshot
         )
 
         assert ok is True
-        assert (target / "model.safetensors").exists()
+        assert calls == [{"repo": setup.ICON_CAPTION_REPO, "allow_patterns": "icon_caption/*"}]
+        assert (target / "model.safetensors").read_bytes() == b"w" * 1024
 
-    def test_download_failure_is_best_effort(self, tmp_path: Path) -> None:
+    def test_hf_snapshot_without_subfolder_is_best_effort(self, tmp_path: Path) -> None:
+        target = tmp_path / "icon_caption"
+
+        def boom_fetch(url: str, dest: Path) -> None:
+            raise RuntimeError("release unreachable")
+
+        def fake_snapshot(repo, allow_patterns, local_dir):
+            return local_dir  # nothing downloaded
+
+        ok = setup.download_icon_caption_weights(
+            target_dir=target, fetch=boom_fetch, snapshot_download=fake_snapshot
+        )
+
+        assert ok is False
+        assert not (target / "config.json").exists()
+
+    def test_both_sources_failing_is_best_effort(self, tmp_path: Path) -> None:
         target = tmp_path / "icon_caption"
 
         def boom(*a, **k):
             raise RuntimeError("network down")
 
-        assert (
-            setup.download_icon_caption_weights(
-                target_dir=target, snapshot_download=boom
-            )
-            is False
+        ok = setup.download_icon_caption_weights(
+            target_dir=target, fetch=boom, snapshot_download=boom
         )
+
+        assert ok is False
         assert not (target / "config.json").exists()
 
-    def test_snapshot_without_subfolder_is_best_effort(self, tmp_path: Path) -> None:
-        target = tmp_path / "icon_caption"
 
-        def fake_snapshot(repo, allow_patterns, local_dir):
-            return local_dir  # nothing downloaded
+# ---------------------------------------------------------------------------
+# Florence-2 processor download (release zip first, HF cache warm-up fallback)
+# ---------------------------------------------------------------------------
 
-        assert (
-            setup.download_icon_caption_weights(
-                target_dir=target, snapshot_download=fake_snapshot
-            )
-            is False
+class TestIconCaptionProcessorPresent:
+    def test_missing_dir(self, tmp_path: Path) -> None:
+        assert setup.icon_caption_processor_present(tmp_path / "proc") is False
+
+    def test_tokenizer_only_is_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "tokenizer.json").write_text("{}")
+        assert setup.icon_caption_processor_present(tmp_path) is False
+
+    def test_processing_code_and_tokenizer(self, tmp_path: Path) -> None:
+        (tmp_path / "processing_florence2.py").write_text("# code")
+        (tmp_path / "tokenizer.json").write_text("{}")
+        assert setup.icon_caption_processor_present(tmp_path) is True
+
+
+class TestDownloadIconCaptionProcessor:
+    def test_skips_when_already_present(self, tmp_path: Path) -> None:
+        target = tmp_path / "proc"
+        target.mkdir()
+        (target / "processing_florence2.py").write_text("# code")
+        (target / "tokenizer.json").write_text("{}")
+        calls: list = []
+
+        ok = setup.download_icon_caption_processor(
+            target_dir=target,
+            fetch=lambda url, dest: calls.append("fetch"),
+            snapshot_download=lambda *a, **k: calls.append("snapshot"),
         )
+
+        assert ok is True
+        assert calls == []
+
+    def test_release_zip_is_preferred(self, tmp_path: Path) -> None:
+        target = tmp_path / "proc"
+        fetched: list[str] = []
+
+        def fake_fetch(url: str, dest: Path) -> None:
+            fetched.append(url)
+            _make_zip(
+                dest,
+                {
+                    "processing_florence2.py": b"# code",
+                    "tokenizer.json": b"{}",
+                    "SOURCE.txt": b"note",
+                },
+            )
+
+        def hf_must_not_run(*a, **k):
+            raise AssertionError("HF warm-up must not run when the release works")
+
+        ok = setup.download_icon_caption_processor(
+            target_dir=target, fetch=fake_fetch, snapshot_download=hf_must_not_run
+        )
+
+        assert ok is True
+        assert fetched == [setup.ICON_CAPTION_PROCESSOR_URL]
+        assert (target / "processing_florence2.py").exists()
+        assert (target / "tokenizer.json").exists()
+
+    def test_falls_back_to_hf_cache_warmup(self, tmp_path: Path) -> None:
+        """The HF fallback only warms the cache (no local_dir): the captioner
+        then resolves the missing local dir to the HF repo id at runtime."""
+        target = tmp_path / "proc"
+        calls: list[dict] = []
+
+        def boom_fetch(url: str, dest: Path) -> None:
+            raise RuntimeError("release unreachable")
+
+        def fake_snapshot(repo, allow_patterns, local_dir=None):
+            calls.append(
+                {"repo": repo, "allow_patterns": allow_patterns, "local_dir": local_dir}
+            )
+
+        ok = setup.download_icon_caption_processor(
+            target_dir=target, fetch=boom_fetch, snapshot_download=fake_snapshot
+        )
+
+        assert ok is True
+        assert calls == [
+            {
+                "repo": setup.ICON_CAPTION_PROCESSOR_REPO,
+                "allow_patterns": setup.ICON_CAPTION_PROCESSOR_PATTERNS,
+                "local_dir": None,
+            }
+        ]
+        assert not target.exists()  # warm-up populates the HF cache, not target
+
+    def test_both_sources_failing_is_best_effort(self, tmp_path: Path) -> None:
+        target = tmp_path / "proc"
+
+        def boom(*a, **k):
+            raise RuntimeError("network down")
+
+        ok = setup.download_icon_caption_processor(
+            target_dir=target, fetch=boom, snapshot_download=boom
+        )
+
+        assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Florence-2 auto_map localization (offline trust_remote_code)
+# ---------------------------------------------------------------------------
+
+_REMOTE_AUTO_MAP = {
+    "AutoConfig": "microsoft/Florence-2-base-ft--configuration_florence2.Florence2Config",
+    "AutoModelForCausalLM": (
+        "microsoft/Florence-2-base-ft--modeling_florence2.Florence2ForConditionalGeneration"
+    ),
+}
+
+
+def _make_localize_dirs(
+    tmp_path: Path,
+    auto_map: dict | None = _REMOTE_AUTO_MAP,
+    processor_files: tuple[str, ...] = ("configuration_florence2.py", "modeling_florence2.py"),
+) -> tuple[Path, Path]:
+    import json
+
+    ic_dir = tmp_path / "icon_caption"
+    ic_dir.mkdir()
+    if auto_map is not None:
+        (ic_dir / "config.json").write_text(json.dumps({"auto_map": auto_map}))
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    for name in processor_files:
+        (proc / name).write_text("# remote code")
+    return ic_dir, proc
+
+
+class TestLocalizeFlorence2RemoteCode:
+    def test_rewrites_refs_and_copies_modules(self, tmp_path: Path) -> None:
+        import json
+
+        ic_dir, proc = _make_localize_dirs(tmp_path)
+
+        status = setup.localize_florence2_remote_code(ic_dir, proc)
+
+        assert status == "localized"
+        auto = json.loads((ic_dir / "config.json").read_text())["auto_map"]
+        assert auto["AutoConfig"] == "configuration_florence2.Florence2Config"
+        assert (
+            auto["AutoModelForCausalLM"]
+            == "modeling_florence2.Florence2ForConditionalGeneration"
+        )
+        assert (ic_dir / "configuration_florence2.py").read_text() == "# remote code"
+        assert (ic_dir / "modeling_florence2.py").read_text() == "# remote code"
+
+    def test_repairs_broken_double_dash_prefix(self, tmp_path: Path) -> None:
+        """An earlier rewrite produced "--module.Class", which transformers
+        parses as an EMPTY repo id (HFValidationError). It must be normalized
+        to the plain "module.Class" form."""
+        import json
+
+        ic_dir, proc = _make_localize_dirs(
+            tmp_path,
+            auto_map={"AutoConfig": "--configuration_florence2.Florence2Config"},
+        )
+
+        status = setup.localize_florence2_remote_code(ic_dir, proc)
+
+        assert status == "localized"
+        auto = json.loads((ic_dir / "config.json").read_text())["auto_map"]
+        assert auto["AutoConfig"] == "configuration_florence2.Florence2Config"
+
+    def test_preserves_unrelated_config_keys(self, tmp_path: Path) -> None:
+        import json
+
+        ic_dir, proc = _make_localize_dirs(tmp_path)
+        config = json.loads((ic_dir / "config.json").read_text())
+        config["model_type"] = "florence2"
+        (ic_dir / "config.json").write_text(json.dumps(config))
+
+        setup.localize_florence2_remote_code(ic_dir, proc)
+
+        assert json.loads((ic_dir / "config.json").read_text())["model_type"] == "florence2"
+
+    def test_already_local_is_idempotent(self, tmp_path: Path) -> None:
+        ic_dir, proc = _make_localize_dirs(
+            tmp_path,
+            auto_map={"AutoConfig": "configuration_florence2.Florence2Config"},
+        )
+
+        assert setup.localize_florence2_remote_code(ic_dir, proc) == "already_local"
+        assert not (ic_dir / "configuration_florence2.py").exists()  # nothing copied
+
+    def test_no_config(self, tmp_path: Path) -> None:
+        ic_dir, proc = _make_localize_dirs(tmp_path, auto_map=None)
+
+        assert setup.localize_florence2_remote_code(ic_dir, proc) == "no_config"
+
+    def test_missing_processor_files_leaves_config_untouched(self, tmp_path: Path) -> None:
+        import json
+
+        ic_dir, proc = _make_localize_dirs(
+            tmp_path, processor_files=("configuration_florence2.py",)  # modeling missing
+        )
+
+        status = setup.localize_florence2_remote_code(ic_dir, proc)
+
+        assert status == "missing_processor_files"
+        auto = json.loads((ic_dir / "config.json").read_text())["auto_map"]
+        assert auto["AutoConfig"].startswith("microsoft/")
