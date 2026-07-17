@@ -132,7 +132,7 @@ async def test_handler_reports_view_to_on_capture(tmp_path: Path) -> None:
     assert rect == (10, 20, 300, 200)
     # The model sees the IMAGE, so the image's real pixel size is the loc space.
     assert image_size == (60, 40)
-    assert "translated to screen coordinates" in result
+    assert "Conversion to screen coordinates" in result
 
 
 @pytest.mark.asyncio

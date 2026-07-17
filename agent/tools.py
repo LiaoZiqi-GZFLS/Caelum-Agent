@@ -63,8 +63,7 @@ NEARBY_LABELS_SCHEMA: dict[str, Any] = {
             "maxItems": 2,
             "items": {"type": "number"},
             "description": (
-                "Query point [x, y] in the current screenshot's coordinate "
-                "space."
+                "Query point [x, y] in normalized [0,1] coordinates."
             ),
         },
         "k": {
@@ -92,8 +91,8 @@ ZOOM_REGION_SCHEMA: dict[str, Any] = {
             "maxItems": 2,
             "items": {"type": "number"},
             "description": (
-                "Region center [x, y] in the CURRENT screenshot's coordinate "
-                "space. Give exactly one of label or loc."
+                "Region center [x, y] in normalized [0,1] coordinates. "
+                "Give exactly one of label or loc."
             ),
         },
         "size": {
@@ -129,10 +128,9 @@ PREVIEW_POINTS_SCHEMA: dict[str, Any] = {
                 "items": {"type": "number"},
             },
             "description": (
-                "1-3 candidate [x, y] coordinates in the CURRENT SCREENSHOT's "
-                "coordinate space (the compressed resolution stated in the "
-                "environment description, not physical pixels). Numbered markers "
-                "are drawn on a clean copy of the screenshot and shown back to "
+                "1-3 candidate [x, y] coordinates in normalized [0,1] where "
+                "(0,0)=top-left and (1,1)=bottom-right. Numbered markers are "
+                "drawn on a clean copy of the screenshot and shown back to "
                 "you so you can adjust before clicking."
             ),
         },

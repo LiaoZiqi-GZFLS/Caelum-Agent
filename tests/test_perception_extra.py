@@ -27,21 +27,20 @@ def pm(config):
 # ---------------------------------------------------------------------------
 
 def test_compress_png_and_inverse_dpi(pm, config, monkeypatch):
-    """PNG format is honored; the image follows the inverse-DPI rule (at
-    200% scaling a 4000x2000 shot is halved, same as OCR input)."""
-    config.screenshot.format = "PNG"
+    """Inverse-DPI halves a 4000x2000 shot at 200% scaling, then tiered
+    downgrade drops 2000x1000 (>1080p) to 1080p. Output is always PNG."""
     monkeypatch.setattr("agent.perception._display_scale", lambda: 2.0)
 
     out = pm._compress(Image.new("RGB", (4000, 2000), "red"))
 
     assert out[:8] == b"\x89PNG\r\n\x1a\n"
-    assert Image.open(io.BytesIO(out)).size == (2000, 1000)
+    assert Image.open(io.BytesIO(out)).size == (1920, 960)
 
 
-def test_compress_jpeg(pm, config):
-    config.screenshot.format = "JPEG"
+def test_compress_output_is_png(pm):
+    """Screenshots are always PNG-encoded regardless of format config."""
     out = pm._compress(Image.new("RGB", (40, 40), "blue"))
-    assert out[:2] == b"\xff\xd8"
+    assert out[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_compute_image_hash_deterministic_and_sensitive():
@@ -314,31 +313,32 @@ async def _async_return(value):
 
 @pytest.mark.asyncio
 async def test_perceive_records_compressed_dimensions(pm, monkeypatch):
-    """Perception must record both native and compressed (model-visible) sizes."""
+    """Perception records native screen size and tiered-compressed image size."""
     monkeypatch.setattr(
         pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
     monkeypatch.setattr(pm, "_run_ocr_detailed", lambda img: ("", [], img.size))
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
-    pm.mcp = None  # real _compress runs: 2560x1440 at 125% -> 2048x1152
+    pm.mcp = None  # 2560x1440 at 125% -> 2048x1152 -> tiered to 1080p
 
     p = await pm.perceive("x")
 
     assert (p.screen_width, p.screen_height) == (2560, 1440)
-    assert (p.screenshot_width, p.screenshot_height) == (2048, 1152)
+    assert (p.screenshot_width, p.screenshot_height) == (1920, 1080)
 
 
 @pytest.mark.asyncio
 async def test_description_declares_coordinate_space(pm, monkeypatch):
-    """The description tells the model to give loc in the screenshot's space."""
+    """The description tells the model the screenshot resolution and normalized
+    coordinate convention."""
     monkeypatch.setattr(
         pm, "_capture_screenshot", lambda: Image.new("RGB", (2560, 1440))
     )
     monkeypatch.setattr(pm, "_run_ocr_detailed", lambda img: ("", [], img.size))
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
-    pm.mcp = None
+    pm.mcp = None  # 2560x1440 at 100% -> tiered to 1080p
 
     p = await pm.perceive("x")
 
-    assert "2560x1440" in p.description
-    assert "loc" in p.description
+    assert "1920x1080" in p.description
+    assert "normalized [0,1]" in p.description

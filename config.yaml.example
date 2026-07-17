@@ -113,11 +113,13 @@ icon_caption:
 screenshot:
   # Capture backend: mss (recommended) or PIL
   backend: mss
-  # The model-facing screenshot uses the same inverse-DPI normalization as
-  # OCR: the original image at 100% display scaling, 1/scale above that,
-  # floored at a 1080p box. UpgradeVision switches to the full original.
-  quality: 60
-  format: JPEG
+  # The model-facing screenshot uses inverse-DPI normalization (original at
+  # 100% display scaling, 1/scale above) followed by a tiered downgrade
+  # (>1080p -> 1080p, >2K -> 2K, >4K -> 4K). Screenshots are PNG-encoded
+  # for lossless quality (the LLM reads text from these).
+  # UpgradeVision switches to the full original image.
+  quality: 60  # ignored for PNG
+  format: PNG
   # Whether to crop around the active window by default.
   crop_to_active_window: false
 

@@ -96,12 +96,13 @@ class Perception:
     som_annotations: list[dict[str, Any]]
     ui_hash: str = ""
     # Native-pixel size of the AREA the screenshot covers (the full screen for
-    # normal perceptions; the cropped region for ZoomRegion views).
+    # normal perceptions; the cropped region for ZoomRegion views). Used for
+    # normalized-coordinate conversion: screen_px = origin + norm * screen.
     screen_width: int = 0
     screen_height: int = 0
-    # Size of the compressed screenshot the model actually sees. Coordinates
-    # the model gives (loc) are in THIS space; the orchestrator rescales them
-    # to native pixels: screen = origin + loc * screen / screenshot.
+    # Size of the compressed screenshot image (still needed for PreviewPoints
+    # marker drawing). The model gives coordinates as normalized [0,1]; the
+    # orchestrator converts: screen_px = origin + norm * screen_size.
     screenshot_width: int = 0
     screenshot_height: int = 0
     # Native-pixel origin of the covered area ((0, 0) for full-screen views;
@@ -139,9 +140,9 @@ def _format_marker_list(som_annotations: list[dict[str, Any]]) -> str:
         kind = "icon" if a.get("icon") else "text"
         text = a.get("text")
         if text:
-            lines.append(f'[{label}] "{text}" {kind} @({cx:.3f},{cy:.3f})')
+            lines.append(f'[{label}] "{text}" {kind} @({cx:.4f},{cy:.4f})')
         else:
-            lines.append(f"[{label}] {kind} @({cx:.3f},{cy:.3f})")
+            lines.append(f"[{label}] {kind} @({cx:.4f},{cy:.4f})")
     extra = len(som_annotations) - _MARKER_LIST_CAP
     if extra > 0:
         lines.append(f"... (+{extra} more markers)")
@@ -184,7 +185,7 @@ class PerceptionModule:
         cache_dir = self.config.cache_dir_absolute()
         cache_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(time.time() * 1000)
-        screenshot_path = cache_dir / f"screenshot_{timestamp}.jpg"
+        screenshot_path = cache_dir / f"screenshot_{timestamp}.png"
 
         loop = asyncio.get_event_loop()
         image = await loop.run_in_executor(self._io_executor, self._capture_screenshot)
@@ -265,13 +266,13 @@ class PerceptionModule:
                 screenshot_path, som_annotations,
             )
             annotated_screenshot_path = (
-                cache_dir / f"screenshot_{timestamp}_annotated.jpg"
+                cache_dir / f"screenshot_{timestamp}_annotated.png"
             )
             await loop.run_in_executor(
                 self._io_executor,
                 annotated_image.save,
                 annotated_screenshot_path,
-                "JPEG",
+                "PNG",
             )
 
         return Perception(
@@ -309,7 +310,7 @@ class PerceptionModule:
         cache_dir = self.config.cache_dir_absolute()
         cache_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(time.time() * 1000)
-        screenshot_path = cache_dir / f"region_{timestamp}.jpg"
+        screenshot_path = cache_dir / f"region_{timestamp}.png"
 
         loop = asyncio.get_event_loop()
         full = await loop.run_in_executor(
@@ -331,7 +332,7 @@ class PerceptionModule:
         await loop.run_in_executor(
             self._io_executor,
             lambda: crop.save(
-                screenshot_path, "JPEG", quality=self.config.screenshot.quality
+                screenshot_path, "PNG"
             ),
         )
 
@@ -358,12 +359,12 @@ class PerceptionModule:
                 screenshot_path,
                 som_annotations,
             )
-            annotated_screenshot_path = cache_dir / f"region_{timestamp}_annotated.jpg"
+            annotated_screenshot_path = cache_dir / f"region_{timestamp}_annotated.png"
             await loop.run_in_executor(
                 self._io_executor,
                 annotated_image.save,
                 annotated_screenshot_path,
-                "JPEG",
+                "PNG",
             )
 
         description = self._build_region_description(
@@ -395,9 +396,10 @@ class PerceptionModule:
             f"Zoomed region view: native pixels ({origin[0]},{origin[1]}) to "
             f"({origin[0] + size[0]},{origin[1] + size[1]}), shown at original "
             f"resolution ({size[0]}x{size[1]}).",
-            "When a tool needs coordinates (loc), give them in THIS region "
-            "image's coordinate space — conversion to screen pixels is "
-            "handled automatically.",
+            "When a tool needs coordinates (loc), give them as normalized "
+            "[0,1] where (0,0)=top-left and (1,1)=bottom-right of the "
+            "region image — conversion to screen pixels is handled "
+            "automatically.",
         ]
         if ocr_text:
             parts.append(f"Region OCR text:\n{ocr_text}")
@@ -467,11 +469,9 @@ class PerceptionModule:
             return image
 
     def _compress(self, image: Image.Image) -> bytes:
-        # The model sees exactly what OCR sees: the same inverse-DPI
-        # normalization (original at 100% scale, 1/scale above, floored at
-        # the 1080p box). UpgradeVision (original_resolution) skips resizing
-        # entirely — the model gets the original image. Mutates in place
-        # (like the old thumbnail) so perceive() reads the final size.
+        # Inverse-DPI normalization (same as OCR): at >100% display scale
+        # the image is scaled back by 1/scale so text sits at its 100% size;
+        # floored at a 1080p cap. UpgradeVision skips this step entirely.
         if not self.original_resolution:
             ratio = _ocr_resize_ratio(image.size, _display_scale())
             if ratio < 1.0:
@@ -479,12 +479,27 @@ class PerceptionModule:
                 image.thumbnail(
                     (round(w * ratio), round(h * ratio)), Image.Resampling.LANCZOS
                 )
-        fmt = self.config.screenshot.format
+            # Tiered downgrade: after inverse-DPI scaling, drop to the next
+            # lower resolution tier so the model sees a consistently sized
+            # image.  >1080p -> 1080p, >2K -> 2K, >4K -> 4K.
+            w, h = image.size
+            max_dim = max(w, h)
+            if max_dim > 3840:       # above 4K -> 4K
+                tier_ratio = min(3840.0 / w, 2160.0 / h)
+            elif max_dim > 2560:     # 4K range -> 2K
+                tier_ratio = min(2560.0 / w, 1440.0 / h)
+            elif max_dim > 1920:     # 2K range -> 1080p
+                tier_ratio = min(1920.0 / w, 1080.0 / h)
+            else:
+                tier_ratio = 1.0     # already <=1080p, keep as-is
+            if tier_ratio < 1.0:
+                image.thumbnail(
+                    (round(w * tier_ratio), round(h * tier_ratio)),
+                    Image.Resampling.LANCZOS,
+                )
+        # PNG base64 for lossless quality — the LLM reads text from these.
         buf = io.BytesIO()
-        if fmt == "PNG":
-            image.save(buf, format="PNG")
-        else:
-            image.save(buf, format="JPEG", quality=self.config.screenshot.quality)
+        image.save(buf, format="PNG")
         return buf.getvalue()
 
     @staticmethod
@@ -677,9 +692,9 @@ class PerceptionModule:
         if screenshot_size[0] and screenshot_size[1]:
             parts.append(
                 f"Screenshot resolution: {screenshot_size[0]}x{screenshot_size[1]}. "
-                "When a tool needs coordinates (loc), give them in THIS "
-                "screenshot's coordinate space — scaling to the physical "
-                "screen is handled automatically."
+                "All coordinates (loc) must be normalized [0,1] where "
+                "(0,0)=top-left and (1,1)=bottom-right. Conversion to "
+                "screen pixels is handled automatically."
             )
         if ocr_text:
             parts.append(f"OCR text:\n{ocr_text}")

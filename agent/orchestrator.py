@@ -596,16 +596,14 @@ class AgentOrchestrator:
             center_y = int(round(oy + match.get("center_y", 0) * sh))
         else:
             if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
-                return "[error] loc must be [x, y] in the current screenshot's coordinate space."
-            cw = perception.screenshot_width or 0
-            ch = perception.screenshot_height or 0
-            if not (sw and sh and cw and ch):
+                return "[error] loc must be [x, y] in normalized [0,1] coordinates."
+            if not (sw and sh):
                 return (
                     "[error] Current perception lacks dimensions; cannot map "
                     "loc to the screen."
                 )
-            center_x = int(round(ox + float(loc[0]) * sw / cw))
-            center_y = int(round(oy + float(loc[1]) * sh / ch))
+            center_x = int(round(ox + float(loc[0]) * sw))
+            center_y = int(round(oy + float(loc[1]) * sh))
 
         region = await self.perception.perceive_region(center_x, center_y, px)
         self._set_last_perception(region)
@@ -613,10 +611,10 @@ class AgentOrchestrator:
         return (
             f"[ok] Zoomed {size} region ({px}px) around screen ({center_x}, "
             f"{center_y}) attached below: clean image + YOLO-annotated copy. "
-            "Labels and loc coordinates now refer to the region image; "
-            "DesktopInteract(label=N) and PreviewPoints convert to screen "
-            "pixels automatically. The next perception round returns to the "
-            "full screen."
+            "Labels and loc coordinates now refer to the region image in "
+            "normalized [0,1] coordinates; DesktopInteract(label=N) and "
+            "PreviewPoints convert to screen pixels automatically. The next "
+            "perception round returns to the full screen."
         )
 
     def _register_zoom_region(self) -> None:
@@ -628,15 +626,15 @@ class AgentOrchestrator:
             description=(
                 "Zoom into a screen region at ORIGINAL resolution for a closer "
                 "look: crops a square around label=<marker number> or "
-                "loc=[x, y] (current screenshot space) and runs full "
+                "loc=[x, y] (normalized [0,1]) and runs full "
                 "perception on it (OCR + YOLO boxes), attaching clean + "
                 "annotated images. size: small=480, medium=960, large=1680 "
                 "native px — pick the smallest tier covering your target. Use "
                 "when text is too small to read or no marker covers your "
                 "target. After zooming, DesktopInteract(label=...) and loc "
-                "coordinates refer to the region image (conversion is "
-                "automatic); the next perception round returns to the full "
-                "screen."
+                "coordinates refer to the region image in normalized [0,1] "
+                "(conversion is automatic); the next perception round returns "
+                "to the full screen."
             ),
         )
 
@@ -649,10 +647,9 @@ class AgentOrchestrator:
         """Handler for NearbyLabels: list markers nearest to a query point.
 
         Pure geometry over the current perception's YOLO annotations — no new
-        capture or detection. Distances and centers are reported in the
-        current screenshot's pixel space (what the model sees); the model
-        clicks the closest match with DesktopInteract(label=N) or refines a
-        raw-coordinate guess with PreviewPoints.
+        capture or detection. All coordinates and distances are normalized
+        [0,1]; the model clicks the closest match with DesktopInteract(label=N)
+        or refines a coordinate guess with PreviewPoints.
         """
         perception = getattr(self, "_last_perception", None)
         if perception is None:
@@ -667,18 +664,8 @@ class AgentOrchestrator:
         if (label is None) == (loc is None):
             return (
                 "[error] NearbyLabels needs exactly one query point: "
-                "label=<marker number> or loc=[x, y] (current screenshot space)."
+                "label=<marker number> or loc=[x, y] (normalized [0,1])."
             )
-
-        cw = perception.screenshot_width or 0
-        ch = perception.screenshot_height or 0
-
-        def to_px(ann: dict[str, Any]) -> tuple[float, float]:
-            cx = float(ann.get("center_x", 0))
-            cy = float(ann.get("center_y", 0))
-            if cw and ch:
-                return cx * cw, cy * ch
-            return cx, cy
 
         if label is not None:
             match = next(
@@ -690,11 +677,12 @@ class AgentOrchestrator:
                     f"[error] SoM label {label} not found. Available labels: "
                     f"{available}"
                 )
-            qx, qy = to_px(match)
+            qx = float(match.get("center_x", 0))
+            qy = float(match.get("center_y", 0))
             pool = [a for a in anns if a is not match]
         else:
             if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
-                return "[error] loc must be [x, y] in the current screenshot's coordinate space."
+                return "[error] loc must be [x, y] in normalized [0,1] coordinates."
             qx, qy = float(loc[0]), float(loc[1])
             pool = list(anns)
 
@@ -705,21 +693,21 @@ class AgentOrchestrator:
 
         scored = []
         for ann in pool:
-            px, py = to_px(ann)
-            scored.append((math.hypot(px - qx, py - qy), ann, px, py))
+            cx = float(ann.get("center_x", 0))
+            cy = float(ann.get("center_y", 0))
+            scored.append((math.hypot(cx - qx, cy - qy), ann, cx, cy))
         scored.sort(key=lambda t: t[0])
         scored = scored[:k]
         if not scored:
             return "[error] No other markers near the query point."
 
-        unit = "px" if (cw and ch) else ""
         lines = [
-            f"  label {ann.get('label')} at ({px:.0f}, {py:.0f}) — "
-            f"distance {dist:.0f}{unit}"
-            for dist, ann, px, py in scored
+            f"  label {ann.get('label')} at ({cx:.4f}, {cy:.4f}) — "
+            f"distance {dist:.4f}"
+            for dist, ann, cx, cy in scored
         ]
         return (
-            f"[nearby labels] closest to ({qx:.0f}, {qy:.0f}):\n"
+            f"[nearby labels] closest to ({qx:.4f}, {qy:.4f}):\n"
             + "\n".join(lines)
             + "\nUse DesktopInteract(label=N) to click one, or PreviewPoints "
               "with adjusted coordinates."
@@ -733,7 +721,7 @@ class AgentOrchestrator:
             schema=NEARBY_LABELS_SCHEMA,
             description=(
                 "List the YOLO markers nearest to a point: label=<marker "
-                "number> or loc=[x, y] (current screenshot space), plus "
+                "number> or loc=[x, y] (normalized [0,1]), plus "
                 "optional k (default 6). Returns marker labels, centers, and "
                 "distances sorted nearest-first. Use when no marker covers "
                 "your exact target: pick the closest with "
@@ -820,24 +808,31 @@ class AgentOrchestrator:
                 "[error] No screenshot available to preview on. Wait for the "
                 "first perception (or call windows__Screenshot) and retry."
             )
+        # Convert normalized [0,1] → image pixels for the marker overlay.
+        img_w = getattr(perception, "screenshot_width", 0) or 0
+        img_h = getattr(perception, "screenshot_height", 0) or 0
+        if img_w and img_h:
+            img_px_pts = [(x * img_w, y * img_h) for x, y in pts]
+        else:
+            img_px_pts = pts  # fallback (should not happen in practice)
         try:
-            marked = mark_points(Image.open(base_path), pts)
+            marked = mark_points(Image.open(base_path), img_px_pts)
         except Exception as exc:
             return f"[error] Failed to draw preview markers: {exc}"
-        out_path = self.config.cache_dir_absolute() / "preview_points.jpg"
+        out_path = self.config.cache_dir_absolute() / "preview_points.png"
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            marked.save(out_path, "JPEG")
+            marked.save(out_path, "PNG")
         except Exception as exc:
             return f"[error] Failed to save preview image: {exc}"
-        # Replace semantics: each call redraws from the clean base, so the
-        # stash only ever holds the latest guess set.
+        # Store NORMALIZED coords (not image pixels) so follow-up text uses
+        # the same space the model provides for windows__Click(loc=[x, y]).
         self._pending_preview = (out_path, pts)
         listing = ", ".join(
-            f"marker {i + 1} at ({x:.0f}, {y:.0f})" for i, (x, y) in enumerate(pts)
+            f"marker {i + 1} at ({x:.4f}, {y:.4f})" for i, (x, y) in enumerate(pts)
         )
         return (
-            f"Preview attached: {listing} (screenshot coordinate space). "
+            f"Preview attached: {listing} (normalized [0,1] coordinates). "
             "The marked screenshot is shown below — check whether the markers "
             "sit on the target. Call PreviewPoints again with adjusted "
             "coordinates if needed (it replaces the previous markers); once a "
@@ -853,13 +848,13 @@ class AgentOrchestrator:
             schema=PREVIEW_POINTS_SCHEMA,
             description=(
                 "Preview up to 3 candidate click coordinates BEFORE clicking: "
-                "your best guesses (in the current screenshot's coordinate "
-                "space) are drawn as numbered red markers on a clean copy of "
-                "the screenshot and shown back to you. Use this as the LAST "
-                "RESORT when neither UIA labels (windows__Snapshot) nor SoM "
-                "markers (DesktopInteract) can locate the target: give your "
-                "best 1-3 guesses, look at the markers, adjust if needed, then "
-                "click with windows__Click(loc=[x, y]) using the confirmed "
+                "your best guesses in normalized [0,1] coordinates are drawn "
+                "as numbered red markers on a clean copy of the screenshot and "
+                "shown back to you. Use this as the LAST RESORT when neither "
+                "UIA labels (windows__Snapshot) nor SoM markers "
+                "(DesktopInteract) can locate the target: give your best 1-3 "
+                "guesses, look at the markers, adjust if needed, then click "
+                "with windows__Click(loc=[x, y]) using the confirmed "
                 "coordinates."
             ),
         )
@@ -979,7 +974,7 @@ class AgentOrchestrator:
                     b64 = base64.b64encode(image_bytes).decode("utf-8")
                     content.append({
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        "image_url": {"url": f"data:image/png;base64,{b64}"},
                     })
                 except Exception as exc:
                     content.append({
@@ -1009,7 +1004,7 @@ class AgentOrchestrator:
         except Exception:
             return None
         listing = "\n".join(
-            f"  marker {i + 1}: ({x:.0f}, {y:.0f})"
+            f"  marker {i + 1}: ({x:.4f}, {y:.4f})"
             for i, (x, y) in enumerate(points)
         )
         return [
@@ -1017,13 +1012,13 @@ class AgentOrchestrator:
                 "type": "text",
                 "text": (
                     "Preview of your candidate click coordinates (numbered red "
-                    f"markers, screenshot coordinate space):\n{listing}\n"
+                    f"markers, normalized [0,1]):\n{listing}\n"
                     "If a marker is off-target, call PreviewPoints again with "
                     "adjusted coordinates. When a marker is on target, click "
                     "with windows__Click(loc=[x, y]) using those coordinates."
                 ),
             },
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
         ]
 
     async def _llm_chat_with_breaker(
@@ -1204,7 +1199,10 @@ class AgentOrchestrator:
             "click with windows__Click(loc=[x, y]).\n"
             "- ESCALATE ON FAILURE: if locating or clicking a target fails twice in a row, do NOT "
             "retry the same call — move one step down this chain (NearbyLabels -> ZoomRegion -> "
-            "PreviewPoints) instead.\n\n"
+            "PreviewPoints) instead.\n"
+            "- ALL coordinates across every tool use the SAME normalized [0,1] "
+            "space where (0,0)=top-left and (1,1)=bottom-right of the image. "
+            "Never convert or scale coordinates yourself.\n\n"
             "## Working with desktop (Windows-MCP) tools\n"
             "Before clicking or typing in a desktop app you MUST call windows__Snapshot first to "
             "get the target element's [id], then pass it as `label`:\n"
@@ -1719,8 +1717,7 @@ class AgentOrchestrator:
                 succeeded.append(False)
                 continue
 
-            # The model gives loc in the compressed screenshot's coordinate
-            # space (that is the image it sees); convert to native pixels.
+            # The model gives loc in normalized [0,1]; convert to native pixels.
             if server == "windows":
                 args = self._rescale_loc_args(args)
 
@@ -1829,30 +1826,32 @@ class AgentOrchestrator:
         }
 
     def _rescale_loc_args(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Convert a model-given loc from image space to native screen pixels.
+        """Convert model-given normalized [0,1] loc to native screen pixels.
 
-        After a CaptureWindow call the model is looking at the captured
-        window image, so loc maps through that window's screen rect (origin
-        + scale). Otherwise the model sees the compressed screenshot and loc
-        maps through the latest perception's dimensions (the scaling math
-        stays on our side where it is exact). Pass-through when the active
-        view lacks dimensions, and skipped entirely when
-        crop_to_active_window is on (then the image is window-relative and
-        the mapping would need the crop offset).
+        The model always gives coordinates normalized to [0,1] where
+        (0,0)=top-left and (1,1)=bottom-right of the image it sees.
+        Conversion is: screen_px = image_origin + norm * screen_size.
+        CaptureWindow views and zoomed regions are handled identically
+        (the image origin and screen size of the covered area encode
+        everything needed). Pass-through when no usable perception
+        dimensions exist, and skipped entirely when crop_to_active_window
+        is on.
         """
         loc = args.get("loc")
         if not (isinstance(loc, (list, tuple)) and len(loc) == 2):
             return args
+        norm_x, norm_y = float(loc[0]), float(loc[1])
         view = self._capture_view
-        if view is not None and view.get("iw") and view.get("ih"):
-            x, y = float(loc[0]), float(loc[1])
+        if view is not None:
             rescaled = [
-                int(round(view["ox"] + x * view["w"] / view["iw"])),
-                int(round(view["oy"] + y * view["h"] / view["ih"])),
+                int(round(view["ox"] + norm_x * view["w"])),
+                int(round(view["oy"] + norm_y * view["h"])),
             ]
             logger.debug(
-                "Rescaled loc %s -> %s via CaptureWindow view (origin %s,%s)",
+                "Rescaled loc %s (norm) -> %s via CaptureWindow view "
+                "(origin %d,%d; size %d,%d)",
                 list(loc), rescaled, view["ox"], view["oy"],
+                view["w"], view["h"],
             )
             args = dict(args)
             args["loc"] = rescaled
@@ -1862,19 +1861,18 @@ class AgentOrchestrator:
         p = getattr(self, "_last_perception", None)
         sw = getattr(p, "screen_width", 0) or 0
         sh = getattr(p, "screen_height", 0) or 0
-        cw = getattr(p, "screenshot_width", 0) or 0
-        ch = getattr(p, "screenshot_height", 0) or 0
-        if not (sw and sh and cw and ch):
+        if not (sw and sh):
             return args
         ox = getattr(p, "image_origin_x", 0) or 0
         oy = getattr(p, "image_origin_y", 0) or 0
-        x, y = float(loc[0]), float(loc[1])
-        rescaled = [int(round(ox + x * sw / cw)), int(round(oy + y * sh / ch))]
-        if rescaled != list(loc):
-            logger.debug(
-                "Rescaled loc %s -> %s (screenshot %dx%d, screen %dx%d)",
-                list(loc), rescaled, cw, ch, sw, sh,
-            )
+        rescaled = [
+            int(round(ox + norm_x * sw)),
+            int(round(oy + norm_y * sh)),
+        ]
+        logger.debug(
+            "Rescaled loc %s (norm) -> %s (screen %dx%d; origin %d,%d)",
+            list(loc), rescaled, sw, sh, ox, oy,
+        )
         args = dict(args)
         args["loc"] = rescaled
         return args

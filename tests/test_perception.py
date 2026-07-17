@@ -503,7 +503,7 @@ async def test_perceive_compensation_detects_on_compressed_image(
     result = await module.perceive(instruction="click OK")
 
     assert spy.calls == 1
-    assert spy.seen_sizes == [(2048, 1152)]  # 2560x1440 at 125% inverse-DPI
+    assert spy.seen_sizes == [(1920, 1080)]  # 2560x1440 at 125% -> 2048x1152 -> tiered to 1080p
     assert result.som_annotations == [
         {
             "label": 1,
@@ -640,29 +640,29 @@ async def test_perceive_region_small_screen_clamps_to_full(
 def test_compress_matches_ocr_at_100_percent(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The model-facing screenshot uses the SAME inverse-DPI rule as OCR:
-    at 100% scaling the original image passes through untouched."""
+    """At 100% scaling the inverse-DPI step passes through; the tiered
+    downgrade then drops 3000x1500 (>2K) to the next lower tier (2K)."""
     module = PerceptionModule(config)
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.0)
     big = Image.new("RGB", (3000, 1500), (10, 20, 30))
 
     out = module._compress(big)
 
-    assert Image.open(io.BytesIO(out)).size == (3000, 1500)
+    assert Image.open(io.BytesIO(out)).size == (2560, 1280)
 
 
 def test_compress_matches_ocr_at_125_percent(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """At 125% scaling the screenshot is normalized by the inverse factor
-    (0.8x), exactly like OCR input."""
+    (0.8x → 2400x1200), then tiered down from >1080p to 1080p."""
     module = PerceptionModule(config)
     monkeypatch.setattr("agent.perception._display_scale", lambda: 1.25)
     big = Image.new("RGB", (3000, 1500), (10, 20, 30))
 
     out = module._compress(big)
 
-    assert Image.open(io.BytesIO(out)).size == (2400, 1200)
+    assert Image.open(io.BytesIO(out)).size == (1920, 960)
 
 
 def test_compress_floored_at_1080p(
@@ -787,9 +787,9 @@ def test_build_description_lists_marker_content() -> None:
 
     desc = PerceptionModule._build_description("", {}, anns, (1000, 1000))
 
-    assert '[1] "搜索" icon @(0.730,0.405)' in desc
-    assert '[2] "视频号" text @(0.120,0.880)' in desc
-    assert "[3] icon @(0.500,0.100)" in desc
+    assert '[1] "搜索" icon @(0.7300,0.4050)' in desc
+    assert '[2] "视频号" text @(0.1200,0.8800)' in desc
+    assert "[3] icon @(0.5000,0.1000)" in desc
 
 
 def test_build_description_caps_marker_list_at_100() -> None:
@@ -809,7 +809,7 @@ def test_build_region_description_lists_marker_content() -> None:
         "确定", anns, (1040, 480), (480, 480)
     )
 
-    assert '[1] "确定" icon @(0.300,0.400)' in desc
+    assert '[1] "确定" icon @(0.3000,0.4000)' in desc
 
 
 # ---------------------------------------------------------------------------
@@ -849,7 +849,7 @@ async def test_perceive_marks_ocr_boxes_without_yolo(
     assert a["bbox"] == pytest.approx([0.1, 0.1, 0.2, 0.15])
     assert p.annotated_screenshot_path is not None
     assert p.annotated_screenshot_path.exists()
-    assert '[1] "搜索" text @(0.150,0.125)' in p.description
+    assert '[1] "搜索" text @(0.1500,0.1250)' in p.description
 
 
 @pytest.mark.asyncio

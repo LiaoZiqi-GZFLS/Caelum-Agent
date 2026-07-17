@@ -196,8 +196,9 @@ def make_capture_window_handler(
             message += (
                 f"\nThe window sits at screen rect (left={rect[0]}, top={rect[1]}, "
                 f"size={rect[2]}x{rect[3]}); the image is a 1:1 rendering of it. "
-                "Give loc coordinates in THIS image's pixel space — they are "
-                "translated to screen coordinates automatically at click time."
+                "Give loc coordinates in normalized [0,1] where "
+                "(0,0)=top-left and (1,1)=bottom-right of this image. "
+                "Conversion to screen coordinates is handled automatically."
             )
         return message
 

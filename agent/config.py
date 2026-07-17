@@ -87,12 +87,12 @@ class YoloConfig(BaseModel):
 
 class ScreenshotConfig(BaseModel):
     backend: Literal["mss", "PIL"] = "mss"
-    # The model-facing screenshot uses the same inverse-DPI normalization as
-    # OCR (original at 100% scale, 1/scale above, floored at a 1080p box —
-    # see perception._ocr_resize_ratio); UpgradeVision switches to the
-    # original image. There are no size knobs on purpose.
-    quality: int = 60
-    format: Literal["JPEG", "PNG"] = "JPEG"
+    # The model-facing screenshot uses inverse-DPI normalization (original at
+    # 100% scale, 1/scale above) followed by a tiered downgrade (>1080p→1080p,
+    # >2K→2K, >4K→4K). UpgradeVision switches to the original image. Screenshots
+    # are PNG-encoded for lossless quality (the LLM reads text from these).
+    quality: int = 60  # ignored for PNG
+    format: Literal["JPEG", "PNG"] = "PNG"
     crop_to_active_window: bool = False
 
 

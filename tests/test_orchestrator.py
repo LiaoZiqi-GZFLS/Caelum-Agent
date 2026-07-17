@@ -1426,9 +1426,9 @@ async def test_rescale_loc_args_applies_region_origin(config, eventbus, killswit
         image_origin_y=50,
     )
 
-    out = agent._rescale_loc_args({"loc": [500, 250]})
+    out = agent._rescale_loc_args({"loc": [0.5, 0.5]})
 
-    assert out["loc"] == [1100, 550]  # 100 + 500*2, 50 + 250*2
+    assert out["loc"] == [1100, 550]  # 100 + 0.5*2000, 50 + 0.5*1000
 
 
 # ---------------------------------------------------------------------------
@@ -2770,7 +2770,7 @@ async def test_focus_guard_stopped_on_task_end(config, eventbus, killswitch):
 
 
 # ---------------------------------------------------------------------------
-# loc coordinate rescaling (screenshot space -> native screen pixels)
+# loc coordinate rescaling (normalized [0,1] -> native screen pixels)
 # ---------------------------------------------------------------------------
 
 def _scaled_perception() -> "Perception":
@@ -2783,7 +2783,7 @@ def _scaled_perception() -> "Perception":
 @pytest.mark.asyncio
 async def test_windows_loc_rescaled_to_native_screen(config, eventbus, killswitch):
     llm = FakeLLM([
-        _message("click", tool_calls=[_tool_call("windows__Click", {"loc": [640, 360]})]),
+        _message("click", tool_calls=[_tool_call("windows__Click", {"loc": [0.5, 0.5]})]),
         _message("done"),
         _message("YES"),
         _message("final"),
@@ -2806,7 +2806,7 @@ async def test_windows_loc_rescaled_to_native_screen(config, eventbus, killswitc
 @pytest.mark.asyncio
 async def test_windows_loc_passes_through_without_dimensions(config, eventbus, killswitch):
     llm = FakeLLM([
-        _message("click", tool_calls=[_tool_call("windows__Click", {"loc": [640, 360]})]),
+        _message("click", tool_calls=[_tool_call("windows__Click", {"loc": [0.5, 0.5]})]),
         _message("done"),
         _message("YES"),
         _message("final"),
@@ -2823,7 +2823,7 @@ async def test_windows_loc_passes_through_without_dimensions(config, eventbus, k
     await agent.run_task("click it")
 
     clicks = [c for c in mcp.calls if c[0] == "windows" and c[1] == "Click"]
-    assert clicks[0][2]["loc"] == [640, 360]
+    assert clicks[0][2]["loc"] == [0.5, 0.5]
 
 
 # ---------------------------------------------------------------------------
@@ -2847,7 +2847,7 @@ def test_capture_view_rescales_loc_with_window_origin(config, eventbus, killswit
         {"ox": 500, "oy": 300, "w": 600, "h": 400, "iw": 600, "ih": 400},
     )
 
-    out = agent._rescale_loc_args({"loc": [60, 40]})
+    out = agent._rescale_loc_args({"loc": [0.1, 0.1]})
 
     assert out["loc"] == [560, 340]
 
@@ -2858,7 +2858,7 @@ def test_capture_view_scales_when_image_differs_from_rect(config, eventbus, kill
         {"ox": 0, "oy": 0, "w": 1000, "h": 500, "iw": 500, "ih": 250},
     )
 
-    out = agent._rescale_loc_args({"loc": [250, 125]})
+    out = agent._rescale_loc_args({"loc": [0.5, 0.5]})
 
     assert out["loc"] == [500, 250]
 
@@ -2870,7 +2870,7 @@ def test_capture_view_takes_precedence_over_last_perception(config, eventbus, ki
     )
     agent._last_perception = _scaled_perception()
 
-    out = agent._rescale_loc_args({"loc": [60, 40]})
+    out = agent._rescale_loc_args({"loc": [0.1, 0.1]})
 
     assert out["loc"] == [560, 340]  # capture view wins, not 2x screen scaling
 
@@ -3005,10 +3005,10 @@ async def test_zoom_region_centers_on_loc(config, eventbus, killswitch, tmp_path
     record: dict[str, Any] = {}
     monkeypatch.setattr(agent.perception, "perceive_region", _region_perception_stub(record, tmp_path))
 
-    result = await agent._zoom_region_impl(size="large", loc=[500, 250])
+    result = await agent._zoom_region_impl(size="large", loc=[0.5, 0.5])
 
     assert result.startswith("[ok]")
-    assert record["args"] == (1000, 500, 1680)  # 500*2, 250*2, large=1680
+    assert record["args"] == (1000, 500, 1680)  # 0.5*2000, 0.5*1000, large=1680
 
 
 @pytest.mark.asyncio
@@ -3136,15 +3136,15 @@ async def test_nearby_labels_from_loc_sorted_by_distance(config, eventbus, kills
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
     agent._last_perception = _annotations_perception()
 
-    result = await agent._nearby_labels_impl(loc=[110, 100])
+    result = await agent._nearby_labels_impl(loc=[0.11, 0.10])
 
     assert result.startswith("[nearby labels]")
     lines = [l for l in result.splitlines() if l.strip().startswith("label")]
     assert len(lines) == 3
-    assert lines[0].startswith("  label 1")  # 10px away
-    assert lines[1].startswith("  label 2")  # ~103px
+    assert lines[0].startswith("  label 1")  # distance ~0.01
+    assert lines[1].startswith("  label 2")  # distance ~0.103
     assert lines[2].startswith("  label 3")  # far
-    assert "(100, 100)" in lines[0]
+    assert "(0.1000, 0.1000)" in lines[0]
     assert "DesktopInteract(label=N)" in result
 
 
@@ -3165,7 +3165,7 @@ async def test_nearby_labels_respects_k(config, eventbus, killswitch):
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
     agent._last_perception = _annotations_perception()
 
-    result = await agent._nearby_labels_impl(loc=[110, 100], k=2)
+    result = await agent._nearby_labels_impl(loc=[0.11, 0.10], k=2)
 
     lines = [l for l in result.splitlines() if l.strip().startswith("label")]
     assert len(lines) == 2
@@ -3226,12 +3226,12 @@ async def test_preview_points_draws_and_stashes_followup(config, eventbus, kills
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
     agent._last_perception = _perception_with_real_screenshot(tmp_path)
 
-    result = await agent._preview_points_impl(points=[[100, 50]])
+    result = await agent._preview_points_impl(points=[[0.5, 0.25]])
 
     assert "marker" in result.lower()
     assert agent._pending_preview is not None
     path, pts = agent._pending_preview
-    assert path.exists() and pts == [(100.0, 50.0)]
+    assert path.exists() and pts == [(0.5, 0.25)]
 
 
 @pytest.mark.asyncio
@@ -3241,11 +3241,11 @@ async def test_preview_points_replace_semantics(config, eventbus, killswitch, tm
     agent = AgentOrchestrator(config, eventbus, FakeLLM(), FakeMCP(), killswitch)
     agent._last_perception = _perception_with_real_screenshot(tmp_path)
 
-    await agent._preview_points_impl(points=[[50, 50]])
-    await agent._preview_points_impl(points=[[150, 150]])
+    await agent._preview_points_impl(points=[[0.25, 0.25]])
+    await agent._preview_points_impl(points=[[0.75, 0.75]])
 
     path, pts = agent._pending_preview
-    assert pts == [(150.0, 150.0)]
+    assert pts == [(0.75, 0.75)]
     marked = _Image.open(path)
     # The second call redrew from the clean base: the first point is not red.
     r, g, b = marked.getpixel((50, 50))
@@ -3297,7 +3297,7 @@ async def test_preview_points_followup_injected_in_run_task(config, eventbus, ki
     perception = FakePerception([_perception_with_real_screenshot(tmp_path)] * 2)
     holder: dict[str, Any] = {}
     llm = _PreviewLLM(holder, [
-        _message("preview", tool_calls=[_tool_call("PreviewPoints", {"points": [[100, 50]]})]),
+        _message("preview", tool_calls=[_tool_call("PreviewPoints", {"points": [[0.5, 0.25]]})]),
         _message("Marker 1 is on the button."),
         _message("YES"),
         _message("done"),
