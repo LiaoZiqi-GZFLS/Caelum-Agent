@@ -91,7 +91,7 @@ def make_draft_content_handler(
                 {"role": "assistant", "content": prefill, "partial": True}
             )
         try:
-            completion = await llm.chat(messages, tools=None)
+            completion = await llm.chat(messages, tool_choice="none")
         except Exception as exc:
             logger.warning("DraftContent subagent failed: %s", exc)
             return f"[error] DraftContent generation failed: {exc}"

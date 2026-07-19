@@ -24,6 +24,29 @@ class LLMClient:
         self._tools: list[dict[str, Any]] = []
         self._tool_to_uri: dict[str, str] = {}
         self._local_handlers: dict[str, FunctionHandler] = {}
+        # Active tool groups — None = all tools visible.
+        self._active_groups: set[str] | None = None
+        # Cumulative token counters across all chat() calls.
+        self._prompt_tokens: int = 0
+        self._completion_tokens: int = 0
+        self._total_tokens: int = 0
+
+    @property
+    def token_usage(self) -> dict[str, int]:
+        return {
+            "prompt": self._prompt_tokens,
+            "completion": self._completion_tokens,
+            "total": self._total_tokens,
+        }
+
+    def reset_usage(self) -> None:
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+        self._total_tokens = 0
+
+    def set_active_groups(self, groups: set[str] | None) -> None:
+        """Limit visible tools to core + the named groups. None = all tools."""
+        self._active_groups = groups
 
     async def initialize(self) -> None:
         if not self.config.enable_builtin_tools:
@@ -126,14 +149,32 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = ...,  # type: ignore[assignment]
         response_format: dict[str, Any] | None = None,
+        tool_choice: str | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
         }
         if tools is ...:
-            if self._tools:
-                kwargs["tools"] = self._tools
+            tools_to_send = self._tools
+            if self._active_groups is not None and self._tools:
+                from agent.tool_groups import (
+                    FORMULA_GROUP,
+                    tool_names_for_groups,
+                )
+
+                formula_names = set(self._tool_to_uri.keys())
+                allowed = tool_names_for_groups(
+                    self._active_groups,
+                    {t["function"]["name"] for t in self._tools},
+                    formula_names,
+                )
+                tools_to_send = [
+                    t for t in self._tools
+                    if t["function"]["name"] in allowed
+                ]
+            if tools_to_send:
+                kwargs["tools"] = tools_to_send
         elif tools:
             kwargs["tools"] = tools
         # tools=None explicitly omits the tools key.
@@ -143,7 +184,18 @@ class LLMClient:
             # e.g. {"type": "json_object"} — Kimi JSON Mode. Do not combine
             # with Partial Mode prefills (the API rejects the combination).
             kwargs["response_format"] = response_format
-        return await self.client.chat.completions.create(**kwargs)
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        completion = await self.client.chat.completions.create(**kwargs)
+        try:
+            usage = completion.usage
+            if usage:
+                self._prompt_tokens += usage.prompt_tokens or 0
+                self._completion_tokens += usage.completion_tokens or 0
+                self._total_tokens += usage.total_tokens or 0
+        except Exception:
+            pass  # usage tracking is best-effort, never break the agent
+        return completion
 
     async def execute_tool_calls(
         self, tool_calls: list[Any]

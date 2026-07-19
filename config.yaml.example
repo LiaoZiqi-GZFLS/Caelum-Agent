@@ -6,10 +6,9 @@ llm:
   provider: kimi
   base_url: https://api.moonshot.cn/v1
   api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-  model: kimi-k2.6
-  # Optional reasoning level for kimi-k2.6: minimal, low, medium, high.
-  # Do NOT use "none"; the endpoint rejects it for this model.
-  # reasoning_effort: minimal
+  model: kimi-k3
+  # K3 always has thinking on; reasoning_effort only supports "max".
+  # reasoning_effort: max
   # Set to true to include Kimi's built-in Formula tools.
   enable_builtin_tools: true
   # Register the ReadDocument tool: uploads binary documents (PDF/DOCX/PPTX/

@@ -114,7 +114,7 @@ class CLIPresenter:
 
     def banner(self) -> None:
         self.console.print(
-            "[bold cyan]Caelum-Agent[/] [dim]· Kimi K2.6 · type /help for commands[/]"
+            "[bold cyan]Caelum-Agent[/] [dim]· Kimi K3 · type /help for commands[/]"
         )
 
     def input(self, prompt: str = "[bold cyan]›[/] ") -> str:

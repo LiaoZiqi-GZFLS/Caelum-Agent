@@ -78,7 +78,7 @@ class ImageGenerator:
         last_path: Path | None = None
         last_issues = "no SVG produced"
         for round_no in range(1, self.max_rounds + 1):
-            completion = await self.llm.chat(messages, tools=None)
+            completion = await self.llm.chat(messages, tool_choice="none")
             content = completion.choices[0].message.content or ""
             svg = extract_svg(content)
             if svg is None:
@@ -142,7 +142,7 @@ class ImageGenerator:
                     {"type": "text", "text": _REVIEW_PROMPT.format(requirement=requirement)},
                 ],
             }],
-            tools=None,
+            tool_choice="none",
             response_format={"type": "json_object"},
         )
         content = completion.choices[0].message.content or ""

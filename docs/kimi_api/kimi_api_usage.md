@@ -26,7 +26,7 @@
 
 ## 1. 架构定位与连接配置
 
-Kimi K2.6 是项目的**唯一 LLM 大脑**（设计决策：无 Ollama；本地模型只有 OmniParser YOLOv8 图标检测器和 Florence-2 图标描述器，均为视觉感知用，不参与推理）。
+Kimi K3 是项目的**唯一 LLM 大脑**（设计决策：无 Ollama；本地模型只有 OmniParser YOLOv8 图标检测器和 Florence-2 图标描述器，均为视觉感知用，不参与推理）。
 
 所有 Kimi API 访问集中在 `agent/llm_client.py` 的 `LLMClient`：
 
@@ -54,8 +54,8 @@ class LLMClient:
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `base_url` | `https://api.moonshot.cn/v1` | OpenAI 兼容根路径；Formula/Files 端点也挂在它下面 |
-| `model` | `kimi-k2.6` | 拼写容错：`kimi-k2-6` 自动归一化为 `kimi-k2.6` |
-| `reasoning_effort` | `None`（不传） | 可选 `minimal/low/medium/high`。**禁止 `"none"`**——该端点对 kimi-k2.6 会拒绝 |
+| `model` | `kimi-k3` | K3 旗舰模型，2.8T 参数，1M 上下文，原生视觉 |
+| `reasoning_effort` | `None`（不传） | K3 仅支持 `"max"`——始终开启思考模式 |
 | `enable_builtin_tools` | `true` | 是否在启动时拉取 Formula 工具定义 |
 | `builtin_tools` | 12 个 URI 列表 | 见 §4 |
 | `enable_file_extract` | `true` | 注册 ReadDocument（§5.2） |
@@ -493,8 +493,8 @@ llm:
   provider: kimi
   base_url: https://api.moonshot.cn/v1
   api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-  model: kimi-k2.6
-  # reasoning_effort: minimal     # minimal/low/medium/high；禁止 "none"
+  model: kimi-k3
+  # reasoning_effort: max     # K3 仅支持 max，始终开启思考
   enable_builtin_tools: true
   enable_file_extract: true       # ReadDocument（§5.2）
   enable_media_upload: true       # ViewMedia/GenerateImage/CaptureWindow（§5.3）

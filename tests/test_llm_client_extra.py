@@ -172,7 +172,7 @@ async def test_chat_uses_registered_tools_by_default():
 
     kwargs = c.client.chat.completions.calls[0]
     assert kwargs["tools"] == c._tools
-    assert kwargs["model"] == "kimi-k2.6"
+    assert kwargs["model"] == "kimi-k3"
     assert "reasoning_effort" not in kwargs  # None -> omitted
 
 
@@ -199,11 +199,11 @@ async def test_chat_explicit_tools_override():
 
 @pytest.mark.asyncio
 async def test_chat_includes_reasoning_effort_when_set():
-    c = _client(reasoning_effort="low")
+    c = _client(reasoning_effort="max")
     c.client = FakeOpenAI()
 
     await c.chat(messages=[])
-    assert c.client.chat.completions.calls[0]["reasoning_effort"] == "low"
+    assert c.client.chat.completions.calls[0]["reasoning_effort"] == "max"
 
 
 @pytest.mark.asyncio

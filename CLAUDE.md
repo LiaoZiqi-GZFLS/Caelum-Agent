@@ -34,7 +34,7 @@ The v8 design doc specifies the following stack:
 
 | Layer | Choice |
 |-------|--------|
-| LLM brain | Kimi K2.6 API (`kimi-k2.6`, base URL `https://api.moonshot.cn/v1`) |
+| LLM brain | Kimi K3 API (`kimi-k3`, base URL `https://api.moonshot.cn/v1`) |
 | Browser control | Playwright MCP (`npx -y @playwright/mcp@latest`) |
 | Desktop control | Windows-MCP (`windows-mcp serve`, official CursorTouch package) |
 | Filesystem control | `@modelcontextprotocol/server-filesystem` (`npx -y ... <allowed-dir>`) |
@@ -127,8 +127,8 @@ python setup.py --skip-smoke-tests
 ```
 
 Key sections in `config.yaml`:
-- `llm`: Kimi API key, model (`kimi-k2.6`), optional `reasoning_effort`, and which Formula tools to register.
-  - Do **not** set `reasoning_effort="none"` for `kimi-k2.6`; omit it or use `minimal/low/medium/high`.
+- `llm`: Kimi API key, model (`kimi-k3`), optional `reasoning_effort`, and which Formula tools to register.
+  - K3 always has thinking on; `reasoning_effort` only supports `"max"`.
   - `moonshot/code-runner:latest` (hyphen) is the correct URI and is available; the registered tool name is `code_runner` (underscore). The local `RestrictedCodeRunner` remains the default code execution backend; enable the Formula `code-runner` as an alternative if you prefer Kimi-side execution.
   - `enable_file_extract` / `enable_media_upload`: toggle the ReadDocument / ViewMedia tools (both default true).
 - `mcp_servers`: commands and arguments for Playwright, Windows, and filesystem MCP servers.

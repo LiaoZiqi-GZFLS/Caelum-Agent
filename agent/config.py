@@ -18,8 +18,8 @@ class LLMConfig(BaseModel):
     provider: str = "kimi"
     base_url: str = "https://api.moonshot.cn/v1"
     api_key: str = Field(repr=False)
-    model: str = "kimi-k2.6"
-    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    model: str = "kimi-k3"
+    reasoning_effort: Literal["max"] | None = None
     enable_builtin_tools: bool = True
     builtin_tools: list[str] = Field(default_factory=list)
     # Register the ReadDocument tool (Kimi Files API file-extract) for binary
@@ -32,8 +32,6 @@ class LLMConfig(BaseModel):
     @field_validator("model")
     @classmethod
     def normalize_model_name(cls, v: str) -> str:
-        if v == "kimi-k2-6":
-            return "kimi-k2.6"
         return v
 
 

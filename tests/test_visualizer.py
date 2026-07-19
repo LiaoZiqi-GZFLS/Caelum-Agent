@@ -9,7 +9,7 @@ from ui_detector.visualizer import visualize_som
 
 def _red_pixels(img: Image.Image) -> int:
     return sum(
-        1 for p in img.getdata() if p[0] > 200 and p[1] < 80 and p[2] < 80
+        1 for p in img.get_flattened_data() if p[0] > 200 and p[1] < 80 and p[2] < 80
     )
 
 
@@ -75,4 +75,4 @@ def test_visualize_som_empty_annotations_returns_unmodified_copy():
 
     assert result.size == image.size
     assert _red_pixels(result) == 0
-    assert list(result.getdata()) == list(image.getdata())
+    assert result.get_flattened_data() == image.get_flattened_data()

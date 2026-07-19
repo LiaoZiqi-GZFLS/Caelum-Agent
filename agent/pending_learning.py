@@ -159,6 +159,6 @@ class LearningSettler:
                 ),
             },
         ]
-        completion = await self.llm.chat(messages, tools=None)
+        completion = await self.llm.chat(messages, tool_choice="none")
         content = completion.choices[0].message.content or ""
         return _parse_verdict(content)

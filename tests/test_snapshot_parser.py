@@ -168,3 +168,139 @@ def test_summarize_tree_box_includes_windows_and_actions():
     assert "显示桌面" in text
     assert "click" in text
     assert "728,1416" in text
+
+
+# ---------------------------------------------------------------------------
+# unwrap_windows_snapshot — edge cases
+# ---------------------------------------------------------------------------
+
+def test_unwrap_windows_snapshot_non_json_object():
+    assert unwrap_windows_snapshot("just some text") == "just some text"
+
+def test_unwrap_windows_snapshot_json_not_list():
+    assert unwrap_windows_snapshot('{"key": "val"}') == '{"key": "val"}'
+
+def test_unwrap_windows_snapshot_empty_string():
+    assert unwrap_windows_snapshot("") == ""
+
+
+# ---------------------------------------------------------------------------
+# parse_windows_snapshot — legacy format
+# ---------------------------------------------------------------------------
+
+LEGACY_SAMPLE = """
+[1] Window 'Calculator'
+  [2] Button '5' (x=500, y=300, w=60, h=40)
+  [3] Button 'equals' (x=560, y=300, w=60, h=40)
+  [4] Text 'Result: 0' (x=500, y=250, w=120, h=30)
+"""
+
+
+def test_parse_windows_snapshot_legacy_format():
+    root = parse_windows_snapshot(LEGACY_SAMPLE)
+    assert len(root.children) == 1
+    calc = root.children[0]
+    assert calc.name == "Calculator"
+    assert len(calc.children) == 3
+    buttons = [c for c in calc.children if c.role == "Button"]
+    assert len(buttons) == 2
+    assert {b.name for b in buttons} == {"5", "equals"}
+
+
+# ---------------------------------------------------------------------------
+# summarize_tree — depth truncation
+# ---------------------------------------------------------------------------
+
+def test_summarize_tree_depth_cap():
+    root = UIElement(element_id="r", role="window", name="root")
+    current = root
+    for i in range(10):
+        child = UIElement(
+            element_id=f"c{i}", role="button", name=f"btn{i}",
+            action="click",
+        )
+        current.children = [child]
+        current = child
+    text = summarize_tree(root, max_depth=3)
+    # Only the first 3 levels are included; beyond is truncated.
+    assert "btn0" in text
+    assert "btn1" in text
+    assert "btn2" in text
+    assert "btn8" not in text  # deep node is silently omitted
+
+
+# ---------------------------------------------------------------------------
+# summarize_tree — element ID edge cases
+# ---------------------------------------------------------------------------
+
+def test_summarize_tree_no_element_id():
+    el = UIElement(element_id=None, role="button", name="Submit", action="click")
+    text = summarize_tree(el)
+    assert "Submit" in text
+    assert "button" in text
+
+def test_summarize_tree_with_center_shows_coordinates():
+    el = UIElement(
+        element_id="x1", role="button", name="OK",
+        center=(100, 200), action="click",
+    )
+    text = summarize_tree(el)
+    assert "@100,200" in text
+
+def test_summarize_tree_root_always_included():
+    # The root node is always included even if non-interactive (depth 0).
+    el = UIElement(element_id="g", role="group", name="Container")
+    text = summarize_tree(el)
+    assert "Container" in text
+    assert "group" in text
+
+
+# ---------------------------------------------------------------------------
+# parse_playwright_snapshot — failure paths
+# ---------------------------------------------------------------------------
+
+def test_parse_playwright_snapshot_non_dict():
+    root = parse_playwright_snapshot("just a string")
+    assert root.role == "document"
+    assert root.name == "browser"
+
+def test_parse_playwright_snapshot_empty():
+    root = parse_playwright_snapshot("")
+    assert root.role == "document"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases — empty names, special characters
+# ---------------------------------------------------------------------------
+
+def test_parse_windows_snapshot_empty_element_name():
+    text = """
+[1] Window 'Test'
+  [2] Button '' (x=10, y=10, w=50, h=50)
+"""
+    root = parse_windows_snapshot(text)
+    btn = root.children[0].children[0]
+    assert btn.name == ""
+
+def test_parse_windows_snapshot_special_chars_in_name():
+    text = """
+[1] Window 'A&B <Test>'
+  [2] Edit 'C:\\path\\to\\file.txt' (x=0, y=0, w=100, h=20)
+"""
+    root = parse_windows_snapshot(text)
+    assert root.children[0].name == "A&B <Test>"
+    edit = root.children[0].children[0]
+    assert edit.name == "C:\\path\\to\\file.txt"
+
+def test_parse_playwright_snapshot_deeply_nested():
+    def _node(depth):
+        n = {"role": "group", "name": f"level{depth}", "ref": f"r{depth}"}
+        if depth > 1:
+            n["children"] = [_node(depth - 1)]
+        return n
+    import yaml
+    text = yaml.dump(_node(5))
+
+    root = parse_playwright_snapshot(text)
+    assert root.role == "group"
+    assert root.element_id == "r5"

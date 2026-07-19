@@ -98,7 +98,7 @@ async def test_smoke_kimi_bad_key():
             "provider": "kimi",
             "base_url": "https://api.moonshot.cn/v1",
             "api_key": "sk-deadbeef",
-            "model": "kimi-k2.6",
+            "model": "kimi-k3",
         },
         mcp_servers={},
     )
@@ -198,7 +198,7 @@ def test_smoke_config_loads():
 
     config = load_config()
     assert config.llm.api_key.startswith("sk-"), "API key should start with sk-"
-    assert config.llm.model == "kimi-k2.6"
+    assert config.llm.model == "kimi-k3"
     configured = [
         name
         for name in ("playwright", "windows", "filesystem")

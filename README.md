@@ -16,7 +16,7 @@ Caelum-Agent is a personal Windows CLI desktop-operation agent. Give it natural-
 - **Multimodal perception:** screenshot + OCR + accessibility tree + YOLO (OmniParser) SoM annotations.
 - **Browser automation:** via Playwright MCP and accessibility-tree-first interactions.
 - **Desktop automation:** via Windows-MCP and UIA/A11y-first interactions, falling back to coordinate/image methods.
-- **Kimi K2.6 brain:** OpenAI-compatible API with Formula tools and local function tools.
+- **Kimi K3 brain:** OpenAI-compatible API with Formula tools and local function tools.
 - **Three concurrent MCP servers:** Playwright, Windows, and filesystem in one asyncio loop.
 - **Security guard:** four-level classification (read / write_safe / write_risky / destructive) with mandatory human approval for risky and destructive actions.
 - **Kill switch:** `Ctrl+C`, `/stop`, and `/quit` to cancel or exit gracefully.

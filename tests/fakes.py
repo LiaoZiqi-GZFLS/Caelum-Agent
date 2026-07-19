@@ -58,6 +58,16 @@ class FakeLLM:
     def tool_names(self) -> list[str]:
         return self.tools
 
+    def set_active_groups(self, groups: set[str] | None) -> None:
+        pass  # FakeLLM always returns all tools regardless of groups
+
+    @property
+    def token_usage(self) -> dict[str, int]:
+        return {"prompt": 0, "completion": 0, "total": 0}
+
+    def reset_usage(self) -> None:
+        pass
+
     async def initialize(self) -> None:
         pass
 
@@ -234,11 +244,11 @@ class TriggeringLLM(FakeLLM):
         self._killswitch = killswitch
 
     async def chat(
-        self, messages: list[dict[str, Any]], tools: Any = None
+        self, messages: list[dict[str, Any]], tools: Any = None, **kwargs: Any
     ) -> Any:
         if self._chat_index == 0:
             await self._killswitch.trigger()
-        return await super().chat(messages, tools)
+        return await super().chat(messages, tools, **kwargs)
 
 
 # -- Helpers (formerly in test_orchestrator.py) --------------------------------

@@ -156,6 +156,23 @@ COMPLETE_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
+WAIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "seconds": {
+            "type": "number",
+            "description": (
+                "How many seconds to wait (0.5–30.0). Use for loading spinners, "
+                "animations, UI transitions, download dialogs, or any situation "
+                "where the screen needs time to settle before the next action. "
+                "Prefer short waits (≤3s) and re-perceive afterwards."
+            ),
+        },
+    },
+    "required": ["seconds"],
+}
+
+
 REQUEST_HUMAN_HELP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

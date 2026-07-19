@@ -21,7 +21,7 @@ def temp_config(tmp_path: Path, monkeypatch: Any) -> tuple[Path, Path]:
         "  provider: kimi\n"
         "  base_url: https://api.moonshot.cn/v1\n"
         "  api_key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
-        "  model: kimi-k2.6\n"
+        "  model: kimi-k3\n"
         "mcp_servers:\n"
         "  playwright:\n"
         "    command: npx\n"

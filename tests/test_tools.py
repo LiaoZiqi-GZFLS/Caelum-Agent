@@ -297,3 +297,98 @@ def test_build_mcp_tools_warns_windows_label_freshness():
     # Snapshot itself and non-windows tools are untouched.
     assert "invalidat" not in tools["windows__Snapshot"].lower()
     assert "invalidat" not in tools["playwright__browser_click"].lower()
+
+
+# ---------------------------------------------------------------------------
+# build_mcp_tools — edge cases
+# ---------------------------------------------------------------------------
+
+def test_build_mcp_tools_empty():
+    from agent.tools import build_mcp_tools
+
+    mcp = FakeMCP([])
+    assert build_mcp_tools(mcp) == []
+
+def test_build_mcp_tools_preserves_schema():
+    from agent.tools import build_mcp_tools
+
+    mcp = FakeMCP([
+        {"server": "w", "name": "X", "description": "d",
+         "schema": {"type": "object", "properties": {"x": {"type": "number"}}}},
+    ])
+    tools = build_mcp_tools(mcp)
+    assert tools[0]["function"]["parameters"] == {
+        "type": "object", "properties": {"x": {"type": "number"}},
+    }
+
+
+# ---------------------------------------------------------------------------
+# CodeRunner — AST edge cases
+# ---------------------------------------------------------------------------
+
+def test_ast_allowed_multiline(runner):
+    result = runner.run("x = 1\ny = 2\nprint(x + y)")
+    assert "3" in result
+
+def test_ast_rejects_import_as(runner):
+    result = runner.run("import os as _os\nprint(_os.getcwd())")
+    assert result.startswith("[error]")
+
+def test_ast_rejects_from_import(runner):
+    result = runner.run("from os import getcwd\nprint(getcwd())")
+    assert result.startswith("[error]")
+
+def test_ast_allows_safe_builtins(runner):
+    result = runner.run("print(len([1, 2, 3]))")
+    assert "3" in result
+
+def test_ast_rejects_exec(runner):
+    result = runner.run("exec('print(1)')")
+    assert result.startswith("[error]")
+
+def test_ast_rejects_eval(runner):
+    result = runner.run("eval('1 + 1')")
+    assert result.startswith("[error]")
+
+
+# ---------------------------------------------------------------------------
+# Schema structure validation
+# ---------------------------------------------------------------------------
+
+def test_all_schemas_are_objects():
+    from agent.tools import (
+        COMPLETE_TASK_SCHEMA,
+        DESKTOP_INTERACT_SCHEMA,
+        NEARBY_LABELS_SCHEMA,
+        PREVIEW_POINTS_SCHEMA,
+        UPGRADE_VISION_SCHEMA,
+        ZOOM_REGION_SCHEMA,
+    )
+    schemas = [
+        DESKTOP_INTERACT_SCHEMA,
+        NEARBY_LABELS_SCHEMA,
+        ZOOM_REGION_SCHEMA,
+        UPGRADE_VISION_SCHEMA,
+        PREVIEW_POINTS_SCHEMA,
+        COMPLETE_TASK_SCHEMA,
+    ]
+    for s in schemas:
+        assert s["type"] == "object"
+        assert "properties" in s
+
+def test_desktop_interact_schema_enforces_label_required():
+    from agent.tools import DESKTOP_INTERACT_SCHEMA
+
+    assert "label" in DESKTOP_INTERACT_SCHEMA["required"]
+    assert "label" in DESKTOP_INTERACT_SCHEMA["properties"]
+    assert DESKTOP_INTERACT_SCHEMA["properties"]["label"]["type"] == "integer"
+
+def test_desktop_interact_schema_actions():
+    from agent.tools import DESKTOP_INTERACT_SCHEMA
+
+    actions = DESKTOP_INTERACT_SCHEMA["properties"]["action"]["enum"]
+    assert "click" in actions
+    assert "double_click" in actions
+    assert "type" in actions
+    assert "scroll_down" in actions
+    assert "scroll_up" in actions

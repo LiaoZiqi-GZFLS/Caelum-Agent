@@ -164,7 +164,7 @@ class SkillLearner:
             },
         ]
         completion = await self.llm_client.chat(
-            messages, tools=None, response_format=_JSON_MODE
+            messages, tool_choice="none", response_format=_JSON_MODE
         )
         return self._normalize_skill(self._parse_json_response(completion))
 
@@ -210,7 +210,7 @@ class SkillLearner:
             },
         ]
         completion = await self.llm_client.chat(
-            messages, tools=None, response_format=_JSON_MODE
+            messages, tool_choice="none", response_format=_JSON_MODE
         )
         return self._normalize_skill(self._parse_json_response(completion))
 

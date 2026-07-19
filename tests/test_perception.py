@@ -19,7 +19,7 @@ def _make_config(tmp_path: Path) -> Config:
             "provider": "kimi",
             "base_url": "https://api.moonshot.cn/v1",
             "api_key": "test",
-            "model": "kimi-k2.6",
+            "model": "kimi-k3",
             "enable_builtin_tools": False,
             "builtin_tools": [],
         },

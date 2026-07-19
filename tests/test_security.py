@@ -67,3 +67,140 @@ def test_auto_approve_destructive_skips_typed_confirmation(monkeypatch):
     approval = guard.check("destructive", {"server": "windows", "tool": "PowerShell"})
     assert approval.allowed
     assert "auto-approved" in approval.reason
+
+
+# ---------------------------------------------------------------------------
+# _summarize
+# ---------------------------------------------------------------------------
+
+def test_summarize_formats_action():
+    summary = SecurityGuard._summarize(
+        {"server": "windows", "tool": "Click", "args": {"label": 5}}
+    )
+    assert summary == "windows/Click(label=5)"
+
+def test_summarize_empty_args():
+    summary = SecurityGuard._summarize({"server": "playwright", "tool": "browser_navigate"})
+    assert "playwright/browser_navigate" in summary
+    assert summary.endswith("()")
+
+def test_summarize_missing_keys():
+    summary = SecurityGuard._summarize({})
+    assert "unknown/unknown()" == summary
+
+def test_summarize_special_chars_in_args():
+    summary = SecurityGuard._summarize(
+        {"server": "w", "tool": "t", "args": {"text": "hello world", "n": 1}}
+    )
+    assert "w/t(text='hello world', n=1)" == summary
+
+
+# ---------------------------------------------------------------------------
+# _request_confirmation — no callback
+# ---------------------------------------------------------------------------
+
+def test_no_callback_handler():
+    guard = SecurityGuard(SecurityConfig(), confirm_callback=None)
+    approval = guard.check("write_risky", {"server": "windows", "tool": "Click"})
+    assert not approval.allowed
+    assert "no confirmation handler" in approval.reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# _request_confirmation — callback deny / allow
+# ---------------------------------------------------------------------------
+
+def test_human_denied_via_callback():
+    guard = SecurityGuard(
+        SecurityConfig(),
+        confirm_callback=lambda summary, action: False,
+    )
+    approval = guard.check("write_risky", {"server": "windows", "tool": "Type"})
+    assert not approval.allowed
+    assert "human-denied" in approval.reason
+
+def test_human_confirmed_via_callback():
+    guard = SecurityGuard(
+        SecurityConfig(),
+        confirm_callback=lambda summary, action: True,
+    )
+    approval = guard.check("write_risky", {"server": "windows", "tool": "Type"})
+    assert approval.allowed
+    assert "human-confirmed" in approval.reason
+
+
+# ---------------------------------------------------------------------------
+# _typed_confirmation
+# ---------------------------------------------------------------------------
+
+def test_typed_confirmation_success(monkeypatch):
+    guard = SecurityGuard(
+        SecurityConfig(),
+        confirm_callback=lambda summary, action: True,
+    )
+    monkeypatch.setattr("builtins.input", lambda _: "w/t(k=1)")
+    assert guard._typed_confirmation("w/t(k=1)") is True
+
+def test_typed_confirmation_mismatch(monkeypatch):
+    guard = SecurityGuard(
+        SecurityConfig(),
+        confirm_callback=lambda summary, action: True,
+    )
+    monkeypatch.setattr("builtins.input", lambda _: "wrong summary")
+    assert guard._typed_confirmation("w/t(k=1)") is False
+
+def test_typed_confirmation_eof(monkeypatch):
+    guard = SecurityGuard(
+        SecurityConfig(),
+        confirm_callback=lambda summary, action: True,
+    )
+    monkeypatch.setattr("builtins.input", lambda _: (_ for _ in ()).throw(EOFError()))
+    assert guard._typed_confirmation("w/t(k=1)") is False
+
+def test_typed_confirmation_callback_denied():
+    guard = SecurityGuard(
+        SecurityConfig(),
+        confirm_callback=lambda summary, action: False,
+    )
+    assert guard._typed_confirmation("w/t(k=1)") is False
+
+def test_typed_confirmation_no_callback():
+    guard = SecurityGuard(SecurityConfig(), confirm_callback=None)
+    assert guard._typed_confirmation("w/t(k=1)") is False
+
+
+# ---------------------------------------------------------------------------
+# check — edge cases
+# ---------------------------------------------------------------------------
+
+def test_destructive_allows_when_config_disabled():
+    cfg = SecurityConfig(destructive_requires_approval=False)
+    guard = SecurityGuard(cfg)
+    approval = guard.check("destructive", {"server": "windows", "tool": "PowerShell"})
+    assert approval.allowed
+    assert "default allow" in approval.reason
+
+def test_default_allow_unknown_level():
+    guard = SecurityGuard(SecurityConfig())
+    approval = guard.check("custom_unknown", {"server": "x", "tool": "y"})
+    assert approval.allowed
+    assert "default allow" in approval.reason
+
+
+# ---------------------------------------------------------------------------
+# classify_tool_call — edge cases
+# ---------------------------------------------------------------------------
+
+def test_classify_case_insensitive():
+    guard = SecurityGuard(SecurityConfig())
+    assert guard.classify_tool_call("Windows", "DELETE") == "destructive"
+    assert guard.classify_tool_call("Windows", "CLICK") == "write_risky"
+
+def test_classify_empty_names():
+    guard = SecurityGuard(SecurityConfig())
+    assert guard.classify_tool_call("", "") == "read"
+
+def test_classify_partial_match():
+    guard = SecurityGuard(SecurityConfig())
+    assert guard.classify_tool_call("windows", "DeleteFile") == "destructive"
+    assert guard.classify_tool_call("windows", "RegistryKey") == "destructive"
